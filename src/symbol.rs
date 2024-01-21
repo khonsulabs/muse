@@ -5,7 +5,7 @@ use interner::global::{GlobalString, StaticPooledString, StringPool};
 
 static SYMBOLS: StringPool = StringPool::new();
 
-#[derive(Clone, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub struct Symbol(GlobalString);
 
 static EMPTY: StaticPooledString = SYMBOLS.get_static("");

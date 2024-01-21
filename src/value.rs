@@ -6,7 +6,7 @@ use std::sync::Arc;
 use ahash::AHasher;
 
 use crate::symbol::Symbol;
-use crate::{Fault, Vm};
+use crate::vm::{Fault, Vm};
 
 #[derive(Clone, Debug)]
 pub enum Value {
