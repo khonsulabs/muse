@@ -11,4 +11,14 @@ alot = "0.3.1"
 interner = "0.2.1"
 kempt = "0.2.3"
 ordered-varint = "2.0.0"
+serde = { version = "1.0.195", features = ["derive"] }
+unicode-ident = "1.0.12"
 # cushy = { path = "../cushy" }
+
+rsn = "0.1"
+
+[lints.clippy]
+pedantic = "warn"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

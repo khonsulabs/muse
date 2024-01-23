@@ -1,14 +1,18 @@
 use std::fmt::{Debug, Display};
 use std::ops::{Add, Deref};
+use std::sync::OnceLock;
 
+use ahash::RandomState;
 use interner::global::{GlobalString, StaticPooledString, StringPool};
+use serde::de::Visitor;
+use serde::{Deserialize, Serialize};
 
-static SYMBOLS: StringPool = StringPool::new();
+static SYMBOLS: StringPool<RandomState> = StringPool::with_hasher_init(RandomState::new);
 
 #[derive(Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
-pub struct Symbol(GlobalString);
+pub struct Symbol(GlobalString<RandomState>);
 
-static EMPTY: StaticPooledString = SYMBOLS.get_static("");
+static EMPTY: StaticPooledString<RandomState> = SYMBOLS.get_static("");
 
 impl Symbol {
     pub fn empty() -> Self {
@@ -73,5 +77,75 @@ impl<'a, 'b> Add<&'a Symbol> for &'b Symbol {
         out.push_str(self);
         out.push_str(rhs);
         Symbol::from(out)
+    }
+}
+
+impl Serialize for Symbol {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Symbol {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_str(SymbolVisitor)
+    }
+}
+struct SymbolVisitor;
+
+impl<'de> Visitor<'de> for SymbolVisitor {
+    type Value = Symbol;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(formatter, "an Symbol")
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Symbol::from(v))
+    }
+
+    fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Symbol::from(v))
+    }
+}
+
+pub struct StaticSymbol(OnceLock<Symbol>, &'static str);
+
+impl StaticSymbol {
+    #[must_use]
+    pub const fn new(symbol: &'static str) -> Self {
+        Self(OnceLock::new(), symbol)
+    }
+}
+
+impl Debug for StaticSymbol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(&self.0, f)
+    }
+}
+
+impl Display for StaticSymbol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self.1, f)
+    }
+}
+
+impl Deref for StaticSymbol {
+    type Target = Symbol;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.get_or_init(|| Symbol::from(self.1))
     }
 }

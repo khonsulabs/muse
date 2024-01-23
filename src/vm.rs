@@ -4,11 +4,11 @@ use std::hash::Hash;
 use std::ops::{Add, Index, IndexMut};
 use std::sync::Arc;
 
-use bitcode::{Arg, AsArg};
 use kempt::Map;
 use ops::{Destination, Instruction, Source};
+use serde::{Deserialize, Serialize};
 
-use self::bitcode::{BitcodeEncoder, DecodeError};
+use self::bitcode::{OpDestination, ValueOrSource};
 use crate::symbol::Symbol;
 use crate::value::Value;
 
@@ -111,24 +111,29 @@ impl Vm {
         }
     }
 
+    #[must_use]
     pub fn current_frame(&self) -> &[Value] {
         &self.stack[self.frames[self.current_frame].start..self.frames[self.current_frame].end]
     }
 
+    #[must_use]
     pub fn current_frame_mut(&mut self) -> &mut [Value] {
         &mut self.stack[self.frames[self.current_frame].start..self.frames[self.current_frame].end]
     }
 
+    #[must_use]
     pub fn current_frame_start(&self) -> Option<Variable> {
         (self.frames[self.current_frame].end > 0)
             .then_some(Variable(self.frames[self.current_frame].start))
     }
 
+    #[must_use]
     pub fn current_frame_size(&self) -> usize {
         self.frames[self.current_frame].end - self.frames[self.current_frame].start
     }
 
-    pub fn execute(&mut self, mut code: Code) -> Result<(), Fault> {
+    pub fn execute(&mut self, code: &Code) -> Result<Value, Fault> {
+        let mut code = code.clone();
         self.frames[self.current_frame].code = code.clone();
         self.frames[self.current_frame].instruction = 0;
 
@@ -136,7 +141,7 @@ impl Vm {
         loop {
             match code.step(self, self.frames[self.current_frame].instruction)? {
                 StepResult::Complete if self.current_frame > 0 => self.exit_frame()?,
-                StepResult::Complete => return Ok(()),
+                StepResult::Complete => break,
                 StepResult::NextAddress(addr) => {
                     self.frames[self.current_frame].instruction = addr;
                 }
@@ -147,10 +152,12 @@ impl Vm {
                 code = self.frames[self.current_frame].code.clone();
             }
         }
+
+        Ok(self.registers[1].take())
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum Register {
     R0 = 0,
@@ -210,13 +217,17 @@ impl Index<Register> for Vm {
 
 impl IndexMut<Register> for Vm {
     fn index_mut(&mut self, index: Register) -> &mut Self::Output {
-        &mut self.stack[usize::from(index as u8)]
+        &mut self.registers[usize::from(index as u8)]
     }
 }
 
 impl Source for Register {
     fn load(&self, vm: &mut Vm) -> Result<Value, Fault> {
         Ok(vm[*self].clone())
+    }
+
+    fn as_source(&self) -> ValueOrSource {
+        ValueOrSource::Register(*self)
     }
 }
 
@@ -225,11 +236,9 @@ impl Destination for Register {
         vm[*self] = value;
         Ok(())
     }
-}
 
-impl AsArg for Register {
-    fn as_arg(&self) -> Arg {
-        Arg::Register { index: *self as u8 }
+    fn as_dest(&self) -> OpDestination {
+        OpDestination::Register(*self)
     }
 }
 
@@ -313,6 +322,7 @@ impl Code {
         self.push_boxed(Arc::new(instruction));
     }
 
+    #[must_use]
     pub fn with<I>(mut self, instruction: I) -> Self
     where
         I: Instruction,
@@ -334,63 +344,12 @@ impl Code {
         }
     }
 
-    pub fn encode(&self) -> Vec<u8> {
-        let mut encoder = BitcodeEncoder::default();
-        for instruction in self.instructions.iter() {
-            instruction.encode_into(&mut encoder);
-        }
-
-        encoder.finish()
-    }
-
-    pub fn decode_from(encoded: &[u8]) -> Result<Self, DecodeError> {
-        bitcode::decode(encoded)
-    }
+    // pub fn decode_from(encoded: &[u8]) -> Result<Self, DecodeError> {
+    //     bitcode::decode(encoded)
+    // }
 }
 
 enum StepResult {
     Complete,
     NextAddress(usize),
 }
-
-// #[derive(Default, Debug, Clone)]
-// pub struct Code {
-//     code: Vec<u8>,
-//     statics: Vec<Value>,
-// }
-
-// impl Code {
-//     pub fn next_instruction(&self, offset: usize) -> Result<DecodedInstruction, CodeError> {
-//         let code = self
-//             .code
-//             .get(offset)
-//             .ok_or(CodeError::InvalidInstructionAddress)?;
-//         let opcode = code & 0xff;
-//         let code = code >> 8;
-//         let arg1 = code >> 8;
-
-//         match opcode {}
-//     }
-// }
-
-// #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-// pub enum CodeError {
-//     UnknownOpcode,
-//     InvalidInstructionAddress,
-// }
-
-// pub struct DecodedInstruction {
-//     pub next: usize,
-//     pub decoded: Instruction,
-// }
-
-// pub struct Instruction {
-//     pub opcode: Opcode,
-//     pub args: [IArg; 3],
-// }
-
-// pub enum IArg {
-//     None,
-//     Static(u32),
-//     Stack(u32),
-// }

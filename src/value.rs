@@ -8,8 +8,9 @@ use ahash::AHasher;
 use crate::symbol::Symbol;
 use crate::vm::{Fault, Vm};
 
-#[derive(Clone, Debug)]
+#[derive(Default, Clone, Debug)]
 pub enum Value {
+    #[default]
     Nil,
     Int(i64),
     Float(f64),
@@ -18,20 +19,25 @@ pub enum Value {
 }
 
 impl Value {
+    #[must_use]
     pub const fn is_nil(&self) -> bool {
         matches!(self, Self::Nil)
     }
 
+    #[must_use]
     pub fn as_i64(&self) -> Option<i64> {
         match self {
             Value::Int(value) => Some(*value),
+            #[allow(clippy::cast_possible_truncation)]
             Value::Float(value) => Some(*value as i64),
             _ => None,
         }
     }
 
+    #[must_use]
     pub fn as_f64(&self) -> Option<f64> {
         match self {
+            #[allow(clippy::cast_precision_loss)]
             Value::Int(value) => Some(*value as f64),
             Value::Float(value) => Some(*value),
             _ => None,
@@ -53,14 +59,14 @@ impl Value {
                     .first()
                     .ok_or(Fault::IncorrectNumberOfArguments)?
                     .clone();
-                self.add(vm, rhs)
+                self.add(vm, &rhs)
             }
             (Value::Dynamic(dynamic), _) => dynamic.0.invoke(vm, name),
             _ => Err(Fault::UnknownSymbol(name.clone())),
         }
     }
 
-    pub fn add(&self, vm: &mut Vm, rhs: Self) -> Result<Value, Fault> {
+    pub fn add(&self, vm: &mut Vm, rhs: &Self) -> Result<Value, Fault> {
         match (self, rhs) {
             (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
 
@@ -70,16 +76,18 @@ impl Value {
             }
             (lhs, Value::Symbol(rhs)) => {
                 let lhs = lhs.to_string(vm)?;
-                Ok(Value::Symbol(&lhs + &rhs))
+                Ok(Value::Symbol(&lhs + rhs))
             }
 
-            (Value::Int(lhs), Value::Int(rhs)) => Ok(Self::Int(lhs.saturating_add(rhs))),
+            (Value::Int(lhs), Value::Int(rhs)) => Ok(Self::Int(lhs.saturating_add(*rhs))),
 
+            #[allow(clippy::cast_precision_loss)]
             (Value::Int(lhs), Value::Float(rhs)) => Ok(Value::Float(*lhs as f64 + rhs)),
-            (Value::Float(lhs), Value::Int(rhs)) => Ok(Value::Float(lhs + rhs as f64)),
+            #[allow(clippy::cast_precision_loss)]
+            (Value::Float(lhs), Value::Int(rhs)) => Ok(Value::Float(lhs + *rhs as f64)),
             (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Float(lhs + rhs)),
 
-            (Value::Dynamic(lhs), rhs) => lhs.add(vm, rhs),
+            (Value::Dynamic(lhs), rhs) => lhs.add(vm, rhs.clone()),
             (lhs, Value::Dynamic(rhs)) => rhs.add_right(vm, lhs),
         }
     }
@@ -90,7 +98,9 @@ impl Value {
 
             (Value::Int(lhs), Value::Int(rhs)) => Ok(Self::Int(lhs.saturating_sub(*rhs))),
 
+            #[allow(clippy::cast_precision_loss)]
             (Value::Int(lhs), Value::Float(rhs)) => Ok(Value::Float(*lhs as f64 - rhs)),
+            #[allow(clippy::cast_precision_loss)]
             (Value::Float(lhs), Value::Int(rhs)) => Ok(Value::Float(lhs - *rhs as f64)),
             (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Float(lhs - rhs)),
 
@@ -111,8 +121,33 @@ impl Value {
 
             (Value::Int(lhs), Value::Int(rhs)) => Ok(Self::Int(lhs.saturating_mul(*rhs))),
 
+            #[allow(clippy::cast_precision_loss)]
             (Value::Int(lhs), Value::Float(rhs)) => Ok(Value::Float(*lhs as f64 * rhs)),
+            #[allow(clippy::cast_precision_loss)]
             (Value::Float(lhs), Value::Int(rhs)) => Ok(Value::Float(lhs * *rhs as f64)),
+            (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Float(lhs * rhs)),
+
+            (Value::Dynamic(lhs), rhs) => lhs.mul(vm, rhs),
+            (lhs, Value::Dynamic(rhs)) => rhs.mul_right(vm, lhs),
+            _ => Err(Fault::UnsupportedOperation),
+        }
+    }
+
+    pub fn pow(&self, vm: &mut Vm, exp: &Self) -> Result<Value, Fault> {
+        match (self, exp) {
+            (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
+
+            (Value::Int(lhs), Value::Int(rhs)) => Ok(if rhs.is_negative() {
+                #[allow(clippy::cast_precision_loss)]
+                Self::Float(powf64_i64(*lhs as f64, *rhs))
+            } else {
+                Self::Int(lhs.saturating_pow(u32::try_from(*rhs).unwrap_or(u32::MAX)))
+            }),
+
+            #[allow(clippy::cast_precision_loss)]
+            (Value::Int(lhs), Value::Float(rhs)) => Ok(Value::Float((*lhs as f64).powf(*rhs))),
+            #[allow(clippy::cast_precision_loss)]
+            (Value::Float(lhs), Value::Int(rhs)) => Ok(Value::Float(powf64_i64(*lhs, *rhs))),
             (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Float(lhs * rhs)),
 
             (Value::Dynamic(lhs), rhs) => lhs.mul(vm, rhs),
@@ -129,6 +164,7 @@ impl Value {
                 todo!("split string using division")
             }
 
+            #[allow(clippy::cast_precision_loss)]
             (Value::Int(lhs), Value::Int(rhs)) => {
                 if *rhs != 0 {
                     Ok(Value::Float(*lhs as f64 / *rhs as f64))
@@ -137,7 +173,9 @@ impl Value {
                 }
             }
 
+            #[allow(clippy::cast_precision_loss)]
             (Value::Int(lhs), Value::Float(rhs)) => Ok(Value::Float(*lhs as f64 / rhs)),
+            #[allow(clippy::cast_precision_loss)]
             (Value::Float(lhs), Value::Int(rhs)) => {
                 if *rhs != 0 {
                     Ok(Value::Float(lhs / *rhs as f64))
@@ -159,7 +197,9 @@ impl Value {
 
             (Value::Int(lhs), Value::Int(rhs)) => Ok(Self::Int(lhs.saturating_div(*rhs))),
 
+            #[allow(clippy::cast_possible_truncation)]
             (Value::Int(lhs), Value::Float(rhs)) => Ok(Value::Int(*lhs / *rhs as i64)),
+            #[allow(clippy::cast_possible_truncation)]
             (Value::Float(lhs), Value::Int(rhs)) => {
                 if *rhs != 0 {
                     Ok(Value::Int(*lhs as i64 / *rhs))
@@ -167,6 +207,7 @@ impl Value {
                     Err(Fault::DivideByZero)
                 }
             }
+            #[allow(clippy::cast_possible_truncation)]
             (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Int(*lhs as i64 / *rhs as i64)),
 
             (Value::Dynamic(lhs), rhs) => lhs.divi(vm, rhs),
@@ -181,7 +222,9 @@ impl Value {
 
             (Value::Int(lhs), Value::Int(rhs)) => Ok(Self::Int(lhs % rhs)),
 
+            #[allow(clippy::cast_possible_truncation)]
             (Value::Int(lhs), Value::Float(rhs)) => Ok(Value::Int(*lhs % *rhs as i64)),
+            #[allow(clippy::cast_possible_truncation)]
             (Value::Float(lhs), Value::Int(rhs)) => {
                 if *rhs != 0 {
                     Ok(Value::Int(*lhs as i64 % *rhs))
@@ -189,6 +232,7 @@ impl Value {
                     Err(Fault::DivideByZero)
                 }
             }
+            #[allow(clippy::cast_possible_truncation)]
             (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Int(*lhs as i64 % *rhs as i64)),
 
             (Value::Dynamic(lhs), rhs) => lhs.rem(vm, rhs),
@@ -231,6 +275,20 @@ impl Value {
             _ => core::mem::discriminant(self) == core::mem::discriminant(other),
         }
     }
+
+    #[must_use]
+    pub fn take(&mut self) -> Value {
+        std::mem::take(self)
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn powf64_i64(base: f64, exp: i64) -> f64 {
+    if let Ok(exp) = i32::try_from(exp) {
+        base.powi(exp)
+    } else {
+        base.powf(exp as f64)
+    }
 }
 
 #[derive(Clone)]
@@ -244,6 +302,7 @@ impl Dynamic {
         Self(Arc::new(Box::new(value)))
     }
 
+    #[must_use]
     pub fn downcast_ref<T>(&self) -> Option<&T>
     where
         T: 'static,
@@ -264,6 +323,7 @@ impl Dynamic {
         dynamic.as_any_mut().downcast_mut()
     }
 
+    #[must_use]
     pub fn ptr_eq(a: &Dynamic, b: &Dynamic) -> bool {
         Arc::ptr_eq(&a.0, &b.0)
     }
