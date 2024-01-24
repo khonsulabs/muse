@@ -4,11 +4,19 @@ use muse::vm::Vm;
 
 fn main() {
     let mut vm = Vm::default();
-    let code = Compiler::compile("{1 + 2 + 3; 1 + 2 - 3}").unwrap();
+    let code = Compiler::compile(
+        r"
+        {
+            let a = 1 + let a = 2;
+            a + 3
+        }
+        ",
+    )
+    .unwrap();
+    let result = vm.execute(&code).unwrap();
+    assert_eq!(result.as_i64(), Some(6));
     let bitcode = BitcodeBlock::from(&code);
     println!("{}", rsn::to_string_pretty(&bitcode));
-    let result = vm.execute(&code).unwrap();
-    assert_eq!(result.as_i64(), Some(0));
     // let mut vm = Vm::default();
     // let code = Code::default().with(Allocate(1)).with(Add {
     //     lhs: 1,

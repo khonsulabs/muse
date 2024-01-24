@@ -1,7 +1,10 @@
 use std::mem;
 
+use kempt::Map;
+
+use crate::symbol::Symbol;
 use crate::syntax::{
-    self, BinaryExpression, BinaryKind, Expression, LogicalKind, Ranged, UnaryKind,
+    self, BinaryExpression, BinaryKind, Expression, LogicalKind, Ranged, UnaryKind, Variable,
 };
 use crate::vm::bitcode::{BitcodeBlock, Op, OpDestination, ValueOrSource};
 use crate::vm::ops::Stack;
@@ -55,7 +58,7 @@ impl Compiler {
             }
         };
 
-        Scope::root(&mut self)
+        Scope::root(&mut self, &mut Map::new())
             .compile_expression(&expression, OpDestination::Register(Register::R1));
         self.code.push(Op::Unary {
             source: ValueOrSource::Int(1),
@@ -92,20 +95,34 @@ impl Compiler {
     }
 }
 
+struct BlockVariable {
+    stack: Stack,
+    mutable: bool,
+}
+
+struct LocalDeclaration {
+    name: Symbol,
+    previous_declaration: Option<BlockVariable>,
+}
+
 struct Scope<'a> {
     compiler: &'a mut Compiler,
     local_start: usize,
     local_count: usize,
     variables: usize,
+    declared_variables: &'a mut Map<Symbol, BlockVariable>,
+    local_declarations: Vec<LocalDeclaration>,
 }
 
 impl<'a> Scope<'a> {
-    fn root(compiler: &'a mut Compiler) -> Self {
+    fn root(compiler: &'a mut Compiler, variables: &'a mut Map<Symbol, BlockVariable>) -> Self {
         Self {
             local_start: compiler.variables,
             compiler,
             local_count: 0,
             variables: 0,
+            declared_variables: variables,
+            local_declarations: Vec::new(),
         }
     }
 
@@ -113,12 +130,14 @@ impl<'a> Scope<'a> {
         Scope {
             local_start: self.compiler.variables,
             compiler: self.compiler,
+            declared_variables: self.declared_variables,
             local_count: 0,
             variables: 0,
+            local_declarations: Vec::new(),
         }
     }
 
-    fn new_variable(&mut self) -> Stack {
+    fn new_temporary(&mut self) -> Stack {
         if self.variables < self.local_count {
             let id = self.variables + self.local_start;
             self.variables += 1;
@@ -141,9 +160,29 @@ impl<'a> Scope<'a> {
                 dest,
                 kind: UnaryKind::Copy,
             }),
-            Expression::Int(_) => todo!(),
-            Expression::Float(_) => todo!(),
-            Expression::Lookup(_) => todo!(),
+            Expression::Int(int) => self.compiler.code.push(Op::Unary {
+                source: ValueOrSource::Int(*int),
+                dest,
+                kind: UnaryKind::Copy,
+            }),
+            Expression::Float(float) => self.compiler.code.push(Op::Unary {
+                source: ValueOrSource::Float(*float),
+                dest,
+                kind: UnaryKind::Copy,
+            }),
+            Expression::Lookup(name) => {
+                if let Some(var) = self.declared_variables.get(name) {
+                    self.compiler.code.push(Op::Unary {
+                        source: ValueOrSource::Stack(var.stack),
+                        dest,
+                        kind: UnaryKind::Copy,
+                    });
+                } else {
+                    self.compiler
+                        .errors
+                        .push(Ranged::new(expr.range(), Error::UnknownVariable));
+                }
+            }
             Expression::Unary(_) => todo!(),
             Expression::Binary(binop) => {
                 self.compile_binop(binop, dest);
@@ -155,7 +194,34 @@ impl<'a> Scope<'a> {
                     block.reuse_locals();
                 }
             }
+            Expression::Variable(decl) => {
+                self.declare_variable(decl, dest);
+            }
         }
+    }
+
+    fn declare_variable(&mut self, decl: &Variable, dest: OpDestination) {
+        let stack = self.new_temporary();
+        self.compile_expression(&decl.value, OpDestination::Stack(stack));
+        self.compiler.code.push(Op::Unary {
+            source: ValueOrSource::Stack(stack),
+            dest,
+            kind: UnaryKind::Copy,
+        });
+        let previous_declaration = self
+            .declared_variables
+            .insert(
+                decl.name.clone(),
+                BlockVariable {
+                    stack,
+                    mutable: decl.mutable,
+                },
+            )
+            .map(|field| field.value);
+        self.local_declarations.push(LocalDeclaration {
+            name: decl.name.clone(),
+            previous_declaration,
+        });
     }
 
     fn compile_binop(&mut self, binop: &BinaryExpression, dest: OpDestination) {
@@ -191,7 +257,7 @@ impl<'a> Scope<'a> {
             Expression::Int(int) => ValueOrSource::Int(*int),
             Expression::Float(float) => ValueOrSource::Float(*float),
             _ => {
-                let var = self.new_variable();
+                let var = self.new_temporary();
                 self.compile_expression(source, OpDestination::Stack(var));
                 ValueOrSource::Stack(var)
             }
@@ -199,8 +265,28 @@ impl<'a> Scope<'a> {
     }
 }
 
+impl Drop for Scope<'_> {
+    fn drop(&mut self) {
+        while let Some(LocalDeclaration {
+            name,
+            previous_declaration,
+        }) = self.local_declarations.pop()
+        {
+            match previous_declaration {
+                Some(previous) => {
+                    self.declared_variables.insert(name, previous);
+                }
+                None => {
+                    self.declared_variables.remove(&name);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
+    UnknownVariable,
     Syntax(syntax::Error),
 }
 

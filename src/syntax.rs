@@ -32,7 +32,7 @@ impl<T> Ranged<T> {
             value,
             SourceRange {
                 start,
-                length: end - start,
+                length: end.saturating_sub(start),
             },
         )
     }
@@ -94,6 +94,7 @@ pub enum Expression {
     Int(i64),
     Float(f64),
     Lookup(Symbol),
+    Variable(Box<Variable>),
     Unary(Box<UnaryExpression>),
     Binary(Box<BinaryExpression>),
     Block {
@@ -160,6 +161,13 @@ pub enum LogicalKind {
     And,
     Or,
     Xor,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Variable {
+    pub mutable: bool,
+    pub name: Symbol,
+    pub value: Ranged<Expression>,
 }
 
 pub fn parse(source: &str) -> Result<Ranged<Expression>, Ranged<Error>> {
@@ -237,6 +245,8 @@ pub enum Error {
     MissingEnd(Paired),
     Token(token::Error),
     UnexpectedToken(Token),
+    ExpectedVariableName,
+    ExpectedVariableInitialValue,
 }
 
 impl From<Ranged<token::Error>> for Ranged<Error> {
@@ -504,6 +514,70 @@ macro_rules! impl_prefix_parselet {
 
 impl_prefix_parselet!(LogicalNot, Token::Identifier(Symbol::from("not")));
 impl_prefix_parselet!(BitwiseNot, Token::Char('!'));
+
+fn parse_variable(
+    mutable: bool,
+    start: usize,
+    tokens: &mut TokenReader<'_>,
+    config: &ParserConfig<'_>,
+) -> Result<Ranged<Expression>, Ranged<Error>> {
+    let name_token = tokens.next()?;
+    let Token::Identifier(name) = name_token.0 else {
+        return Err(name_token.map(|_| Error::ExpectedVariableName));
+    };
+    let value = if tokens.peek_token() == Some(Token::Char('=')) {
+        tokens.next()?;
+        config.parse_expression(tokens)?
+    } else {
+        Ranged::new(name_token.1, Expression::Nil)
+    };
+    Ok(tokens.ranged(
+        start..,
+        Expression::Variable(Box::new(Variable {
+            mutable,
+            name,
+            value,
+        })),
+    ))
+}
+
+struct Let;
+
+impl Parselet for Let {
+    fn token(&self) -> Option<Token> {
+        Some(Token::Identifier(Symbol::from("let")))
+    }
+}
+
+impl PrefixParselet for Let {
+    fn parse(
+        &self,
+        token: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        parse_variable(false, token.range().start, tokens, config)
+    }
+}
+
+struct Var;
+
+impl Parselet for Var {
+    fn token(&self) -> Option<Token> {
+        Some(Token::Identifier(Symbol::from("var")))
+    }
+}
+
+impl PrefixParselet for Var {
+    fn parse(
+        &self,
+        token: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        parse_variable(true, token.range().start, tokens, config)
+    }
+}
 
 struct Braces;
 
@@ -783,6 +857,7 @@ fn parselets() -> Parselets {
     parser.push_infix(parselets![Multiply, Divide, Remainder, IntegerDivide]);
     parser.push_infix(parselets![Add, Subtract]);
     parser.push_prefix(parselets![Braces, Parentheses]);
+    parser.push_prefix(parselets![Let, Var]);
     parser.push_prefix(parselets![LogicalNot, BitwiseNot]);
     parser.push_prefix(parselets![Term]);
     parser

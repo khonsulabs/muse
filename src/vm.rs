@@ -1,7 +1,7 @@
 use std::array;
 use std::fmt::Debug;
 use std::hash::Hash;
-use std::ops::{Add, Index, IndexMut};
+use std::ops::{Index, IndexMut};
 use std::sync::Arc;
 
 use kempt::Map;
@@ -9,6 +9,7 @@ use ops::{Destination, Instruction, Source};
 use serde::{Deserialize, Serialize};
 
 use self::bitcode::{OpDestination, ValueOrSource};
+use self::ops::Stack;
 use crate::symbol::Symbol;
 use crate::value::Value;
 
@@ -38,11 +39,11 @@ impl Default for Vm {
 }
 
 impl Vm {
-    pub fn declare_variable(&mut self, name: Symbol) -> Result<Variable, Fault> {
+    pub fn declare_variable(&mut self, name: Symbol) -> Result<Stack, Fault> {
         let current_frame = &mut self.frames[self.current_frame];
         if current_frame.end < self.max_stack {
             Ok(*current_frame.variables.entry(name).or_insert_with(|| {
-                let index = Variable(current_frame.end);
+                let index = Stack(current_frame.end);
                 current_frame.end += 1;
                 index
             }))
@@ -51,7 +52,7 @@ impl Vm {
         }
     }
 
-    pub fn resolve(&self, name: &Symbol) -> Result<Variable, Fault> {
+    pub fn resolve(&self, name: &Symbol) -> Result<Stack, Fault> {
         let current_frame = &self.frames[self.current_frame];
         current_frame
             .variables
@@ -95,10 +96,10 @@ impl Vm {
         }
     }
 
-    pub fn allocate(&mut self, count: u16) -> Result<Variable, Fault> {
+    pub fn allocate(&mut self, count: u16) -> Result<Stack, Fault> {
         let count = usize::from(count);
         let current_frame = &mut self.frames[self.current_frame];
-        let index = Variable(current_frame.end);
+        let index = Stack(current_frame.end);
         match current_frame.end.checked_add(count) {
             Some(end) if end < self.max_stack => {
                 current_frame.end += count;
@@ -122,9 +123,9 @@ impl Vm {
     }
 
     #[must_use]
-    pub fn current_frame_start(&self) -> Option<Variable> {
+    pub fn current_frame_start(&self) -> Option<Stack> {
         (self.frames[self.current_frame].end > 0)
-            .then_some(Variable(self.frames[self.current_frame].start))
+            .then_some(Stack(self.frames[self.current_frame].start))
     }
 
     #[must_use]
@@ -256,38 +257,13 @@ impl IndexMut<usize> for Vm {
     }
 }
 
-impl Index<Variable> for Vm {
-    type Output = Value;
-
-    fn index(&self, index: Variable) -> &Self::Output {
-        &self[index.0]
-    }
-}
-
-impl IndexMut<Variable> for Vm {
-    fn index_mut(&mut self, index: Variable) -> &mut Self::Output {
-        &mut self[index.0]
-    }
-}
-
 #[derive(Default, Debug, Clone)]
 struct Frame {
     start: usize,
     end: usize,
     instruction: usize,
     code: Code,
-    variables: Map<Symbol, Variable>,
-}
-
-#[derive(Clone, Copy, Eq, PartialEq, Debug)]
-pub struct Variable(usize);
-
-impl Add<usize> for Variable {
-    type Output = Self;
-
-    fn add(self, rhs: usize) -> Self::Output {
-        Self(self.0 + rhs)
-    }
+    variables: Map<Symbol, Stack>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
