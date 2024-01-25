@@ -61,7 +61,7 @@ impl Compiler {
         };
 
         Scope::root(&mut self, &mut Map::new())
-            .compile_expression(&expression, OpDestination::Register(Register::R0));
+            .compile_expression(&expression, OpDestination::Register(Register(0)));
 
         if self.errors.is_empty() {
             Ok(Code::from(&self.code))
@@ -218,38 +218,44 @@ impl<'a> Scope<'a> {
                     }
                     _ => self.compile_source(&call.function),
                 };
+                let arity = if let Ok(arity) = u8::try_from(call.parameters.len()) {
+                    arity
+                } else {
+                    self.compiler
+                        .errors
+                        .push(Ranged::new(expr.range(), Error::TooManyArguments));
+                    255
+                };
                 let mut parameters = Vec::with_capacity(call.parameters.len());
-                for param in &call.parameters {
+                for param in &call.parameters[..usize::from(arity)] {
                     parameters.push(self.compile_source(param));
                 }
-                for (index, parameter) in parameters.into_iter().enumerate() {
-                    let Ok(register) = Register::try_from(index) else {
-                        todo!("handle large arg list")
-                    };
-                    self.compiler.code.copy(parameter, register);
+                for (parameter, index) in parameters.into_iter().zip(0..arity) {
+                    self.compiler.code.copy(parameter, Register(index));
                 }
-                self.compiler.code.call(
-                    function,
-                    u8::try_from(call.parameters.len()).expect("capped at 16 currently"),
-                    dest,
-                );
+                self.compiler.code.call(function, arity, dest);
             }
             Expression::Variable(decl) => {
                 self.declare_variable(decl, dest);
             }
             Expression::Function(decl) => {
+                let arity = if let Ok(arity) = u8::try_from(decl.parameters.len()) {
+                    arity
+                } else {
+                    self.compiler
+                        .errors
+                        .push(Ranged::new(expr.range(), Error::TooManyArguments));
+                    255
+                };
                 let mut fn_compiler = Compiler {
                     function_name: Some(decl.name.0.clone()),
                     ..Compiler::default()
                 };
                 let mut fn_variables = Map::new();
                 let mut fn_scope = Scope::root(&mut fn_compiler, &mut fn_variables);
-                for (index, var) in decl.parameters.iter().enumerate() {
-                    let Ok(register) = Register::try_from(index) else {
-                        todo!("handle large arg lists")
-                    };
+                for (var, index) in decl.parameters.iter().zip(0..arity) {
                     let stack = fn_scope.new_temporary();
-                    fn_scope.compiler.code.copy(register, stack);
+                    fn_scope.compiler.code.copy(Register(index), stack);
                     fn_scope.declarations.insert(
                         var.0.clone(),
                         BlockDeclaration {
@@ -258,16 +264,12 @@ impl<'a> Scope<'a> {
                         },
                     );
                 }
-                fn_scope.compile_expression(&decl.body, OpDestination::Register(Register::R0));
+                fn_scope.compile_expression(&decl.body, OpDestination::Register(Register(0)));
                 drop(fn_scope);
 
                 self.compiler.errors.append(&mut fn_compiler.errors);
-                let fun = BitcodeFunction::new(&decl.name.0).when(
-                    u8::try_from(decl.parameters.len()).expect("length limited to regisers"),
-                    fn_compiler.code,
-                );
-                // TODO real helper
-                self.compiler.code.push(Op::DeclareFunction(fun));
+                let fun = BitcodeFunction::new(&decl.name.0).when(arity, fn_compiler.code);
+                self.compiler.code.declare_function(fun);
             }
         }
     }
@@ -384,6 +386,7 @@ impl Drop for Scope<'_> {
 pub enum Error {
     UnknownVariable,
     VariableNotMutable,
+    TooManyArguments,
     Syntax(syntax::Error),
 }
 

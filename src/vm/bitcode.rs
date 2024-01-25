@@ -150,6 +150,10 @@ impl BitcodeBlock {
         self.ops.push(op);
     }
 
+    pub fn declare_function(&mut self, function: impl Into<BitcodeFunction>) {
+        self.push(Op::DeclareFunction(function.into()));
+    }
+
     pub fn compare(
         &mut self,
         comparison: CompareKind,

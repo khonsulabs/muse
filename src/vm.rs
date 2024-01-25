@@ -17,7 +17,7 @@ pub mod bitcode;
 pub mod ops;
 
 pub struct Vm {
-    registers: [Value; 16],
+    registers: [Value; 256],
     stack: Vec<Value>,
     max_stack: usize,
     frames: Vec<Frame>,
@@ -229,49 +229,12 @@ impl Vm {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
-#[repr(u8)]
-pub enum Register {
-    R0 = 0,
-    R1,
-    R2,
-    R3,
-    R4,
-    R5,
-    R6,
-    R7,
-    R8,
-    R9,
-    R10,
-    R11,
-    R12,
-    R13,
-    R14,
-    R15,
-}
 
-impl TryFrom<u8> for Register {
-    type Error = InvalidRegister;
+pub struct Register(pub u8);
 
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Self::R0),
-            1 => Ok(Self::R1),
-            2 => Ok(Self::R2),
-            3 => Ok(Self::R3),
-            4 => Ok(Self::R4),
-            5 => Ok(Self::R5),
-            6 => Ok(Self::R6),
-            7 => Ok(Self::R7),
-            8 => Ok(Self::R8),
-            9 => Ok(Self::R9),
-            10 => Ok(Self::R10),
-            11 => Ok(Self::R11),
-            12 => Ok(Self::R12),
-            13 => Ok(Self::R13),
-            14 => Ok(Self::R14),
-            15 => Ok(Self::R15),
-            _ => Err(InvalidRegister),
-        }
+impl From<u8> for Register {
+    fn from(value: u8) -> Self {
+        Self(value)
     }
 }
 
@@ -279,9 +242,13 @@ impl TryFrom<usize> for Register {
     type Error = InvalidRegister;
 
     fn try_from(value: usize) -> Result<Self, Self::Error> {
-        u8::try_from(value)
-            .map_err(|_| InvalidRegister)
-            .and_then(Self::try_from)
+        u8::try_from(value).map(Self).map_err(|_| InvalidRegister)
+    }
+}
+
+impl From<Register> for usize {
+    fn from(value: Register) -> Self {
+        usize::from(value.0)
     }
 }
 
@@ -292,13 +259,13 @@ impl Index<Register> for Vm {
     type Output = Value;
 
     fn index(&self, index: Register) -> &Self::Output {
-        &self.registers[usize::from(index as u8)]
+        &self.registers[usize::from(index)]
     }
 }
 
 impl IndexMut<Register> for Vm {
     fn index_mut(&mut self, index: Register) -> &mut Self::Output {
-        &mut self.registers[usize::from(index as u8)]
+        &mut self.registers[usize::from(index)]
     }
 }
 

@@ -12,7 +12,7 @@ fn main() {
         Value::dynamic(RustFunction::new(|vm: &mut Vm, arity| {
             assert_eq!(arity, 1);
 
-            let arg = &vm[Register::R0];
+            let arg = &vm[Register(0)];
             println!("Called with {arg:?}");
 
             if let Some(int) = arg.as_i64() {
