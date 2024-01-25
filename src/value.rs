@@ -256,10 +256,6 @@ impl Value {
         match (self, rhs) {
             (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
 
-            (Value::Symbol(_string), Value::Symbol(_separator)) => {
-                todo!("split string using division")
-            }
-
             #[allow(clippy::cast_precision_loss)]
             (Value::Int(lhs), Value::Int(rhs)) => {
                 if *rhs != 0 {

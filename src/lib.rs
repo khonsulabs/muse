@@ -13,3 +13,6 @@ pub mod symbol;
 pub mod syntax;
 pub mod value;
 pub mod vm;
+
+#[cfg(test)]
+mod tests;

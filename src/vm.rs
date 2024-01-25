@@ -1,6 +1,7 @@
 use std::array;
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::num::NonZeroUsize;
 use std::ops::{ControlFlow, Index, IndexMut};
 use std::sync::{Arc, OnceLock};
 
@@ -23,6 +24,7 @@ pub struct Vm {
     frames: Vec<Frame>,
     current_frame: usize,
     max_depth: usize,
+    budget: Budget,
     module: Module,
 }
 
@@ -35,6 +37,7 @@ impl Default for Vm {
             current_frame: 0,
             max_stack: usize::MAX,
             max_depth: usize::MAX,
+            budget: Budget::default(),
             module: Module::default(),
         }
     }
@@ -45,18 +48,35 @@ impl Vm {
         self.frames[self.current_frame].code = Some(code.clone());
         self.frames[self.current_frame].code_owner = owner.unwrap_or_default();
         self.frames[self.current_frame].instruction = 0;
-        self.execute_current_frame()
+        self.start_current_frame()
     }
 
-    fn execute_current_frame(&mut self) -> Result<Value, Fault> {
+    pub fn increase_budget(&mut self, amount: usize) {
+        self.budget.allocate(amount);
+    }
+
+    fn start_current_frame(&mut self) -> Result<Value, Fault> {
+        self.allocate(
+            self.frames[self.current_frame]
+                .code
+                .as_ref()
+                .expect("missing frame code")
+                .data
+                .stack_requirement,
+        )?;
+
+        self.resume()
+    }
+
+    pub fn resume(&mut self) -> Result<Value, Fault> {
         let mut code = self.frames[self.current_frame]
             .code
             .clone()
             .expect("missing frame code");
-        self.allocate(code.data.stack_requirement)?;
         let base_frame = self.current_frame;
         let mut code_frame = self.current_frame;
         loop {
+            self.budget.charge()?;
             match code.step(self, self.frames[code_frame].instruction)? {
                 StepResult::Complete if code_frame >= base_frame && base_frame > 0 => {
                     self.exit_frame()?;
@@ -84,7 +104,7 @@ impl Vm {
 
     pub fn execute_function(&mut self, body: &Code, function: Value) -> Result<Value, Fault> {
         self.enter_frame(body.clone(), function)?;
-        self.execute_current_frame()
+        self.start_current_frame()
     }
 
     pub fn recurse_current_function(&mut self, arity: Arity) -> Result<Value, Fault> {
@@ -339,6 +359,7 @@ pub enum Fault {
     ExpectedSymbol,
     InvalidArity,
     InvalidLabel,
+    NoBudget,
 }
 
 #[derive(Debug, Clone)]
@@ -502,4 +523,23 @@ enum StepResult {
 #[derive(Default, Debug)]
 pub struct Module {
     declarations: Map<Symbol, Value>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Budget(Option<NonZeroUsize>);
+
+impl Budget {
+    fn allocate(&mut self, amount: usize) {
+        self.0 = match self.0 {
+            Some(budget) => Some(budget.saturating_add(amount)),
+            None => NonZeroUsize::new(amount.saturating_add(1)),
+        };
+    }
+
+    fn charge(&mut self) -> Result<(), Fault> {
+        if let Some(amount) = &mut self.0 {
+            *amount = NonZeroUsize::new(amount.get().saturating_sub(1)).ok_or(Fault::NoBudget)?;
+        }
+        Ok(())
+    }
 }
