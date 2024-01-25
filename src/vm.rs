@@ -1,10 +1,14 @@
-use std::array;
 use std::fmt::Debug;
+use std::future::Future;
 use std::hash::Hash;
 use std::num::NonZeroUsize;
 use std::ops::{ControlFlow, Index, IndexMut};
+use std::pin::{pin, Pin};
 use std::sync::{Arc, OnceLock};
+use std::task::{Poll, Wake, Waker};
+use std::{array, task};
 
+use crossbeam_utils::sync::{Parker, Unparker};
 use kempt::Map;
 use ops::{Destination, Instruction, Source};
 use serde::{Deserialize, Serialize};
@@ -26,10 +30,14 @@ pub struct Vm {
     max_depth: usize,
     budget: Budget,
     module: Module,
+    waker: Waker,
+    parker: Parker,
 }
 
 impl Default for Vm {
     fn default() -> Self {
+        let parker = Parker::new();
+        let unparker = parker.unparker().clone();
         Self {
             registers: array::from_fn(|_| Value::Nil),
             frames: vec![Frame::default()],
@@ -39,6 +47,8 @@ impl Default for Vm {
             max_depth: usize::MAX,
             budget: Budget::default(),
             module: Module::default(),
+            waker: Waker::from(Arc::new(VmWaker(unparker))),
+            parker,
         }
     }
 }
@@ -48,7 +58,24 @@ impl Vm {
         self.frames[self.current_frame].code = Some(code.clone());
         self.frames[self.current_frame].code_owner = owner.unwrap_or_default();
         self.frames[self.current_frame].instruction = 0;
-        self.start_current_frame()
+        match self.start_current_frame() {
+            Err(Fault::Waiting) => {
+                self.parker.park();
+                self.resume()
+            }
+            other => other,
+        }
+    }
+
+    pub fn block_on<R>(&self, mut future: impl Future<Output = R> + Unpin) -> R {
+        let mut context = task::Context::from_waker(&self.waker);
+
+        loop {
+            match Future::poll(pin!(&mut future), &mut context) {
+                Poll::Ready(result) => return result,
+                Poll::Pending => self.parker.park(),
+            }
+        }
     }
 
     pub fn increase_budget(&mut self, amount: usize) {
@@ -69,6 +96,17 @@ impl Vm {
     }
 
     pub fn resume(&mut self) -> Result<Value, Fault> {
+        loop {
+            match self.resume_async() {
+                Err(Fault::Waiting) => {
+                    self.parker.park();
+                }
+                other => return other,
+            }
+        }
+    }
+
+    fn resume_async(&mut self) -> Result<Value, Fault> {
         let mut code = self.frames[self.current_frame]
             .code
             .clone()
@@ -360,6 +398,7 @@ pub enum Fault {
     InvalidArity,
     InvalidLabel,
     NoBudget,
+    Waiting,
 }
 
 #[derive(Debug, Clone)]
@@ -541,5 +580,31 @@ impl Budget {
             *amount = NonZeroUsize::new(amount.get().saturating_sub(1)).ok_or(Fault::NoBudget)?;
         }
         Ok(())
+    }
+}
+
+pub struct ExecuteAsync<'a>(&'a mut Vm);
+
+impl Future for ExecuteAsync<'_> {
+    type Output = Result<Value, Fault>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        // Temporarily replace the VM's waker with this context's waker.
+        let previous_waker = std::mem::replace(&mut self.0.waker, cx.waker().clone());
+        let result = match self.0.resume() {
+            Err(Fault::Waiting) => Poll::Pending,
+            other => Poll::Ready(other),
+        };
+        // Restore the VM's waker.
+        self.0.waker = previous_waker;
+        result
+    }
+}
+
+struct VmWaker(Unparker);
+
+impl Wake for VmWaker {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
     }
 }
