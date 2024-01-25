@@ -1,30 +1,18 @@
+use std::cmp::Ordering;
 use std::fmt::Debug;
+use std::ops::ControlFlow;
 
 use serde::{Deserialize, Serialize};
 
 use super::bitcode::{Op, OpDestination, ValueOrSource};
 use crate::symbol::Symbol;
-use crate::syntax::{BinaryKind, UnaryKind};
+use crate::syntax::{BinaryKind, CompareKind, UnaryKind};
 use crate::value::Value;
 use crate::vm::{Fault, Vm};
 
-pub trait Instruction: Debug + 'static {
-    fn execute(&self, vm: &mut Vm) -> Result<(), Fault>;
+pub trait Instruction: Send + Sync + Debug + 'static {
+    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault>;
     fn as_op(&self) -> Op;
-}
-
-#[derive(Debug, Eq, PartialEq, Clone, Copy)]
-pub struct Allocate(pub u16);
-
-impl Instruction for Allocate {
-    fn execute(&self, vm: &mut Vm) -> Result<(), Fault> {
-        vm.allocate(self.0)?;
-        Ok(())
-    }
-
-    fn as_op(&self) -> Op {
-        Op::Allocate(self.0)
-    }
 }
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
@@ -38,20 +26,227 @@ where
     From: Source,
     Dest: Destination,
 {
-    fn execute(&self, vm: &mut Vm) -> Result<(), Fault> {
+    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
         let source = self.source.load(vm)?;
 
-        self.dest.store(vm, source)
+        self.dest.store(vm, source)?;
+
+        Ok(ControlFlow::Continue(()))
     }
 
     fn as_op(&self) -> Op {
         Op::Unary {
-            source: self.source.as_source(),
+            op: self.source.as_source(),
             dest: self.dest.as_dest(),
             kind: UnaryKind::Copy,
         }
     }
 }
+
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
+pub struct Return;
+
+impl Instruction for Return {
+    fn execute(&self, _vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+        Ok(ControlFlow::Break(()))
+    }
+
+    fn as_op(&self) -> Op {
+        Op::Return
+    }
+}
+
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
+pub struct Jump<From, Dest> {
+    pub target: From,
+    pub previous_address: Dest,
+}
+
+impl<From, Dest> Instruction for Jump<From, Dest>
+where
+    From: Source,
+    Dest: Destination,
+{
+    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+        let current_instruction = u64::try_from(vm.current_instruction())
+            .map_err(|_| Fault::InvalidInstructionAddress)?;
+
+        let target = self.target.load(vm)?;
+        if let Some(target) = target.as_u64() {
+            vm.jump_to(usize::try_from(target).map_err(|_| Fault::InvalidInstructionAddress)?);
+            self.previous_address
+                .store(vm, Value::UInt(current_instruction))?;
+
+            Ok(ControlFlow::Continue(()))
+        } else {
+            Err(Fault::InvalidInstructionAddress)
+        }
+    }
+
+    fn as_op(&self) -> Op {
+        Op::Unary {
+            op: self.target.as_source(),
+            dest: self.previous_address.as_dest(),
+            kind: UnaryKind::Copy,
+        }
+    }
+}
+
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
+pub struct JumpIf<Target, Condition, PreviousAddr> {
+    pub target: Target,
+    pub condition: Condition,
+    pub previous_address: PreviousAddr,
+}
+
+impl<Target, Condition, PreviousAddr> Instruction for JumpIf<Target, Condition, PreviousAddr>
+where
+    Target: Source,
+    Condition: Source,
+    PreviousAddr: Destination,
+{
+    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+        let condition = self.condition.load(vm)?;
+
+        if condition.truthy(vm) {
+            let current_instruction = u64::try_from(vm.current_instruction())
+                .map_err(|_| Fault::InvalidInstructionAddress)?;
+
+            let target = self.target.load(vm)?;
+            if let Some(target) = target.as_u64() {
+                vm.jump_to(usize::try_from(target).map_err(|_| Fault::InvalidInstructionAddress)?);
+                self.previous_address
+                    .store(vm, Value::UInt(current_instruction))?;
+
+                Ok(ControlFlow::Continue(()))
+            } else {
+                Err(Fault::InvalidInstructionAddress)
+            }
+        } else {
+            Ok(ControlFlow::Continue(()))
+        }
+    }
+
+    fn as_op(&self) -> Op {
+        Op::Unary {
+            op: self.target.as_source(),
+            dest: self.previous_address.as_dest(),
+            kind: UnaryKind::Copy,
+        }
+    }
+}
+
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
+pub struct Resolve<From, Dest> {
+    pub source: From,
+    pub dest: Dest,
+}
+
+impl<From, Dest> Instruction for Resolve<From, Dest>
+where
+    From: Source,
+    Dest: Destination,
+{
+    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+        let source = self.source.load(vm)?;
+        let Some(source) = source.as_symbol() else {
+            return Err(Fault::ExpectedSymbol);
+        };
+
+        let resolved = vm.resolve(source)?;
+        self.dest.store(vm, resolved)?;
+
+        Ok(ControlFlow::Continue(()))
+    }
+
+    fn as_op(&self) -> Op {
+        Op::Unary {
+            op: self.source.as_source(),
+            dest: self.dest.as_dest(),
+            kind: UnaryKind::Resolve,
+        }
+    }
+}
+
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
+pub struct Invoke<Func, NumArgs, Dest> {
+    pub function: Func,
+    pub arity: NumArgs,
+    pub dest: Dest,
+}
+
+impl<Func, NumArgs, Dest> Instruction for Invoke<Func, NumArgs, Dest>
+where
+    Func: Source,
+    NumArgs: Source,
+    Dest: Destination,
+{
+    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+        let function = self.function.load(vm)?;
+        let arity = self.arity.load(vm)?;
+        let arity = match arity.as_u64() {
+            Some(int) => u8::try_from(int).map_err(|_| Fault::InvalidArity)?,
+            _ => return Err(Fault::InvalidArity),
+        };
+        let result = function.call(vm, arity)?;
+
+        self.dest.store(vm, result)?;
+
+        Ok(ControlFlow::Continue(()))
+    }
+
+    fn as_op(&self) -> Op {
+        Op::BinOp {
+            op1: self.function.as_source(),
+            op2: self.arity.as_source(),
+            dest: self.dest.as_dest(),
+            kind: BinaryKind::Invoke,
+        }
+    }
+}
+
+macro_rules! declare_comparison_instruction {
+    ($kind:ident, $pattern:pat) => {
+        #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
+        pub struct $kind<Lhs, Rhs, Dest> {
+            pub lhs: Lhs,
+            pub rhs: Rhs,
+            pub dest: Dest,
+        }
+
+        impl<Func, NumArgs, Dest> Instruction for $kind<Func, NumArgs, Dest>
+        where
+            Func: Source,
+            NumArgs: Source,
+            Dest: Destination,
+        {
+            fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+                let lhs = self.lhs.load(vm)?;
+                let rhs = self.rhs.load(vm)?;
+                let ordering = lhs.total_cmp(vm, &rhs)?;
+                self.dest
+                    .store(vm, Value::Bool(matches!(ordering, $pattern)))?;
+
+                Ok(ControlFlow::Continue(()))
+            }
+
+            fn as_op(&self) -> Op {
+                Op::BinOp {
+                    op1: self.lhs.as_source(),
+                    op2: self.rhs.as_source(),
+                    dest: self.dest.as_dest(),
+                    kind: BinaryKind::Compare(CompareKind::$kind),
+                }
+            }
+        }
+    };
+}
+
+declare_comparison_instruction!(LessThanOrEqual, Ordering::Less | Ordering::Equal);
+declare_comparison_instruction!(LessThan, Ordering::Less);
+declare_comparison_instruction!(Equal, Ordering::Equal);
+declare_comparison_instruction!(GreaterThan, Ordering::Greater);
+declare_comparison_instruction!(GreaterThanOrEqual, Ordering::Greater | Ordering::Equal);
 
 macro_rules! declare_binop_instruction {
     ($name:ident, $function:ident, $kind:expr) => {
@@ -68,17 +263,19 @@ macro_rules! declare_binop_instruction {
             Rhs: Source,
             Dest: Destination,
         {
-            fn execute(&self, vm: &mut Vm) -> Result<(), Fault> {
+            fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
                 let lhs = self.lhs.load(vm)?;
                 let rhs = self.rhs.load(vm)?;
                 let result = lhs.$function(vm, &rhs)?;
-                self.dest.store(vm, result)
+                self.dest.store(vm, result)?;
+
+                Ok(ControlFlow::Continue(()))
             }
 
             fn as_op(&self) -> Op {
                 Op::BinOp {
-                    left: self.lhs.as_source(),
-                    right: self.rhs.as_source(),
+                    op1: self.lhs.as_source(),
+                    op2: self.rhs.as_source(),
                     dest: self.dest.as_dest(),
                     kind: $kind,
                 }
@@ -95,13 +292,13 @@ declare_binop_instruction!(IntegerDivide, div_i, BinaryKind::IntegerDivide);
 declare_binop_instruction!(Remainder, rem, BinaryKind::Remainder);
 declare_binop_instruction!(Power, pow, BinaryKind::Power);
 
-pub trait Source: Debug + 'static {
-    fn load(&self, vm: &mut Vm) -> Result<Value, Fault>;
+pub trait Source: Send + Sync + Debug + 'static {
+    fn load(&self, vm: &Vm) -> Result<Value, Fault>;
     fn as_source(&self) -> ValueOrSource;
 }
 
 impl Source for () {
-    fn load(&self, _vm: &mut Vm) -> Result<Value, Fault> {
+    fn load(&self, _vm: &Vm) -> Result<Value, Fault> {
         Ok(Value::Nil)
     }
 
@@ -110,8 +307,18 @@ impl Source for () {
     }
 }
 
+impl Source for bool {
+    fn load(&self, _vm: &Vm) -> Result<Value, Fault> {
+        Ok(Value::Bool(*self))
+    }
+
+    fn as_source(&self) -> ValueOrSource {
+        ValueOrSource::Bool(*self)
+    }
+}
+
 impl Source for i64 {
-    fn load(&self, _vm: &mut Vm) -> Result<Value, Fault> {
+    fn load(&self, _vm: &Vm) -> Result<Value, Fault> {
         Ok(Value::Int(*self))
     }
 
@@ -120,8 +327,18 @@ impl Source for i64 {
     }
 }
 
+impl Source for u64 {
+    fn load(&self, _vm: &Vm) -> Result<Value, Fault> {
+        Ok(Value::UInt(*self))
+    }
+
+    fn as_source(&self) -> ValueOrSource {
+        ValueOrSource::UInt(*self)
+    }
+}
+
 impl Source for f64 {
-    fn load(&self, _vm: &mut Vm) -> Result<Value, Fault> {
+    fn load(&self, _vm: &Vm) -> Result<Value, Fault> {
         Ok(Value::Float(*self))
     }
 
@@ -131,7 +348,7 @@ impl Source for f64 {
 }
 
 impl Source for Symbol {
-    fn load(&self, _vm: &mut Vm) -> Result<Value, Fault> {
+    fn load(&self, _vm: &Vm) -> Result<Value, Fault> {
         Ok(Value::Symbol(self.clone()))
     }
 
@@ -140,9 +357,19 @@ impl Source for Symbol {
     }
 }
 
-pub trait Destination: Debug + 'static {
+pub trait Destination: Send + Sync + Debug + 'static {
     fn store(&self, vm: &mut Vm, value: Value) -> Result<(), Fault>;
     fn as_dest(&self) -> OpDestination;
+}
+
+impl Destination for () {
+    fn store(&self, _vm: &mut Vm, _value: Value) -> Result<(), Fault> {
+        Ok(())
+    }
+
+    fn as_dest(&self) -> OpDestination {
+        OpDestination::Void
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -150,7 +377,7 @@ pub trait Destination: Debug + 'static {
 pub struct Stack(pub usize);
 
 impl Source for Stack {
-    fn load(&self, vm: &mut Vm) -> Result<Value, Fault> {
+    fn load(&self, vm: &Vm) -> Result<Value, Fault> {
         vm.current_frame()
             .get(self.0)
             .cloned()

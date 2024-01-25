@@ -12,17 +12,41 @@ static SYMBOLS: StringPool<RandomState> = StringPool::with_hasher_init(RandomSta
 #[derive(Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub struct Symbol(GlobalString<RandomState>);
 
-static EMPTY: StaticPooledString<RandomState> = SYMBOLS.get_static("");
-
-impl Symbol {
-    pub fn empty() -> Self {
-        Self(EMPTY.clone())
-    }
+macro_rules! static_symbols {
+    ($($name:ident => $string:literal),+ $(,)?) => {
+        impl Symbol {
+            $(pub fn $name() -> Self {
+                static S: StaticPooledString<RandomState> = SYMBOLS.get_static($string);
+                Self(S.clone())
+            })+
+        }
+    };
 }
+
+static_symbols!(
+    empty => "",
+    not_symbol => "not",
+    let_symbol => "let",
+    var_symbol => "var",
+    and_symbol => "and",
+    or_symbol => "or",
+    xor_symbol => "xor",
+    true_symbol => "true",
+    false_symbol => "false",
+    if_symbol => "if",
+    then_symbol => "then",
+    else_symbol => "else",
+    defun_symbol => "defun",
+);
 
 impl From<String> for Symbol {
     fn from(value: String) -> Self {
         Symbol(SYMBOLS.get(value))
+    }
+}
+impl From<&'_ Symbol> for Symbol {
+    fn from(value: &'_ Symbol) -> Self {
+        value.clone()
     }
 }
 
@@ -47,6 +71,16 @@ impl PartialEq<&'_ str> for Symbol {
 impl PartialEq<str> for Symbol {
     fn eq(&self, other: &str) -> bool {
         self.0 == other
+    }
+}
+
+impl From<bool> for Symbol {
+    fn from(bool: bool) -> Self {
+        if bool {
+            Symbol::true_symbol()
+        } else {
+            Symbol::false_symbol()
+        }
     }
 }
 

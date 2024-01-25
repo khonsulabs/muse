@@ -1,0 +1,14 @@
+add_int_int: {
+    src: "1 + 2",
+    output: Int(3),
+}
+
+add_float_int: {
+    src: "1.1 + 2",
+    output: Float(3.1),
+}
+
+add_int_float: {
+    src: "2 + 1.1",
+    output: Float(3.1),
+}

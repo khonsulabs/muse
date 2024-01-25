@@ -16,12 +16,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "alot"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b072fc284b73a3e4154e2decdbaad711daca0e8fedfceb0d7b1cbe2dffb00e2b"
-
-[[package]]
 name = "cfg-if"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -49,6 +43,9 @@ name = "kempt"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a37a6bdb52eae6acb1efbab069af766555a6d77712380fd48876b83543d3071"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "libc"
@@ -61,10 +58,8 @@ name = "muse"
 version = "0.1.0"
 dependencies = [
  "ahash",
- "alot",
  "interner",
  "kempt",
- "ordered-varint",
  "rsn",
  "serde",
  "unicode-ident",
@@ -75,12 +70,6 @@ name = "once_cell"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3fdb12b2476b595f9358c5161aa467c2438859caa136dec86c26fdd2efe17b92"
-
-[[package]]
-name = "ordered-varint"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9cc9f18ab4bad1e01726bda1259feb8f11e5e76308708a966b4c0136e9db34c"
 
 [[package]]
 name = "proc-macro2"

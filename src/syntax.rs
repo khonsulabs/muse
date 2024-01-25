@@ -9,7 +9,7 @@ use self::token::{Paired, Token, Tokens};
 use crate::symbol::Symbol;
 pub mod token;
 
-#[derive(Default, Clone, Copy, Eq, PartialEq, Debug)]
+#[derive(Default, Clone, Copy, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Ranged<T>(pub T, pub SourceRange);
 
 impl<T> Ranged<T> {
@@ -56,7 +56,7 @@ impl<T> Deref for Ranged<T> {
     }
 }
 
-#[derive(Default, Clone, Copy, Eq, PartialEq, Debug)]
+#[derive(Default, Clone, Copy, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct SourceRange {
     pub start: usize,
     pub length: usize,
@@ -91,16 +91,47 @@ impl From<RangeInclusive<usize>> for SourceRange {
 pub enum Expression {
     #[default]
     Nil,
+    Bool(bool),
     Int(i64),
     Float(f64),
     Lookup(Symbol),
+    If(Box<IfExpression>),
+    Function(Box<FunctionDefinition>),
+    Call(Box<FunctionCall>),
     Variable(Box<Variable>),
+    Assign(Box<Assignment>),
     Unary(Box<UnaryExpression>),
     Binary(Box<BinaryExpression>),
     Block {
         name: Option<Symbol>,
         expressions: Vec<Ranged<Expression>>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IfExpression {
+    pub condition: Ranged<Expression>,
+    pub when_true: Ranged<Expression>,
+    pub when_false: Option<Ranged<Expression>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionDefinition {
+    pub name: Ranged<Symbol>,
+    pub parameters: Vec<Ranged<Symbol>>,
+    pub body: Ranged<Expression>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionCall {
+    pub function: Ranged<Expression>,
+    pub parameters: Vec<Ranged<Expression>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Assignment {
+    pub target: Symbol,
+    pub value: Ranged<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -115,6 +146,8 @@ pub enum UnaryKind {
     BitwiseNot,
     Negate,
     Copy,
+    Resolve,
+    Jump,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -126,6 +159,7 @@ pub struct BinaryExpression {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum BinaryKind {
+    Invoke,
     Add,
     Subtract,
     Multiply,
@@ -133,6 +167,7 @@ pub enum BinaryKind {
     IntegerDivide,
     Remainder,
     Power,
+    JumpIf,
     Bitwise(BitwiseKind),
     Logical(LogicalKind),
     Compare(CompareKind),
@@ -178,11 +213,32 @@ pub fn parse(source: &str) -> Result<Ranged<Expression>, Ranged<Error>> {
         parselets: &parselets,
         minimum_precedence: 0,
     };
-    let result = config.parse(&mut tokens)?;
-    if tokens.next().is_ok() {
-        todo!("expected eof")
+    let mut results = Vec::new();
+    loop {
+        results.push(config.parse(&mut tokens)?);
+        match tokens.next() {
+            Ok(token) if token.0 == Token::Char(';') => {}
+            Ok(token) => {
+                return Err(token.map(|_| Error::ExpectedEof));
+            }
+            Err(Ranged(Error::UnexpectedEof, _)) => break,
+            Err(other) => return Err(other),
+        }
     }
-    Ok(result)
+
+    if results.len() == 1 {
+        Ok(results.into_iter().next().expect("length checked"))
+    } else {
+        let start = results[0].range().start;
+        let end = results[results.len() - 1].range().end();
+        Ok(Ranged::new(
+            start..end,
+            Expression::Block {
+                name: None,
+                expressions: results,
+            },
+        ))
+    }
 }
 
 struct TokenReader<'a> {
@@ -239,14 +295,17 @@ impl<'a> TokenReader<'a> {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Error {
     UnexpectedEof,
+    ExpectedEof,
     MissingEnd(Paired),
     Token(token::Error),
     UnexpectedToken(Token),
-    ExpectedVariableName,
+    ExpectedName,
     ExpectedVariableInitialValue,
+    ExpectedThenOrBrace,
+    InvalidAssignmentTarget,
 }
 
 impl From<Ranged<token::Error>> for Ranged<Error> {
@@ -479,9 +538,9 @@ impl PrefixParselet for Term {
     }
 }
 
-macro_rules! impl_prefix_parselet {
+macro_rules! impl_prefix_unary_parselet {
     ($name:ident, $token:expr) => {
-        impl_prefix_parselet!($name, $token, UnaryKind::$name);
+        impl_prefix_unary_parselet!($name, $token, UnaryKind::$name);
     };
     ($name:ident, $token:expr, $binarykind:expr) => {
         struct $name;
@@ -512,8 +571,42 @@ macro_rules! impl_prefix_parselet {
     };
 }
 
-impl_prefix_parselet!(LogicalNot, Token::Identifier(Symbol::from("not")));
-impl_prefix_parselet!(BitwiseNot, Token::Char('!'));
+impl_prefix_unary_parselet!(LogicalNot, Token::Identifier(Symbol::not_symbol()));
+impl_prefix_unary_parselet!(BitwiseNot, Token::Char('!'));
+
+macro_rules! impl_prefix_standalone_parselet {
+    ($name:ident, $token:expr, $binarykind:expr) => {
+        struct $name;
+
+        impl Parselet for $name {
+            fn token(&self) -> Option<Token> {
+                Some($token)
+            }
+        }
+
+        impl PrefixParselet for $name {
+            fn parse(
+                &self,
+                token: Ranged<Token>,
+                _tokens: &mut TokenReader<'_>,
+                _config: &ParserConfig<'_>,
+            ) -> Result<Ranged<Expression>, Ranged<Error>> {
+                Ok(Ranged::new(token.range(), $binarykind))
+            }
+        }
+    };
+}
+
+impl_prefix_standalone_parselet!(
+    True,
+    Token::Identifier(Symbol::true_symbol()),
+    Expression::Bool(true)
+);
+impl_prefix_standalone_parselet!(
+    False,
+    Token::Identifier(Symbol::false_symbol()),
+    Expression::Bool(false)
+);
 
 fn parse_variable(
     mutable: bool,
@@ -523,7 +616,7 @@ fn parse_variable(
 ) -> Result<Ranged<Expression>, Ranged<Error>> {
     let name_token = tokens.next()?;
     let Token::Identifier(name) = name_token.0 else {
-        return Err(name_token.map(|_| Error::ExpectedVariableName));
+        return Err(name_token.map(|_| Error::ExpectedName));
     };
     let value = if tokens.peek_token() == Some(Token::Char('=')) {
         tokens.next()?;
@@ -545,7 +638,7 @@ struct Let;
 
 impl Parselet for Let {
     fn token(&self) -> Option<Token> {
-        Some(Token::Identifier(Symbol::from("let")))
+        Some(Token::Identifier(Symbol::let_symbol()))
     }
 }
 
@@ -564,7 +657,7 @@ struct Var;
 
 impl Parselet for Var {
     fn token(&self) -> Option<Token> {
-        Some(Token::Identifier(Symbol::from("var")))
+        Some(Token::Identifier(Symbol::var_symbol()))
     }
 }
 
@@ -726,11 +819,36 @@ impl PrefixParselet for Parentheses {
     }
 }
 
+impl InfixParselet for Parentheses {
+    fn parse(
+        &self,
+        function: Ranged<Expression>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        let mut parameters = Vec::new();
+
+        parse_paired(Paired::Paren, &Token::Char(','), tokens, |tokens| {
+            config
+                .parse_expression(tokens)
+                .map(|expr| parameters.push(expr))
+        })?;
+
+        Ok(tokens.ranged(
+            function.range().start..,
+            Expression::Call(Box::new(FunctionCall {
+                function,
+                parameters,
+            })),
+        ))
+    }
+}
+
 trait InfixParselet: Parselet {
     fn parse(
         &self,
         lhs: Ranged<Expression>,
-        parser: &mut TokenReader<'_>,
+        tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>>;
 }
@@ -769,6 +887,104 @@ macro_rules! impl_infix_parselet {
     };
 }
 
+struct If;
+
+impl Parselet for If {
+    fn token(&self) -> Option<Token> {
+        Some(Token::Identifier(Symbol::if_symbol()))
+    }
+}
+
+impl PrefixParselet for If {
+    fn parse(
+        &self,
+        token: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        let condition = config.parse_expression(tokens)?;
+        let brace_or_then = tokens.next()?;
+        let when_true = match &brace_or_then.0 {
+            Token::Open(Paired::Brace) => Braces.parse(brace_or_then, tokens, config)?,
+            Token::Identifier(ident) if ident == &Symbol::then_symbol() => {
+                config.parse_expression(tokens)?
+            }
+            _ => return Err(brace_or_then.map(|_| Error::ExpectedThenOrBrace)),
+        };
+        let when_false = if tokens.peek_token() == Some(Token::Identifier(Symbol::else_symbol())) {
+            tokens.next()?;
+            Some(match tokens.peek_token() {
+                Some(Token::Identifier(ident)) if ident == Symbol::if_symbol() => {
+                    Self.parse(tokens.next()?, tokens, config)?
+                }
+                Some(Token::Open(Paired::Brace)) => Braces.parse(tokens.next()?, tokens, config)?,
+                _ => config.parse_expression(tokens)?,
+            })
+        } else {
+            None
+        };
+
+        Ok(tokens.ranged(
+            token.range().start..,
+            Expression::If(Box::new(IfExpression {
+                condition,
+                when_true,
+                when_false,
+            })),
+        ))
+    }
+}
+
+struct Defun;
+
+impl Parselet for Defun {
+    fn token(&self) -> Option<Token> {
+        Some(Token::Identifier(Symbol::defun_symbol()))
+    }
+}
+
+impl PrefixParselet for Defun {
+    fn parse(
+        &self,
+        token: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        let name_token = tokens.next()?;
+        let Token::Identifier(name) = &name_token.0 else {
+            return Err(name_token.map(|_| Error::ExpectedName));
+        };
+        let mut parameters = Vec::new();
+        if tokens.peek_token() == Some(Token::Open(Paired::Paren)) {
+            tokens.next()?;
+            parse_paired(Paired::Paren, &Token::Char(','), tokens, |tokens| {
+                let name_token = tokens.next()?;
+                let Token::Identifier(name) = &name_token.0 else {
+                    return Err(name_token.map(|_| Error::ExpectedName));
+                };
+                parameters.push(Ranged::new(name_token.1, name.clone()));
+                Ok(())
+            })?;
+        }
+
+        let body_indicator = tokens.next()?;
+        let body = match &body_indicator.0 {
+            Token::Open(Paired::Brace) => Braces.parse(body_indicator, tokens, config)?,
+            Token::Char('=') => config.parse_expression(tokens)?,
+            _ => todo!("expected body"),
+        };
+
+        Ok(tokens.ranged(
+            token.range().start..,
+            Expression::Function(Box::new(FunctionDefinition {
+                name: Ranged::new(name_token.1, name.clone()),
+                parameters,
+                body,
+            })),
+        ))
+    }
+}
+
 impl_infix_parselet!(Add, Token::Char('+'));
 impl_infix_parselet!(Subtract, Token::Char('-'));
 impl_infix_parselet!(Multiply, Token::Char('*'));
@@ -793,17 +1009,17 @@ impl_infix_parselet!(
 );
 impl_infix_parselet!(
     And,
-    Token::Identifier(Symbol::from("and")),
+    Token::Identifier(Symbol::and_symbol()),
     BinaryKind::Logical(LogicalKind::And)
 );
 impl_infix_parselet!(
     Or,
-    Token::Identifier(Symbol::from("or")),
+    Token::Identifier(Symbol::or_symbol()),
     BinaryKind::Logical(LogicalKind::Or)
 );
 impl_infix_parselet!(
     Xor,
-    Token::Identifier(Symbol::from("xor")),
+    Token::Identifier(Symbol::xor_symbol()),
     BinaryKind::Logical(LogicalKind::Xor)
 );
 impl_infix_parselet!(
@@ -818,7 +1034,7 @@ impl_infix_parselet!(
 );
 impl_infix_parselet!(
     Equal,
-    Token::Char('='),
+    Token::Equals,
     BinaryKind::Compare(CompareKind::Equal)
 );
 impl_infix_parselet!(
@@ -832,6 +1048,37 @@ impl_infix_parselet!(
     BinaryKind::Compare(CompareKind::GreaterThanOrEqual)
 );
 
+struct Assign;
+
+impl Parselet for Assign {
+    fn token(&self) -> Option<Token> {
+        Some(Token::Char('='))
+    }
+}
+
+impl InfixParselet for Assign {
+    fn parse(
+        &self,
+        lhs: Ranged<Expression>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        match &lhs.0 {
+            Expression::Lookup(name) => {
+                let value = config.parse(tokens)?;
+                Ok(tokens.ranged(
+                    lhs.range().start..,
+                    Expression::Assign(Box::new(Assignment {
+                        target: name.clone(),
+                        value,
+                    })),
+                ))
+            }
+            _ => Err(lhs.map(|_| Error::InvalidAssignmentTarget)),
+        }
+    }
+}
+
 macro_rules! parselets {
     ($($name:ident),+) => {
         vec![$(Box::new($name)),+]
@@ -841,6 +1088,7 @@ macro_rules! parselets {
 fn parselets() -> Parselets {
     let mut parser = Parselets::new();
     parser.markers.expression = parser.precedence;
+    parser.push_infix(parselets![Assign]);
     parser.push_infix(parselets![
         LessThanOrEqual,
         LessThan,
@@ -856,9 +1104,19 @@ fn parselets() -> Parselets {
     parser.push_infix(parselets![BitwiseAnd]);
     parser.push_infix(parselets![Multiply, Divide, Remainder, IntegerDivide]);
     parser.push_infix(parselets![Add, Subtract]);
-    parser.push_prefix(parselets![Braces, Parentheses]);
-    parser.push_prefix(parselets![Let, Var]);
-    parser.push_prefix(parselets![LogicalNot, BitwiseNot]);
+    parser.push_infix(parselets![Parentheses]);
+    parser.push_prefix(parselets![
+        Braces,
+        Parentheses,
+        LogicalNot,
+        BitwiseNot,
+        Let,
+        Var,
+        If,
+        True,
+        False,
+        Defun
+    ]);
     parser.push_prefix(parselets![Term]);
     parser
 }

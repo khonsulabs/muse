@@ -73,13 +73,49 @@ ident(comma list of args)
 ident{ map or set } # shorthand for ident({..})
 ident[list] # shorthand for ident([..])
 
+# type conversions
+("1")
 
 # Pattern Matching
 
-expr -> {
-  foo => {
+match expr with matchexpr;
+expr matches
 
-  };
-};
 
 ```
+
+## TODOs
+
+**Assume all checked off items mean proof-of-concept level implementations**
+
+- [ ] Invoking functions
+
+- [ ] Declaring functions
+  Each function can be overloaded .. can we use pattern matching?
+
+  ```
+  # shorthand
+  fn name(a, b, c) {};
+
+  # desugars to
+  fn name -> {
+    (a, b, c) => {
+
+    };
+  };
+
+  # But we could do
+
+  fn name -> {
+    (a, b, c) => {
+
+    };
+    (a, b, c, ... varargs) => {
+
+    }
+  };
+  ```
+
+  This makes functions be "independently namespaced pattern matches over a tuple",
+  with the collection being a tuple, map, or set.
+- [ ]

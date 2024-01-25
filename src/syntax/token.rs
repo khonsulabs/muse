@@ -4,10 +4,12 @@ use std::iter::Peekable;
 use std::ops::RangeBounds;
 use std::str::CharIndices;
 
+use serde::{Deserialize, Serialize};
+
 use super::Ranged;
 use crate::symbol::Symbol;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Token {
     Whitespace,
     Comment,
@@ -89,7 +91,7 @@ impl Hash for Token {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, Debug, Hash)]
+#[derive(Clone, Copy, Eq, PartialEq, Debug, Hash, Serialize, Deserialize)]
 pub enum Paired {
     Brace,
     Paren,
@@ -190,16 +192,16 @@ impl<'a> Tokens<'a> {
                 self.chars.next();
             }
 
-            let float = self
-                .scratch
-                .parse::<f64>()
-                .map_err(|err| self.chars.ranged(start.., Error::FloatParse(err)))?;
+            let float = self.scratch.parse::<f64>().map_err(|err| {
+                self.chars
+                    .ranged(start.., Error::FloatParse(err.to_string()))
+            })?;
             Ok(self.chars.ranged(start.., Token::Float(float)))
         } else {
-            let int = self
-                .scratch
-                .parse::<i64>()
-                .map_err(|err| self.chars.ranged(start.., Error::IntegerParse(err)))?;
+            let int = self.scratch.parse::<i64>().map_err(|err| {
+                self.chars
+                    .ranged(start.., Error::IntegerParse(err.to_string()))
+            })?;
             Ok(self.chars.ranged(start.., Token::Int(int)))
         }
     }
@@ -334,11 +336,11 @@ impl Iterator for Tokens<'_> {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Error {
     UnexpectedChar(char),
-    IntegerParse(std::num::ParseIntError),
-    FloatParse(std::num::ParseFloatError),
+    IntegerParse(String),
+    FloatParse(String),
 }
 
 #[test]

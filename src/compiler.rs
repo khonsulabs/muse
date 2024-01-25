@@ -1,21 +1,23 @@
 use std::mem;
 
 use kempt::Map;
+use serde::{Deserialize, Serialize};
 
 use crate::symbol::Symbol;
 use crate::syntax::{
-    self, BinaryExpression, BinaryKind, Expression, LogicalKind, Ranged, UnaryKind, Variable,
+    self, BinaryExpression, BinaryKind, Expression, LogicalKind, Ranged, UnaryExpression,
+    UnaryKind, Variable,
 };
-use crate::vm::bitcode::{BitcodeBlock, Op, OpDestination, ValueOrSource};
+use crate::vm::bitcode::{BitcodeBlock, BitcodeFunction, Op, OpDestination, ValueOrSource};
 use crate::vm::ops::Stack;
 use crate::vm::{Code, Register};
 
 #[derive(Default, Debug)]
 pub struct Compiler {
+    function_name: Option<Symbol>,
     parsed: Vec<Result<Ranged<Expression>, Ranged<syntax::Error>>>,
     errors: Vec<Ranged<Error>>,
     code: BitcodeBlock,
-    variables: usize,
 }
 
 impl Compiler {
@@ -59,29 +61,9 @@ impl Compiler {
         };
 
         Scope::root(&mut self, &mut Map::new())
-            .compile_expression(&expression, OpDestination::Register(Register::R1));
-        self.code.push(Op::Unary {
-            source: ValueOrSource::Int(1),
-            dest: OpDestination::Register(Register::R0),
-            kind: UnaryKind::Copy,
-        });
+            .compile_expression(&expression, OpDestination::Register(Register::R0));
 
         if self.errors.is_empty() {
-            if self.variables > 0 {
-                let variable_count = u16::try_from(self.variables).unwrap();
-                match self.code.first_mut() {
-                    Some(Op::Allocate(amount)) => {
-                        if let Some(new_count) = amount.checked_add(variable_count) {
-                            *amount += new_count;
-                        } else {
-                            todo!("too many vars")
-                        }
-                    }
-                    _ => self
-                        .code
-                        .insert(0, Op::Allocate(u16::try_from(self.variables).unwrap())),
-                }
-            }
             Ok(Code::from(&self.code))
         } else {
             Err(self.errors)
@@ -89,113 +71,203 @@ impl Compiler {
     }
 
     fn new_variable(&mut self) -> Stack {
-        let id = self.variables;
-        self.variables += 1;
+        let id = self.code.stack_requirement;
+        self.code.stack_requirement += 1;
         Stack(id)
     }
 }
 
-struct BlockVariable {
+struct BlockDeclaration {
     stack: Stack,
     mutable: bool,
 }
 
 struct LocalDeclaration {
     name: Symbol,
-    previous_declaration: Option<BlockVariable>,
+    previous_declaration: Option<BlockDeclaration>,
 }
 
 struct Scope<'a> {
     compiler: &'a mut Compiler,
-    local_start: usize,
-    local_count: usize,
-    variables: usize,
-    declared_variables: &'a mut Map<Symbol, BlockVariable>,
+    declarations: &'a mut Map<Symbol, BlockDeclaration>,
+    locals_count: usize,
     local_declarations: Vec<LocalDeclaration>,
 }
 
 impl<'a> Scope<'a> {
-    fn root(compiler: &'a mut Compiler, variables: &'a mut Map<Symbol, BlockVariable>) -> Self {
+    fn root(compiler: &'a mut Compiler, variables: &'a mut Map<Symbol, BlockDeclaration>) -> Self {
         Self {
-            local_start: compiler.variables,
             compiler,
-            local_count: 0,
-            variables: 0,
-            declared_variables: variables,
+            locals_count: 0,
+            declarations: variables,
             local_declarations: Vec::new(),
         }
     }
 
     fn enter_block(&mut self) -> Scope<'_> {
         Scope {
-            local_start: self.compiler.variables,
             compiler: self.compiler,
-            declared_variables: self.declared_variables,
-            local_count: 0,
-            variables: 0,
+            declarations: self.declarations,
+            locals_count: 0,
             local_declarations: Vec::new(),
         }
     }
 
     fn new_temporary(&mut self) -> Stack {
-        if self.variables < self.local_count {
-            let id = self.variables + self.local_start;
-            self.variables += 1;
-            Stack(id)
-        } else {
-            self.local_count += 1;
-            self.variables += 1;
-            self.compiler.new_variable()
-        }
+        self.locals_count += 1;
+        self.compiler.new_variable()
     }
 
-    fn reuse_locals(&mut self) {
-        self.variables = 0;
-    }
-
+    #[allow(clippy::too_many_lines)]
     fn compile_expression(&mut self, expr: &Ranged<Expression>, dest: OpDestination) {
         match &**expr {
             Expression::Nil => self.compiler.code.push(Op::Unary {
-                source: ValueOrSource::Nil,
+                op: ValueOrSource::Nil,
+                dest,
+                kind: UnaryKind::Copy,
+            }),
+            Expression::Bool(bool) => self.compiler.code.push(Op::Unary {
+                op: ValueOrSource::Bool(*bool),
                 dest,
                 kind: UnaryKind::Copy,
             }),
             Expression::Int(int) => self.compiler.code.push(Op::Unary {
-                source: ValueOrSource::Int(*int),
+                op: ValueOrSource::Int(*int),
                 dest,
                 kind: UnaryKind::Copy,
             }),
             Expression::Float(float) => self.compiler.code.push(Op::Unary {
-                source: ValueOrSource::Float(*float),
+                op: ValueOrSource::Float(*float),
                 dest,
                 kind: UnaryKind::Copy,
             }),
             Expression::Lookup(name) => {
-                if let Some(var) = self.declared_variables.get(name) {
+                if let Some(var) = self.declarations.get(name) {
                     self.compiler.code.push(Op::Unary {
-                        source: ValueOrSource::Stack(var.stack),
+                        op: ValueOrSource::Stack(var.stack),
                         dest,
                         kind: UnaryKind::Copy,
                     });
+                } else {
+                    self.compiler.code.push(Op::Unary {
+                        op: ValueOrSource::Symbol(name.clone()),
+                        dest,
+                        kind: UnaryKind::Resolve,
+                    });
+                }
+            }
+            Expression::If(if_expr) => {
+                let condition = self.compile_source(&if_expr.condition);
+                let if_true = self.compiler.code.new_label();
+                self.compiler.code.jump_if(if_true, condition, ());
+                let after_true = self.compiler.code.new_label();
+                if let Some(when_false) = &if_expr.when_false {
+                    self.compile_expression(when_false, dest);
+                }
+                self.compiler.code.jump(after_true, ());
+                self.compiler.code.label(if_true);
+                self.compile_expression(&if_expr.when_true, dest);
+                self.compiler.code.label(after_true);
+            }
+            Expression::Assign(assign) => {
+                if let Some(var) = self.declarations.get(&assign.target) {
+                    if var.mutable {
+                        let var = var.stack;
+                        self.compile_expression(&assign.value, OpDestination::Stack(var));
+                        self.compiler.code.push(Op::Unary {
+                            op: ValueOrSource::Stack(var),
+                            dest,
+                            kind: UnaryKind::Copy,
+                        });
+                    } else {
+                        self.compiler
+                            .errors
+                            .push(Ranged::new(expr.range(), Error::VariableNotMutable));
+                    }
                 } else {
                     self.compiler
                         .errors
                         .push(Ranged::new(expr.range(), Error::UnknownVariable));
                 }
             }
-            Expression::Unary(_) => todo!(),
+            Expression::Unary(unary) => self.compile_unary(unary, dest),
             Expression::Binary(binop) => {
                 self.compile_binop(binop, dest);
             }
             Expression::Block { expressions, .. } => {
                 let mut block = self.enter_block();
-                for exp in expressions {
+                for (index, exp) in expressions.iter().enumerate() {
+                    let dest = if index == expressions.len() - 1 {
+                        dest
+                    } else {
+                        OpDestination::Void
+                    };
                     block.compile_expression(exp, dest);
-                    block.reuse_locals();
                 }
+            }
+            Expression::Call(call) => {
+                let function = match &call.function.0 {
+                    Expression::Lookup(name)
+                        if self
+                            .compiler
+                            .function_name
+                            .as_ref()
+                            .map_or(false, |f| f == name) =>
+                    {
+                        ValueOrSource::Nil
+                    }
+                    _ => self.compile_source(&call.function),
+                };
+                let mut parameters = Vec::with_capacity(call.parameters.len());
+                for param in &call.parameters {
+                    parameters.push(self.compile_source(param));
+                }
+                for (index, parameter) in parameters.into_iter().enumerate() {
+                    let Ok(register) = Register::try_from(index) else {
+                        todo!("handle large arg list")
+                    };
+                    self.compiler.code.copy(parameter, register);
+                }
+                self.compiler.code.call(
+                    function,
+                    u8::try_from(call.parameters.len()).expect("capped at 16 currently"),
+                    dest,
+                );
             }
             Expression::Variable(decl) => {
                 self.declare_variable(decl, dest);
+            }
+            Expression::Function(decl) => {
+                let mut fn_compiler = Compiler {
+                    function_name: Some(decl.name.0.clone()),
+                    ..Compiler::default()
+                };
+                let mut fn_variables = Map::new();
+                let mut fn_scope = Scope::root(&mut fn_compiler, &mut fn_variables);
+                for (index, var) in decl.parameters.iter().enumerate() {
+                    let Ok(register) = Register::try_from(index) else {
+                        todo!("handle large arg lists")
+                    };
+                    let stack = fn_scope.new_temporary();
+                    fn_scope.compiler.code.copy(register, stack);
+                    fn_scope.declarations.insert(
+                        var.0.clone(),
+                        BlockDeclaration {
+                            stack,
+                            mutable: false,
+                        },
+                    );
+                }
+                fn_scope.compile_expression(&decl.body, OpDestination::Register(Register::R0));
+                drop(fn_scope);
+
+                self.compiler.errors.append(&mut fn_compiler.errors);
+                let fun = BitcodeFunction::new(&decl.name.0).when(
+                    u8::try_from(decl.parameters.len()).expect("length limited to regisers"),
+                    fn_compiler.code,
+                );
+                // TODO real helper
+                self.compiler.code.push(Op::DeclareFunction(fun));
             }
         }
     }
@@ -204,15 +276,15 @@ impl<'a> Scope<'a> {
         let stack = self.new_temporary();
         self.compile_expression(&decl.value, OpDestination::Stack(stack));
         self.compiler.code.push(Op::Unary {
-            source: ValueOrSource::Stack(stack),
+            op: ValueOrSource::Stack(stack),
             dest,
             kind: UnaryKind::Copy,
         });
         let previous_declaration = self
-            .declared_variables
+            .declarations
             .insert(
                 decl.name.clone(),
-                BlockVariable {
+                BlockDeclaration {
                     stack,
                     mutable: decl.mutable,
                 },
@@ -221,6 +293,15 @@ impl<'a> Scope<'a> {
         self.local_declarations.push(LocalDeclaration {
             name: decl.name.clone(),
             previous_declaration,
+        });
+    }
+
+    fn compile_unary(&mut self, unary: &UnaryExpression, dest: OpDestination) {
+        let op = self.compile_source(&unary.operand);
+        self.compiler.code.push(Op::Unary {
+            op,
+            dest,
+            kind: unary.kind,
         });
     }
 
@@ -244,8 +325,8 @@ impl<'a> Scope<'a> {
         let left = self.compile_source(lhs);
         let right = self.compile_source(rhs);
         self.compiler.code.push(Op::BinOp {
-            left,
-            right,
+            op1: left,
+            op2: right,
             dest,
             kind,
         });
@@ -254,9 +335,24 @@ impl<'a> Scope<'a> {
     fn compile_source(&mut self, source: &Ranged<Expression>) -> ValueOrSource {
         match &source.0 {
             Expression::Nil => ValueOrSource::Nil,
+            Expression::Bool(bool) => ValueOrSource::Bool(*bool),
             Expression::Int(int) => ValueOrSource::Int(*int),
             Expression::Float(float) => ValueOrSource::Float(*float),
-            _ => {
+            Expression::Lookup(name) if self.declarations.contains(name) => {
+                let Some(decl) = self.declarations.get(name) else {
+                    unreachable!()
+                };
+                ValueOrSource::Stack(decl.stack)
+            }
+            Expression::Lookup(_)
+            | Expression::If(_)
+            | Expression::Function(_)
+            | Expression::Call(_)
+            | Expression::Variable(_)
+            | Expression::Assign(_)
+            | Expression::Unary(_)
+            | Expression::Binary(_)
+            | Expression::Block { .. } => {
                 let var = self.new_temporary();
                 self.compile_expression(source, OpDestination::Stack(var));
                 ValueOrSource::Stack(var)
@@ -274,19 +370,20 @@ impl Drop for Scope<'_> {
         {
             match previous_declaration {
                 Some(previous) => {
-                    self.declared_variables.insert(name, previous);
+                    self.declarations.insert(name, previous);
                 }
                 None => {
-                    self.declared_variables.remove(&name);
+                    self.declarations.remove(&name);
                 }
             }
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Error {
     UnknownVariable,
+    VariableNotMutable,
     Syntax(syntax::Error),
 }
 

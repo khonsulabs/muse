@@ -7,14 +7,13 @@ edition = "2021"
 
 [dependencies]
 ahash = "0.8.7"
-alot = "0.3.1"
 interner = "0.2.1"
-kempt = "0.2.3"
-ordered-varint = "2.0.0"
+kempt = { version = "0.2.3", features = ["serde"] }
 serde = { version = "1.0.195", features = ["derive"] }
 unicode-ident = "1.0.12"
 # cushy = { path = "../cushy" }
 
+[dev-dependencies]
 rsn = "0.1"
 
 [lints.clippy]
@@ -22,3 +21,8 @@ pedantic = "warn"
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+
+
+[[test]]
+name = "harness"
+harness = false

@@ -1,0 +1,42 @@
+if: {
+    src: r#"if true {
+        1
+    } else {
+        0
+    }"#,
+    output: Int(1),
+}
+
+if_false: {
+    src: r#"if false {
+        1
+    } else {
+        0
+    }"#,
+    output: Int(0),
+}
+
+if_false_no_else: {
+    src: r#"if false {
+        1
+    }"#,
+    output: Nil,
+}
+
+if_then: {
+    src: r#"if true then
+        1
+    else
+        0
+    "#,
+    output: Int(1),
+}
+
+if_then_false: {
+    src: r#"if false then
+        1
+    else
+        0
+    "#,
+    output: Int(0),
+}

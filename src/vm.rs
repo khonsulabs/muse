@@ -1,17 +1,17 @@
 use std::array;
 use std::fmt::Debug;
 use std::hash::Hash;
-use std::ops::{Index, IndexMut};
-use std::sync::Arc;
+use std::ops::{ControlFlow, Index, IndexMut};
+use std::sync::{Arc, OnceLock};
 
 use kempt::Map;
 use ops::{Destination, Instruction, Source};
 use serde::{Deserialize, Serialize};
 
-use self::bitcode::{OpDestination, ValueOrSource};
+use self::bitcode::{BitcodeFunction, OpDestination, ValueOrSource};
 use self::ops::Stack;
 use crate::symbol::Symbol;
-use crate::value::Value;
+use crate::value::{CustomType, Dynamic, Value};
 
 pub mod bitcode;
 pub mod ops;
@@ -19,10 +19,11 @@ pub mod ops;
 pub struct Vm {
     registers: [Value; 16],
     stack: Vec<Value>,
+    max_stack: usize,
     frames: Vec<Frame>,
     current_frame: usize,
-    max_stack: usize,
     max_depth: usize,
+    module: Module,
 }
 
 impl Default for Vm {
@@ -34,11 +35,63 @@ impl Default for Vm {
             current_frame: 0,
             max_stack: usize::MAX,
             max_depth: usize::MAX,
+            module: Module::default(),
         }
     }
 }
 
 impl Vm {
+    pub fn execute(&mut self, code: &Code, owner: Option<Value>) -> Result<Value, Fault> {
+        self.frames[self.current_frame].code = Some(code.clone());
+        self.frames[self.current_frame].code_owner = owner.unwrap_or_default();
+        self.frames[self.current_frame].instruction = 0;
+        self.execute_current_frame()
+    }
+
+    fn execute_current_frame(&mut self) -> Result<Value, Fault> {
+        let mut code = self.frames[self.current_frame]
+            .code
+            .clone()
+            .expect("missing frame code");
+        self.allocate(code.data.stack_requirement)?;
+        let base_frame = self.current_frame;
+        let mut code_frame = self.current_frame;
+        loop {
+            match code.step(self, self.frames[code_frame].instruction)? {
+                StepResult::Complete if code_frame >= base_frame && base_frame > 0 => {
+                    self.exit_frame()?;
+                    if self.current_frame < base_frame {
+                        break;
+                    }
+                }
+                StepResult::Complete => break,
+                StepResult::NextAddress(addr) => {
+                    self.frames[code_frame].instruction = addr;
+                }
+            }
+
+            if code_frame != self.current_frame {
+                code_frame = self.current_frame;
+                code = self.frames[self.current_frame]
+                    .code
+                    .clone()
+                    .expect("missing frame code");
+            }
+        }
+
+        Ok(self.registers[0].take())
+    }
+
+    pub fn execute_function(&mut self, body: &Code, function: Value) -> Result<Value, Fault> {
+        self.enter_frame(body.clone(), function)?;
+        self.execute_current_frame()
+    }
+
+    pub fn recurse_current_function(&mut self, arity: Arity) -> Result<Value, Fault> {
+        let current_function = self.frames[self.current_frame].code_owner.clone();
+        current_function.call(self, arity)
+    }
+
     pub fn declare_variable(&mut self, name: Symbol) -> Result<Stack, Fault> {
         let current_frame = &mut self.frames[self.current_frame];
         if current_frame.end < self.max_stack {
@@ -52,29 +105,49 @@ impl Vm {
         }
     }
 
-    pub fn resolve(&self, name: &Symbol) -> Result<Stack, Fault> {
-        let current_frame = &self.frames[self.current_frame];
-        current_frame
-            .variables
-            .get(name)
-            .copied()
-            .ok_or_else(|| Fault::UnknownSymbol(name.clone()))
+    pub fn declare(&mut self, name: Symbol, value: Value) -> Option<Value> {
+        self.module
+            .declarations
+            .insert(name, value)
+            .map(|f| f.value)
     }
 
-    pub fn enter_frame(&mut self, code: Code) -> Result<(), Fault> {
+    pub fn declare_function(&mut self, function: Function) -> Option<Value> {
+        self.module
+            .declarations
+            .insert(function.name().clone(), Value::dynamic(function))
+            .map(|f| f.value)
+    }
+
+    pub fn resolve(&self, name: &Symbol) -> Result<Value, Fault> {
+        let current_frame = &self.frames[self.current_frame];
+        if let Some(stack) = current_frame.variables.get(name) {
+            stack.load(self)
+        } else if let Some(value) = self.module.declarations.get(name) {
+            Ok(value.clone())
+        } else {
+            Err(Fault::UnknownSymbol(name.clone()))
+        }
+    }
+
+    fn enter_frame(&mut self, code: Code, owner: Value) -> Result<(), Fault> {
         if self.current_frame < self.max_depth {
             let current_frame_end = self.frames[self.current_frame].end;
 
             self.current_frame += 1;
             if self.current_frame < self.frames.len() {
+                self.frames[self.current_frame].clear();
                 self.frames[self.current_frame].start = current_frame_end;
                 self.frames[self.current_frame].end = current_frame_end;
-                self.frames[self.current_frame].variables.clear();
+                self.frames[self.current_frame].code = Some(code);
+                self.frames[self.current_frame].instruction = 0;
+                self.frames[self.current_frame].code_owner = owner;
             } else {
                 self.frames.push(Frame {
                     start: current_frame_end,
                     end: current_frame_end,
-                    code,
+                    code: Some(code),
+                    code_owner: owner,
                     instruction: 0,
                     variables: Map::new(),
                 });
@@ -86,7 +159,7 @@ impl Vm {
     }
 
     pub fn exit_frame(&mut self) -> Result<(), Fault> {
-        if self.current_frame > 1 {
+        if self.current_frame >= 1 {
             let current_frame = &self.frames[self.current_frame];
             self.stack[current_frame.start..current_frame.end].fill_with(|| Value::Nil);
             self.current_frame -= 1;
@@ -96,8 +169,7 @@ impl Vm {
         }
     }
 
-    pub fn allocate(&mut self, count: u16) -> Result<Stack, Fault> {
-        let count = usize::from(count);
+    pub fn allocate(&mut self, count: usize) -> Result<Stack, Fault> {
         let current_frame = &mut self.frames[self.current_frame];
         let index = Stack(current_frame.end);
         match current_frame.end.checked_add(count) {
@@ -110,6 +182,23 @@ impl Vm {
             }
             _ => Err(Fault::StackOverflow),
         }
+    }
+
+    #[must_use]
+    pub fn current_instruction(&self) -> usize {
+        self.frames[self.current_frame].instruction
+    }
+
+    #[must_use]
+    pub fn current_code(&self) -> &Code {
+        self.frames[self.current_frame]
+            .code
+            .as_ref()
+            .expect("missing frame code")
+    }
+
+    pub fn jump_to(&mut self, instruction: usize) {
+        self.frames[self.current_frame].instruction = instruction;
     }
 
     #[must_use]
@@ -133,28 +222,9 @@ impl Vm {
         self.frames[self.current_frame].end - self.frames[self.current_frame].start
     }
 
-    pub fn execute(&mut self, code: &Code) -> Result<Value, Fault> {
-        let mut code = code.clone();
-        self.frames[self.current_frame].code = code.clone();
-        self.frames[self.current_frame].instruction = 0;
-
-        let mut code_frame = self.current_frame;
-        loop {
-            match code.step(self, self.frames[self.current_frame].instruction)? {
-                StepResult::Complete if self.current_frame > 0 => self.exit_frame()?,
-                StepResult::Complete => break,
-                StepResult::NextAddress(addr) => {
-                    self.frames[self.current_frame].instruction = addr;
-                }
-            }
-
-            if code_frame != self.current_frame {
-                code_frame = self.current_frame;
-                code = self.frames[self.current_frame].code.clone();
-            }
-        }
-
-        Ok(self.registers[1].take())
+    pub fn reset(&mut self) {
+        self.current_frame = 0;
+        self.frames[0].clear();
     }
 }
 
@@ -205,6 +275,16 @@ impl TryFrom<u8> for Register {
     }
 }
 
+impl TryFrom<usize> for Register {
+    type Error = InvalidRegister;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        u8::try_from(value)
+            .map_err(|_| InvalidRegister)
+            .and_then(Self::try_from)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct InvalidRegister;
 
@@ -223,7 +303,7 @@ impl IndexMut<Register> for Vm {
 }
 
 impl Source for Register {
-    fn load(&self, vm: &mut Vm) -> Result<Value, Fault> {
+    fn load(&self, vm: &Vm) -> Result<Value, Fault> {
         Ok(vm[*self].clone())
     }
 
@@ -262,11 +342,21 @@ struct Frame {
     start: usize,
     end: usize,
     instruction: usize,
-    code: Code,
+    code: Option<Code>,
+    code_owner: Value,
     variables: Map<Symbol, Stack>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+impl Frame {
+    fn clear(&mut self) {
+        self.variables.clear();
+        self.instruction = usize::MAX;
+        self.code_owner = Value::default();
+        self.code = None;
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Fault {
     UnknownSymbol(Symbol),
     IncorrectNumberOfArguments,
@@ -279,16 +369,106 @@ pub enum Fault {
     OutOfBounds,
     DivideByZero,
     InvalidInstructionAddress,
+    ExpectedSymbol,
+    InvalidArity,
+    InvalidLabel,
+}
+
+#[derive(Debug, Clone)]
+pub struct Function {
+    name: Symbol,
+    bodies: Map<Arity, Code>,
+    varg_bodies: Map<Arity, Code>,
+}
+
+impl Function {
+    #[must_use]
+    pub fn new(name: impl Into<Symbol>) -> Self {
+        Self {
+            name: name.into(),
+            bodies: Map::new(),
+            varg_bodies: Map::new(),
+        }
+    }
+
+    pub fn insert_arity(&mut self, arity: impl Into<Arity>, body: impl Into<Code>) {
+        self.bodies.insert(arity.into(), body.into());
+    }
+
+    #[must_use]
+    pub fn when(mut self, arity: impl Into<Arity>, body: impl Into<Code>) -> Self {
+        self.insert_arity(arity, body);
+        self
+    }
+
+    #[must_use]
+    pub const fn name(&self) -> &Symbol {
+        &self.name
+    }
+}
+
+impl CustomType for Function {
+    fn call(&self, vm: &mut Vm, this: &Dynamic, arity: Arity) -> Result<Value, Fault> {
+        if let Some(body) = self.bodies.get(&arity).or_else(|| {
+            self.varg_bodies
+                .iter()
+                .rev()
+                .find_map(|va| (va.key() <= &arity).then_some(&va.value))
+        }) {
+            vm.execute_function(body, Value::Dynamic(this.clone()))
+        } else {
+            Err(Fault::IncorrectNumberOfArguments)
+        }
+    }
+}
+
+impl Instruction for Function {
+    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+        vm.declare_function(self.clone());
+        Ok(ControlFlow::Continue(()))
+    }
+
+    fn as_op(&self) -> bitcode::Op {
+        bitcode::Op::DeclareFunction(BitcodeFunction::from(self))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+pub struct Arity(pub u8);
+
+impl From<u8> for Arity {
+    fn from(arity: u8) -> Self {
+        Self(arity)
+    }
+}
+
+impl From<Arity> for u8 {
+    fn from(arity: Arity) -> Self {
+        arity.0
+    }
+}
+
+impl PartialEq<u8> for Arity {
+    fn eq(&self, other: &u8) -> bool {
+        &self.0 == other
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Code {
+    data: Arc<CodeData>,
 }
 
 #[derive(Default, Debug, Clone)]
-pub struct Code {
-    instructions: Arc<Vec<Arc<dyn Instruction>>>,
+struct CodeData {
+    instructions: Vec<Arc<dyn Instruction>>,
+    labels: Vec<usize>,
+    stack_requirement: usize,
 }
 
 impl Code {
     pub fn push_boxed(&mut self, instruction: Arc<dyn Instruction>) {
-        Arc::make_mut(&mut self.instructions).push(instruction);
+        Arc::make_mut(&mut self.data).instructions.push(instruction);
     }
 
     pub fn push<I>(&mut self, instruction: I)
@@ -309,14 +489,25 @@ impl Code {
 
     fn step(&self, vm: &mut Vm, address: usize) -> Result<StepResult, Fault> {
         let instruction = self
+            .data
             .instructions
             .get(address)
             .ok_or(Fault::InvalidInstructionAddress)?;
-        instruction.execute(vm)?;
-
-        match address.checked_add(1) {
-            Some(next) if next < self.instructions.len() => Ok(StepResult::NextAddress(next)),
-            _ => Ok(StepResult::Complete),
+        // println!("Executing {instruction:?}");
+        if instruction.execute(vm)?.is_break() {
+            Ok(StepResult::Complete)
+        } else if vm.current_instruction() == address {
+            match address.checked_add(1) {
+                Some(next) if next < self.data.instructions.len() => {
+                    Ok(StepResult::NextAddress(next))
+                }
+                _ => Ok(StepResult::Complete),
+            }
+        } else if vm.current_instruction() < self.data.instructions.len() {
+            // Execution caused a jump
+            Ok(StepResult::NextAddress(vm.current_instruction()))
+        } else {
+            Ok(StepResult::Complete)
         }
     }
 
@@ -325,7 +516,23 @@ impl Code {
     // }
 }
 
+impl Default for Code {
+    fn default() -> Self {
+        static EMPTY: OnceLock<Code> = OnceLock::new();
+        EMPTY
+            .get_or_init(|| Code {
+                data: Arc::default(),
+            })
+            .clone()
+    }
+}
+
 enum StepResult {
     Complete,
     NextAddress(usize),
+}
+
+#[derive(Default, Debug)]
+pub struct Module {
+    declarations: Map<Symbol, Value>,
 }
