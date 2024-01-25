@@ -27,6 +27,7 @@ pub struct Vm {
     max_stack: usize,
     frames: Vec<Frame>,
     current_frame: usize,
+    has_anonymous_frame: bool,
     max_depth: usize,
     budget: Budget,
     module: Module,
@@ -43,6 +44,7 @@ impl Default for Vm {
             frames: vec![Frame::default()],
             stack: Vec::new(),
             current_frame: 0,
+            has_anonymous_frame: false,
             max_stack: usize::MAX,
             max_depth: usize::MAX,
             budget: Budget::default(),
@@ -54,17 +56,29 @@ impl Default for Vm {
 }
 
 impl Vm {
-    pub fn execute(&mut self, code: &Code, owner: Option<Value>) -> Result<Value, Fault> {
+    pub fn execute(&mut self, code: &Code) -> Result<Value, Fault> {
+        self.execute_owned(code, None)
+    }
+
+    fn prepare_owned(&mut self, code: &Code, owner: Option<Value>) -> Result<(), Fault> {
         self.frames[self.current_frame].code = Some(code.clone());
         self.frames[self.current_frame].code_owner = owner.unwrap_or_default();
         self.frames[self.current_frame].instruction = 0;
-        match self.start_current_frame() {
-            Err(Fault::Waiting) => {
-                self.parker.park();
-                self.resume()
-            }
-            other => other,
-        }
+
+        self.allocate(code.data.stack_requirement)?;
+        Ok(())
+    }
+
+    fn execute_owned(&mut self, code: &Code, owner: Option<Value>) -> Result<Value, Fault> {
+        self.prepare_owned(code, owner)?;
+
+        self.resume()
+    }
+
+    pub fn execute_async(&mut self, code: &Code) -> Result<ExecuteAsync<'_>, Fault> {
+        self.prepare_owned(code, None)?;
+
+        Ok(ExecuteAsync(self))
     }
 
     pub fn block_on<R>(&self, mut future: impl Future<Output = R> + Unpin) -> R {
@@ -78,21 +92,13 @@ impl Vm {
         }
     }
 
-    pub fn increase_budget(&mut self, amount: usize) {
-        self.budget.allocate(amount);
+    #[must_use]
+    pub const fn waker(&self) -> &Waker {
+        &self.waker
     }
 
-    fn start_current_frame(&mut self) -> Result<Value, Fault> {
-        self.allocate(
-            self.frames[self.current_frame]
-                .code
-                .as_ref()
-                .expect("missing frame code")
-                .data
-                .stack_requirement,
-        )?;
-
-        self.resume()
+    pub fn increase_budget(&mut self, amount: usize) {
+        self.budget.allocate(amount);
     }
 
     pub fn resume(&mut self) -> Result<Value, Fault> {
@@ -107,12 +113,15 @@ impl Vm {
     }
 
     fn resume_async(&mut self) -> Result<Value, Fault> {
-        let mut code = self.frames[self.current_frame]
+        if self.has_anonymous_frame {
+            self.current_frame -= 1;
+        }
+        let base_frame = self.current_frame;
+        let mut code_frame = base_frame;
+        let mut code = self.frames[base_frame]
             .code
             .clone()
             .expect("missing frame code");
-        let base_frame = self.current_frame;
-        let mut code_frame = self.current_frame;
         loop {
             self.budget.charge()?;
             match code.step(self, self.frames[code_frame].instruction)? {
@@ -140,9 +149,21 @@ impl Vm {
         Ok(self.registers[0].take())
     }
 
-    pub fn execute_function(&mut self, body: &Code, function: Value) -> Result<Value, Fault> {
-        self.enter_frame(body.clone(), function)?;
-        self.start_current_frame()
+    pub fn enter_anonymous_frame(&mut self) -> Result<(), Fault> {
+        if self.has_anonymous_frame {
+            self.current_frame += 1;
+            Ok(())
+        } else {
+            self.has_anonymous_frame = true;
+            self.enter_frame(None, Value::Nil)
+        }
+    }
+
+    fn execute_function(&mut self, body: &Code, function: Value) -> Result<Value, Fault> {
+        self.enter_frame(Some(body.clone()), function)?;
+
+        self.allocate(body.data.stack_requirement)?;
+        self.resume()
     }
 
     pub fn recurse_current_function(&mut self, arity: Arity) -> Result<Value, Fault> {
@@ -188,7 +209,7 @@ impl Vm {
         }
     }
 
-    fn enter_frame(&mut self, code: Code, owner: Value) -> Result<(), Fault> {
+    fn enter_frame(&mut self, code: Option<Code>, owner: Value) -> Result<(), Fault> {
         if self.current_frame < self.max_depth {
             let current_frame_end = self.frames[self.current_frame].end;
 
@@ -197,14 +218,14 @@ impl Vm {
                 self.frames[self.current_frame].clear();
                 self.frames[self.current_frame].start = current_frame_end;
                 self.frames[self.current_frame].end = current_frame_end;
-                self.frames[self.current_frame].code = Some(code);
+                self.frames[self.current_frame].code = code;
                 self.frames[self.current_frame].instruction = 0;
                 self.frames[self.current_frame].code_owner = owner;
             } else {
                 self.frames.push(Frame {
                     start: current_frame_end,
                     end: current_frame_end,
-                    code: Some(code),
+                    code,
                     code_owner: owner,
                     instruction: 0,
                     variables: Map::new(),
@@ -218,6 +239,7 @@ impl Vm {
 
     pub fn exit_frame(&mut self) -> Result<(), Fault> {
         if self.current_frame >= 1 {
+            self.has_anonymous_frame = false;
             let current_frame = &self.frames[self.current_frame];
             self.stack[current_frame.start..current_frame.end].fill_with(|| Value::Nil);
             self.current_frame -= 1;
@@ -248,11 +270,8 @@ impl Vm {
     }
 
     #[must_use]
-    pub fn current_code(&self) -> &Code {
-        self.frames[self.current_frame]
-            .code
-            .as_ref()
-            .expect("missing frame code")
+    pub fn current_code(&self) -> Option<&Code> {
+        self.frames[self.current_frame].code.as_ref()
     }
 
     pub fn jump_to(&mut self, instruction: usize) {
@@ -282,7 +301,11 @@ impl Vm {
 
     pub fn reset(&mut self) {
         self.current_frame = 0;
-        self.frames[0].clear();
+        for frame in &mut self.frames {
+            frame.clear();
+        }
+        self.registers.fill_with(|| Value::Nil);
+        self.stack.fill_with(|| Value::Nil);
     }
 }
 
@@ -591,7 +614,7 @@ impl Future for ExecuteAsync<'_> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         // Temporarily replace the VM's waker with this context's waker.
         let previous_waker = std::mem::replace(&mut self.0.waker, cx.waker().clone());
-        let result = match self.0.resume() {
+        let result = match self.0.resume_async() {
             Err(Fault::Waiting) => Poll::Pending,
             other => Poll::Ready(other),
         };

@@ -94,6 +94,7 @@ impl Source for Label {
     fn load(&self, vm: &super::Vm) -> Result<Value, Fault> {
         let instruction = vm
             .current_code()
+            .expect("missing frame code")
             .data
             .labels
             .get(self.0)
@@ -112,6 +113,7 @@ impl Destination for Label {
         if value.truthy(vm) {
             let instruction = vm
                 .current_code()
+                .expect("missing frame code")
                 .data
                 .labels
                 .get(self.0)

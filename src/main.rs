@@ -13,6 +13,6 @@ fn main() {
         ",
     )
     .unwrap();
-    let result = vm.execute(&code, None).unwrap();
+    let result = vm.execute(&code).unwrap();
     assert_eq!(result.as_i64(), Some(5));
 }

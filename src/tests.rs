@@ -12,7 +12,7 @@ fn budgeting() {
     let mut vm = Vm::default();
     // Turn on budgeting, but don't give any budget.
     vm.increase_budget(0);
-    assert_eq!(vm.execute(&code, None).unwrap_err(), Fault::NoBudget);
+    assert_eq!(vm.execute(&code).unwrap_err(), Fault::NoBudget);
     for value in 0..COUNT_TO {
         // Step through by allowing one op at a time.
         vm.increase_budget(1);

@@ -29,7 +29,7 @@ pub struct Case {
 impl Case {
     fn run(&self) -> TestOutput {
         match Compiler::compile(&self.src) {
-            Ok(code) => match Vm::default().execute(&code, None) {
+            Ok(code) => match Vm::default().execute(&code) {
                 Ok(Value::Nil) => TestOutput::Nil,
                 Ok(Value::Bool(bool)) => TestOutput::Bool(bool),
                 Ok(Value::Int(v)) => TestOutput::Int(v),

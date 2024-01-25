@@ -1,8 +1,11 @@
 use std::any::Any;
 use std::cmp::Ordering;
 use std::fmt::Debug;
+use std::future::Future;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 use ahash::AHasher;
 
@@ -96,7 +99,12 @@ impl Value {
 
     pub fn call(&self, vm: &mut Vm, arity: impl Into<Arity>) -> Result<Value, Fault> {
         match self {
-            Value::Dynamic(dynamic) => dynamic.call(vm, arity),
+            Value::Dynamic(dynamic) => {
+                vm.enter_anonymous_frame()?;
+                let result = dynamic.call(vm, arity)?;
+                vm.exit_frame()?;
+                Ok(result)
+            }
             Value::Nil => vm.recurse_current_function(arity.into()),
             _ => Err(Fault::NotAFunction),
         }
@@ -851,6 +859,69 @@ where
 {
     fn call(&self, vm: &mut Vm, _this: &Dynamic, arity: Arity) -> Result<Value, Fault> {
         self.0(vm, arity)
+    }
+}
+
+#[derive(Clone)]
+pub struct AsyncFunction<F>(F);
+
+impl<F> AsyncFunction<F> {
+    pub fn new(function: F) -> Self {
+        Self(function)
+    }
+}
+
+impl<F> Debug for AsyncFunction<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("AsyncFunction")
+            .field(&std::ptr::addr_of!(self.0).cast::<()>())
+            .finish()
+    }
+}
+
+impl<F, Fut> CustomType for AsyncFunction<F>
+where
+    F: Clone + Fn(&mut Vm, Arity) -> Fut + 'static,
+    Fut: Future<Output = Result<Value, Fault>> + 'static,
+{
+    fn call(&self, vm: &mut Vm, _this: &Dynamic, arity: Arity) -> Result<Value, Fault> {
+        if vm.current_instruction() == 0 {
+            let future = self.0(vm, arity);
+            vm.allocate(1)?;
+            vm.current_frame_mut()[0] =
+                Value::dynamic(ValueFuture(Arc::new(Mutex::new(Box::pin(future)))));
+            vm.jump_to(1);
+        }
+
+        let Some(future) = vm.current_frame()[0]
+            .as_dynamic()
+            .and_then(|d| d.downcast_ref::<ValueFuture<Fut>>())
+        else {
+            unreachable!("missing future")
+        };
+
+        let mut future = future.0.lock().expect("poisoned");
+        let mut cx = Context::from_waker(vm.waker());
+        match Future::poll(std::pin::pin!(&mut *future), &mut cx) {
+            Poll::Ready(result) => result,
+            Poll::Pending => Err(Fault::Waiting),
+        }
+    }
+}
+
+struct ValueFuture<F>(Arc<Mutex<Pin<Box<F>>>>);
+
+impl<F> Clone for ValueFuture<F> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<F> CustomType for ValueFuture<F> where F: 'static {}
+
+impl<F> Debug for ValueFuture<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ValueFuture").finish_non_exhaustive()
     }
 }
 

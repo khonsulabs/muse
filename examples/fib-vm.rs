@@ -38,5 +38,5 @@ fn main() {
     main.resolve("fib", R(1));
     main.call(R(1), 1, R(0));
     let code = Code::from(&main);
-    dbg!(vm.execute(&code, None).unwrap());
+    dbg!(vm.execute(&code).unwrap());
 }
