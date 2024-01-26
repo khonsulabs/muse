@@ -6,13 +6,14 @@ use kempt::Map;
 use serde::{Deserialize, Serialize};
 
 use super::ops::{
-    Add, Destination, Divide, Equal, GreaterThan, GreaterThanOrEqual, IntegerDivide, Invoke, Jump,
-    JumpIf, LessThan, LessThanOrEqual, Load, Multiply, Power, Remainder, Resolve, Return, Source,
-    Subtract,
+    Add, Call, Destination, Divide, Equal, GreaterThan, GreaterThanOrEqual, IntegerDivide, Invoke,
+    Jump, JumpIf, LessThan, LessThanOrEqual, Load, Multiply, NewMap, Power, Remainder, Resolve,
+    Return, Source, Subtract,
 };
 use super::{Arity, Code, Fault, Function, Register};
+use crate::compiler::UnaryKind;
 use crate::symbol::Symbol;
-use crate::syntax::{BinaryKind, CompareKind, UnaryKind};
+use crate::syntax::{BinaryKind, CompareKind};
 use crate::value::Value;
 use crate::vm::ops::Stack;
 
@@ -84,6 +85,12 @@ pub enum Op {
         op2: ValueOrSource,
         dest: OpDestination,
         kind: BinaryKind,
+    },
+    Invoke {
+        target: ValueOrSource,
+        arity: ValueOrSource,
+        name: Symbol,
+        dest: OpDestination,
     },
 }
 
@@ -181,7 +188,7 @@ impl BitcodeBlock {
             op1: function.into(),
             op2: arity.into(),
             dest: dest.into(),
-            kind: BinaryKind::Invoke,
+            kind: BinaryKind::Call,
         });
     }
 
@@ -291,6 +298,18 @@ impl BitcodeBlock {
         });
     }
 
+    pub fn new_map(
+        &mut self,
+        element_count: impl Into<ValueOrSource>,
+        dest: impl Into<OpDestination>,
+    ) {
+        self.push(Op::Unary {
+            op: element_count.into(),
+            dest: dest.into(),
+            kind: UnaryKind::NewMap,
+        });
+    }
+
     pub fn resolve(&mut self, source: impl Into<ValueOrSource>, dest: impl Into<OpDestination>) {
         self.push(Op::Unary {
             op: source.into(),
@@ -372,6 +391,7 @@ impl From<&'_ BitcodeBlock> for Code {
                     UnaryKind::Copy => match_copy(source, dest, &mut code),
                     UnaryKind::Resolve => match_resolve(source, dest, &mut code),
                     UnaryKind::Jump => match_jump(source, dest, &mut code),
+                    UnaryKind::NewMap => match_new_map(source, dest, &mut code),
                     UnaryKind::LogicalNot => todo!(),
                     UnaryKind::BitwiseNot => todo!(),
                     UnaryKind::Negate => todo!(),
@@ -389,7 +409,7 @@ impl From<&'_ BitcodeBlock> for Code {
                     BinaryKind::IntegerDivide => match_integer_divide(left, right, dest, &mut code),
                     BinaryKind::Remainder => match_remainder(left, right, dest, &mut code),
                     BinaryKind::Power => match_power(left, right, dest, &mut code),
-                    BinaryKind::Invoke => match_invoke(left, right, dest, &mut code),
+                    BinaryKind::Call => match_call(left, right, dest, &mut code),
                     BinaryKind::JumpIf => match_jump_if(left, right, dest, &mut code),
                     BinaryKind::Bitwise(_) => todo!(),
                     BinaryKind::Logical(_) => todo!(),
@@ -401,6 +421,12 @@ impl From<&'_ BitcodeBlock> for Code {
                         CompareKind::GreaterThanOrEqual => match_gte(left, right, dest, &mut code),
                     },
                 },
+                Op::Invoke {
+                    target,
+                    arity,
+                    name,
+                    dest,
+                } => match_invoke(target, arity, dest, &mut code, name),
             }
         }
         code
@@ -516,41 +542,61 @@ where
     });
 }
 
+decode_sd!(match_new_map, compile_new_map);
+
+fn compile_new_map<Arity, Dest>(
+    _dest: &OpDestination,
+    code: &mut Code,
+    element_count: Arity,
+    dest: Dest,
+) where
+    Arity: Source,
+    Dest: Destination,
+{
+    code.push(NewMap {
+        element_count,
+        dest,
+    });
+}
+
 macro_rules! decode_ssd {
-    ($decode_name:ident, $compile_name:ident) => {
+    ($decode_name:ident, $compile_name:ident $(, $($name:ident: $type:ty),+)?) => {
         fn $decode_name(
             s1: &ValueOrSource,
             s2: &ValueOrSource,
             d: &OpDestination,
             code: &mut Code,
+            $($($name: $type),+,)?
         ) {
-            fn source<Lhs>(source: (&ValueOrSource, &OpDestination), code: &mut Code, source1: Lhs)
+            fn source<Lhs>(source: (&ValueOrSource, &OpDestination), code: &mut Code,
+            $($($name: $type),+,)? source1: Lhs)
             where
                 Lhs: Source,
             {
-                decode_source!(source.0, source, code, source_source, source1)
+                decode_source!(source.0, source, code, source_source, source1 $(, $($name),+)?)
             }
 
             fn source_source<Lhs, Rhs>(
                 source: (&ValueOrSource, &OpDestination),
                 code: &mut Code,
                 source1: Lhs,
+                $($($name: $type),+,)?
                 source2: Rhs,
             ) where
                 Lhs: Source,
                 Rhs: Source,
             {
-                decode_dest!(source.1, source, code, $compile_name, source1, source2)
+                decode_dest!(source.1, source, code, $compile_name, source1, source2 $(, $($name),+)?)
             }
 
-            decode_source!(s1, (s2, d), code, source)
+            decode_source!(s1, (s2, d), code, source $(, $($name),+)?)
         }
     };
 }
 
-decode_ssd!(match_invoke, compile_invoke);
+decode_ssd!(match_call, compile_call);
 
-fn compile_invoke<Func, NumArgs, Dest>(
+fn compile_call<Func, NumArgs, Dest>(
     _source: (&ValueOrSource, &OpDestination),
     code: &mut Code,
     function: Func,
@@ -561,8 +607,30 @@ fn compile_invoke<Func, NumArgs, Dest>(
     NumArgs: Source,
     Dest: Destination,
 {
-    code.push(Invoke {
+    code.push(Call {
         function,
+        arity,
+        dest,
+    });
+}
+
+decode_ssd!(match_invoke, compile_invoke, name: &Symbol);
+
+fn compile_invoke<Func, NumArgs, Dest>(
+    _source: (&ValueOrSource, &OpDestination),
+    code: &mut Code,
+    function: Func,
+    arity: NumArgs,
+    name: &Symbol,
+    dest: Dest,
+) where
+    Func: Source,
+    NumArgs: Source,
+    Dest: Destination,
+{
+    code.push(Invoke {
+        name: name.clone(),
+        target: function,
         arity,
         dest,
     });

@@ -9,6 +9,7 @@ macro_rules! impl_from {
 }
 
 pub mod compiler;
+pub mod map;
 pub mod symbol;
 pub mod syntax;
 pub mod value;

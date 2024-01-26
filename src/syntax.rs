@@ -94,9 +94,10 @@ pub enum Expression {
     Bool(bool),
     Int(i64),
     Float(f64),
-    Lookup(Symbol),
+    Lookup(Box<Lookup>),
     If(Box<IfExpression>),
     Function(Box<FunctionDefinition>),
+    Map(Box<MapExpression>),
     Call(Box<FunctionCall>),
     Variable(Box<Variable>),
     Assign(Box<Assignment>),
@@ -106,6 +107,34 @@ pub enum Expression {
         name: Option<Symbol>,
         expressions: Vec<Ranged<Expression>>,
     },
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct Block {
+    pub name: Option<Symbol>,
+    pub expressions: Vec<Ranged<Expression>>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq)]
+pub struct MapExpression {
+    pub values: Vec<MapField>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapField {
+    pub key: Ranged<Expression>,
+    pub value: Ranged<Expression>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lookup {
+    pub base: Option<Ranged<Expression>>,
+    pub name: Symbol,
+}
+
+impl From<Symbol> for Lookup {
+    fn from(name: Symbol) -> Self {
+        Self { name, base: None }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -130,7 +159,7 @@ pub struct FunctionCall {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assignment {
-    pub target: Symbol,
+    pub target: Ranged<Lookup>,
     pub value: Ranged<Expression>,
 }
 
@@ -146,8 +175,6 @@ pub enum UnaryKind {
     BitwiseNot,
     Negate,
     Copy,
-    Resolve,
-    Jump,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -159,7 +186,7 @@ pub struct BinaryExpression {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum BinaryKind {
-    Invoke,
+    Call,
     Add,
     Subtract,
     Multiply,
@@ -341,7 +368,7 @@ impl<'a> ParserConfig<'a> {
         {
             'infix: while let Some(possible_operator) = tokens.peek() {
                 for level in &self.parselets.infix.0[start_index..] {
-                    if let Some(parselet) = level.find_parselet(&possible_operator) {
+                    if let Some(parselet) = level.find_parselet(&possible_operator, tokens) {
                         tokens.next()?;
                         lhs =
                             parselet.parse(lhs, tokens, &self.with_precedence(level.precedence))?;
@@ -369,7 +396,7 @@ impl<'a> ParserConfig<'a> {
             .iter()
             .skip_while(|level| level.precedence < self.minimum_precedence)
         {
-            if let Some(parselet) = level.find_parselet(&token) {
+            if let Some(parselet) = level.find_parselet(&token, tokens) {
                 return parselet.parse(token, tokens, &self.with_precedence(level.precedence));
             }
         }
@@ -461,13 +488,13 @@ impl<T> SharedPredence<T>
 where
     T: Parselet,
 {
-    fn find_parselet(&self, token: &Token) -> Option<&T> {
+    fn find_parselet(&self, token: &Token, tokens: &mut TokenReader<'_>) -> Option<&T> {
         if let Some(parselet) = self.by_token.get(token) {
             Some(parselet)
         } else if let Some(parselet) = self
             .wildcard
             .iter()
-            .find(|parselet| parselet.matches(token))
+            .find(|parselet| parselet.matches(token, tokens))
         {
             Some(parselet)
         } else {
@@ -480,7 +507,7 @@ trait Parselet {
     fn token(&self) -> Option<Token>;
 
     #[allow(unused_variables)]
-    fn matches(&self, token: &Token) -> bool {
+    fn matches(&self, token: &Token, tokens: &mut TokenReader<'_>) -> bool {
         matches!(self.token(), Some(token))
     }
 }
@@ -489,8 +516,8 @@ impl<T> Parselet for Box<T>
 where
     T: Parselet + ?Sized,
 {
-    fn matches(&self, token: &Token) -> bool {
-        T::matches(self, token)
+    fn matches(&self, token: &Token, tokens: &mut TokenReader<'_>) -> bool {
+        T::matches(self, token, tokens)
     }
 
     fn token(&self) -> Option<Token> {
@@ -514,7 +541,7 @@ impl Parselet for Term {
         None
     }
 
-    fn matches(&self, token: &Token) -> bool {
+    fn matches(&self, token: &Token, _tokens: &mut TokenReader<'_>) -> bool {
         matches!(
             token,
             Token::Int(_) | Token::Float(_) | Token::Identifier(_)
@@ -532,7 +559,10 @@ impl PrefixParselet for Term {
         match token.0 {
             Token::Int(value) => Ok(Ranged::new(token.1, Expression::Int(value))),
             Token::Float(value) => Ok(Ranged::new(token.1, Expression::Float(value))),
-            Token::Identifier(value) => Ok(Ranged::new(token.1, Expression::Lookup(value))),
+            Token::Identifier(value) => Ok(Ranged::new(
+                token.1,
+                Expression::Lookup(Box::new(Lookup::from(value))),
+            )),
             _ => unreachable!("parse called with invalid token"),
         }
     }
@@ -732,6 +762,10 @@ impl PrefixParselet for Braces {
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        if tokens.peek_token() == Some(Token::Close(Paired::Brace)) {
+            tokens.next()?;
+            return Ok(tokens.ranged(token.range().start.., Expression::Map(Box::default())));
+        }
         let expr = config.parse_expression(tokens)?;
 
         match tokens.peek() {
@@ -935,15 +969,22 @@ impl PrefixParselet for If {
     }
 }
 
-struct Defun;
+struct Fn;
 
-impl Parselet for Defun {
+impl Parselet for Fn {
     fn token(&self) -> Option<Token> {
-        Some(Token::Identifier(Symbol::defun_symbol()))
+        None
+    }
+
+    fn matches(&self, token: &Token, tokens: &mut TokenReader<'_>) -> bool {
+        matches!(token, Token::Identifier(ident) if ident == &Symbol::fn_symbol())
+            && tokens
+                .peek_token()
+                .map_or(false, |t| matches!(t, Token::Identifier(_)))
     }
 }
 
-impl PrefixParselet for Defun {
+impl PrefixParselet for Fn {
     fn parse(
         &self,
         token: Ranged<Token>,
@@ -980,6 +1021,35 @@ impl PrefixParselet for Defun {
                 name: Ranged::new(name_token.1, name.clone()),
                 parameters,
                 body,
+            })),
+        ))
+    }
+}
+
+struct Dot;
+
+impl Parselet for Dot {
+    fn token(&self) -> Option<Token> {
+        Some(Token::Char('.'))
+    }
+}
+
+impl InfixParselet for Dot {
+    fn parse(
+        &self,
+        lhs: Ranged<Expression>,
+        tokens: &mut TokenReader<'_>,
+        _config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        let name_token = tokens.next()?;
+        let Token::Identifier(name) = name_token.0 else {
+            return Err(Ranged::new(name_token.1, Error::ExpectedName));
+        };
+        Ok(tokens.ranged(
+            lhs.range().start..,
+            Expression::Lookup(Box::new(Lookup {
+                base: Some(lhs),
+                name,
             })),
         ))
     }
@@ -1063,13 +1133,13 @@ impl InfixParselet for Assign {
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
-        match &lhs.0 {
-            Expression::Lookup(name) => {
+        match lhs.0 {
+            Expression::Lookup(lookup) => {
                 let value = config.parse(tokens)?;
                 Ok(tokens.ranged(
-                    lhs.range().start..,
+                    lhs.1.start..,
                     Expression::Assign(Box::new(Assignment {
-                        target: name.clone(),
+                        target: Ranged::new(lhs.1, *lookup),
                         value,
                     })),
                 ))
@@ -1104,7 +1174,7 @@ fn parselets() -> Parselets {
     parser.push_infix(parselets![BitwiseAnd]);
     parser.push_infix(parselets![Multiply, Divide, Remainder, IntegerDivide]);
     parser.push_infix(parselets![Add, Subtract]);
-    parser.push_infix(parselets![Parentheses]);
+    parser.push_infix(parselets![Parentheses, Dot]);
     parser.push_prefix(parselets![
         Braces,
         Parentheses,
@@ -1115,7 +1185,7 @@ fn parselets() -> Parselets {
         If,
         True,
         False,
-        Defun
+        Fn
     ]);
     parser.push_prefix(parselets![Term]);
     parser

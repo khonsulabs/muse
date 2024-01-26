@@ -1,0 +1,17 @@
+var: {
+    src: r#"
+        var a = 1;
+        a = 2;
+        a
+    "#,
+    output: Int(2),
+}
+
+map_obj: {
+    src: r#"
+        let a = {};
+        a.c = 2 + (a.b = 1);
+        a.b + a.c
+    "#,
+    output: Int(4),
+}

@@ -5,8 +5,11 @@ use std::ops::ControlFlow;
 use serde::{Deserialize, Serialize};
 
 use super::bitcode::{Op, OpDestination, ValueOrSource};
+use super::Register;
+use crate::compiler::UnaryKind;
+use crate::map::Map;
 use crate::symbol::Symbol;
-use crate::syntax::{BinaryKind, CompareKind, UnaryKind};
+use crate::syntax::{BinaryKind, CompareKind};
 use crate::value::Value;
 use crate::vm::{Fault, Vm};
 
@@ -137,6 +140,47 @@ where
 }
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
+pub struct NewMap<Count, Dest> {
+    pub element_count: Count,
+    pub dest: Dest,
+}
+
+impl<From, Dest> Instruction for NewMap<From, Dest>
+where
+    From: Source,
+    Dest: Destination,
+{
+    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+        let element_count = self.element_count.load(vm)?;
+        if let Some(element_count) = element_count
+            .as_u64()
+            .and_then(|c| u8::try_from(c).ok())
+            .filter(|count| count < &128)
+        {
+            let map = Map::new();
+            for reg_index in (0..element_count * 2).step_by(2) {
+                let key = vm[Register(reg_index)].take();
+                let value = vm[Register(reg_index)].take();
+                map.insert(vm, key, value)?;
+            }
+            self.dest.store(vm, Value::dynamic(map))?;
+
+            Ok(ControlFlow::Continue(()))
+        } else {
+            Err(Fault::InvalidArity)
+        }
+    }
+
+    fn as_op(&self) -> Op {
+        Op::Unary {
+            op: self.element_count.as_source(),
+            dest: self.dest.as_dest(),
+            kind: UnaryKind::Copy,
+        }
+    }
+}
+
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
 pub struct Resolve<From, Dest> {
     pub source: From,
     pub dest: Dest,
@@ -169,13 +213,13 @@ where
 }
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
-pub struct Invoke<Func, NumArgs, Dest> {
+pub struct Call<Func, NumArgs, Dest> {
     pub function: Func,
     pub arity: NumArgs,
     pub dest: Dest,
 }
 
-impl<Func, NumArgs, Dest> Instruction for Invoke<Func, NumArgs, Dest>
+impl<Func, NumArgs, Dest> Instruction for Call<Func, NumArgs, Dest>
 where
     Func: Source,
     NumArgs: Source,
@@ -200,7 +244,45 @@ where
             op1: self.function.as_source(),
             op2: self.arity.as_source(),
             dest: self.dest.as_dest(),
-            kind: BinaryKind::Invoke,
+            kind: BinaryKind::Call,
+        }
+    }
+}
+
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
+pub struct Invoke<Func, NumArgs, Dest> {
+    pub name: Symbol,
+    pub target: Func,
+    pub arity: NumArgs,
+    pub dest: Dest,
+}
+
+impl<Func, NumArgs, Dest> Instruction for Invoke<Func, NumArgs, Dest>
+where
+    Func: Source,
+    NumArgs: Source,
+    Dest: Destination,
+{
+    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+        let target = self.target.load(vm)?;
+        let arity = self.arity.load(vm)?;
+        let arity = match arity.as_u64() {
+            Some(int) => u8::try_from(int).map_err(|_| Fault::InvalidArity)?,
+            _ => return Err(Fault::InvalidArity),
+        };
+        let result = target.invoke(vm, &self.name, arity)?;
+
+        self.dest.store(vm, result)?;
+
+        Ok(ControlFlow::Continue(()))
+    }
+
+    fn as_op(&self) -> Op {
+        Op::Invoke {
+            target: self.target.as_source(),
+            arity: self.arity.as_source(),
+            name: self.name.clone(),
+            dest: self.dest.as_dest(),
         }
     }
 }

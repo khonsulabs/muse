@@ -6,6 +6,7 @@ use std::ops::{ControlFlow, Index, IndexMut};
 use std::pin::{pin, Pin};
 use std::sync::{Arc, OnceLock};
 use std::task::{Poll, Wake, Waker};
+use std::time::{Duration, Instant};
 use std::{array, task};
 
 use crossbeam_utils::sync::{Parker, Unparker};
@@ -30,6 +31,7 @@ pub struct Vm {
     has_anonymous_frame: bool,
     max_depth: usize,
     budget: Budget,
+    execute_until: Option<Instant>,
     module: Module,
     waker: Waker,
     parker: Parker,
@@ -48,6 +50,7 @@ impl Default for Vm {
             max_stack: usize::MAX,
             max_depth: usize::MAX,
             budget: Budget::default(),
+            execute_until: None,
             module: Module::default(),
             waker: Waker::from(Arc::new(VmWaker(unparker))),
             parker,
@@ -57,6 +60,18 @@ impl Default for Vm {
 
 impl Vm {
     pub fn execute(&mut self, code: &Code) -> Result<Value, Fault> {
+        self.execute_owned(code, None)
+    }
+
+    pub fn execute_for(&mut self, code: &Code, duration: Duration) -> Result<Value, Fault> {
+        self.execute_until(
+            code,
+            Instant::now().checked_add(duration).ok_or(Fault::Timeout)?,
+        )
+    }
+
+    pub fn execute_until(&mut self, code: &Code, instant: Instant) -> Result<Value, Fault> {
+        self.execute_until = Some(instant);
         self.execute_owned(code, None)
     }
 
@@ -78,6 +93,10 @@ impl Vm {
     pub fn execute_async(&mut self, code: &Code) -> Result<ExecuteAsync<'_>, Fault> {
         self.prepare_owned(code, None)?;
 
+        Ok(ExecuteAsync(self))
+    }
+
+    pub fn resume_async(&mut self) -> Result<ExecuteAsync<'_>, Fault> {
         Ok(ExecuteAsync(self))
     }
 
@@ -103,8 +122,10 @@ impl Vm {
 
     pub fn resume(&mut self) -> Result<Value, Fault> {
         loop {
-            match self.resume_async() {
+            match self.resume_async_inner() {
                 Err(Fault::Waiting) => {
+                    self.check_timeout()?;
+
                     self.parker.park();
                 }
                 other => return other,
@@ -112,7 +133,7 @@ impl Vm {
         }
     }
 
-    fn resume_async(&mut self) -> Result<Value, Fault> {
+    fn resume_async_inner(&mut self) -> Result<Value, Fault> {
         if self.has_anonymous_frame {
             self.current_frame -= 1;
         }
@@ -138,6 +159,7 @@ impl Vm {
             }
 
             if code_frame != self.current_frame {
+                self.check_timeout()?;
                 code_frame = self.current_frame;
                 code = self.frames[self.current_frame]
                     .code
@@ -146,7 +168,19 @@ impl Vm {
             }
         }
 
+        if self.current_frame == 0 {
+            self.execute_until = None;
+        }
         Ok(self.registers[0].take())
+    }
+
+    fn check_timeout(&mut self) -> Result<(), Fault> {
+        if matches!(self.execute_until, Some(execute_until) if execute_until < Instant::now()) {
+            self.execute_until = None;
+            Err(Fault::Timeout)
+        } else {
+            Ok(())
+        }
     }
 
     pub fn enter_anonymous_frame(&mut self) -> Result<(), Fault> {
@@ -421,6 +455,7 @@ pub enum Fault {
     InvalidArity,
     InvalidLabel,
     NoBudget,
+    Timeout,
     Waiting,
 }
 
@@ -614,7 +649,7 @@ impl Future for ExecuteAsync<'_> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         // Temporarily replace the VM's waker with this context's waker.
         let previous_waker = std::mem::replace(&mut self.0.waker, cx.waker().clone());
-        let result = match self.0.resume_async() {
+        let result = match self.0.resume_async_inner() {
             Err(Fault::Waiting) => Poll::Pending,
             other => Poll::Ready(other),
         };

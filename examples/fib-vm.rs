@@ -34,7 +34,7 @@ fn main() {
     vm.declare_function(dbg!(Function::new("fib").when(1, &fib)));
 
     let mut main = BitcodeBlock::default();
-    main.copy(35, R(0));
+    main.copy(10, R(0));
     main.resolve("fib", R(1));
     main.call(R(1), 1, R(0));
     let code = Code::from(&main);

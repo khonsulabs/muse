@@ -36,7 +36,9 @@ static_symbols!(
     if_symbol => "if",
     then_symbol => "then",
     else_symbol => "else",
-    defun_symbol => "defun",
+    fn_symbol => "fn",
+    set_symbol => "set",
+    get_symbol => "get",
 );
 
 impl From<String> for Symbol {

@@ -1,4 +1,4 @@
-defun fib(n) {
+fn fib(n) {
     if n <= 2 {
         1
     } else {

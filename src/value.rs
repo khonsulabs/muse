@@ -99,18 +99,18 @@ impl Value {
 
     pub fn call(&self, vm: &mut Vm, arity: impl Into<Arity>) -> Result<Value, Fault> {
         match self {
-            Value::Dynamic(dynamic) => {
-                vm.enter_anonymous_frame()?;
-                let result = dynamic.call(vm, arity)?;
-                vm.exit_frame()?;
-                Ok(result)
-            }
+            Value::Dynamic(dynamic) => dynamic.call(vm, arity),
             Value::Nil => vm.recurse_current_function(arity.into()),
             _ => Err(Fault::NotAFunction),
         }
     }
 
-    pub fn invoke(&self, vm: &mut Vm, name: &Symbol) -> Result<Value, Fault> {
+    pub fn invoke(
+        &self,
+        vm: &mut Vm,
+        name: &Symbol,
+        arity: impl Into<Arity>,
+    ) -> Result<Value, Fault> {
         match (self, &**name) {
             (_, "add") => {
                 let rhs = vm
@@ -120,7 +120,8 @@ impl Value {
                     .clone();
                 self.add(vm, &rhs)
             }
-            (Value::Dynamic(dynamic), _) => dynamic.0.invoke(vm, name),
+            (Value::Dynamic(dynamic), _) => dynamic.0.invoke(vm, name, arity.into()),
+            (Value::Nil, _) => Err(Fault::OperationOnNil),
             _ => Err(Fault::UnknownSymbol(name.clone())),
         }
     }
@@ -489,41 +490,43 @@ impl Value {
         Ok(hasher.finish())
     }
 
-    pub fn eq(&self, vm: &mut Vm, other: &Self) -> bool {
+    pub fn eq(&self, vm: &mut Vm, other: &Self) -> Result<bool, Fault> {
         match (self, other) {
-            (Self::Nil, Self::Nil) => true,
+            (Self::Nil, Self::Nil) => Ok(true),
 
-            (Self::Bool(l0), Self::Bool(r0)) => l0 == r0,
-            (Self::Bool(b), Self::Int(i)) | (Self::Int(i), Self::Bool(b)) => &i64::from(*b) == i,
+            (Self::Bool(l0), Self::Bool(r0)) => Ok(l0 == r0),
+            (Self::Bool(b), Self::Int(i)) | (Self::Int(i), Self::Bool(b)) => {
+                Ok(&i64::from(*b) == i)
+            }
             (Self::Bool(b), Self::Float(f)) | (Self::Float(f), Self::Bool(b)) => {
-                (f64::from(u8::from(*b)) - f).abs() < f64::EPSILON
+                Ok((f64::from(u8::from(*b)) - f).abs() < f64::EPSILON)
             }
 
-            (Self::Int(l0), Self::Int(r0)) => l0 == r0,
+            (Self::Int(l0), Self::Int(r0)) => Ok(l0 == r0),
             (Self::Int(signed), Self::UInt(unsigned))
             | (Self::UInt(unsigned), Self::Int(signed)) => {
-                u64::try_from(*signed).map_or(false, |signed| &signed == unsigned)
+                Ok(u64::try_from(*signed).map_or(false, |signed| &signed == unsigned))
             }
-            (Self::UInt(l0), Self::UInt(r0)) => l0 == r0,
-            (Self::Float(l0), Self::Float(r0)) => (l0 - r0).abs() < f64::EPSILON,
+            (Self::UInt(l0), Self::UInt(r0)) => Ok(l0 == r0),
+            (Self::Float(l0), Self::Float(r0)) => Ok((l0 - r0).abs() < f64::EPSILON),
             #[allow(clippy::cast_precision_loss)]
             (Self::Int(i), Self::Float(f)) | (Self::Float(f), Self::Int(i)) => {
-                (*i as f64 - f).abs() < f64::EPSILON
+                Ok((*i as f64 - f).abs() < f64::EPSILON)
             }
             #[allow(clippy::cast_precision_loss)]
             (Self::UInt(i), Self::Float(f)) | (Self::Float(f), Self::UInt(i)) => {
-                (*i as f64 - f).abs() < f64::EPSILON
+                Ok((*i as f64 - f).abs() < f64::EPSILON)
             }
 
-            (Self::Symbol(l0), Self::Symbol(r0)) => l0 == r0,
+            (Self::Symbol(l0), Self::Symbol(r0)) => Ok(l0 == r0),
             (Self::Symbol(s), Self::Bool(b)) | (Self::Bool(b), Self::Symbol(s)) => {
-                s == &Symbol::from(*b)
+                Ok(s == &Symbol::from(*b))
             }
 
             (Self::Dynamic(l0), _) => l0.eq(vm, other),
             (_, Self::Dynamic(r0)) => r0.eq(vm, self),
 
-            _ => false,
+            _ => Ok(false),
         }
     }
 
@@ -638,7 +641,7 @@ impl Dynamic {
         T: DynamicValue,
     {
         if Arc::get_mut(&mut self.0).is_none() {
-            *self = (**self.0).deep_clone();
+            *self = (**self.0).deep_clone()?;
         }
 
         let dynamic = &mut *Arc::get_mut(&mut self.0).expect("always 1 ref");
@@ -714,9 +717,9 @@ impl Dynamic {
         self.0.truthy(vm)
     }
 
-    pub fn eq(&self, vm: &mut Vm, rhs: &Value) -> bool {
+    pub fn eq(&self, vm: &mut Vm, rhs: &Value) -> Result<bool, Fault> {
         match rhs {
-            Value::Dynamic(dynamic) if Arc::ptr_eq(&self.0, &dynamic.0) => true,
+            Value::Dynamic(dynamic) if Arc::ptr_eq(&self.0, &dynamic.0) => Ok(true),
             _ => self.0.eq(vm, rhs),
         }
     }
@@ -746,8 +749,8 @@ pub trait CustomType: Debug + 'static {
     }
 
     #[allow(unused_variables)]
-    fn eq(&self, vm: &mut Vm, rhs: &Value) -> bool {
-        false
+    fn eq(&self, vm: &mut Vm, rhs: &Value) -> Result<bool, Fault> {
+        Ok(false)
     }
 
     #[allow(unused_variables)]
@@ -761,7 +764,7 @@ pub trait CustomType: Debug + 'static {
     }
 
     #[allow(unused_variables)]
-    fn invoke(&self, vm: &mut Vm, name: &Symbol) -> Result<Value, Fault> {
+    fn invoke(&self, vm: &mut Vm, name: &Symbol, arity: Arity) -> Result<Value, Fault> {
         Err(Fault::UnknownSymbol(name.clone()))
     }
 
@@ -834,6 +837,10 @@ pub trait CustomType: Debug + 'static {
     fn to_string(&self, vm: &mut Vm) -> Result<Symbol, Fault> {
         Err(Fault::UnsupportedOperation)
     }
+
+    fn deep_clone(&self) -> Option<Dynamic> {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -855,10 +862,13 @@ impl<F> Debug for RustFunction<F> {
 
 impl<F> CustomType for RustFunction<F>
 where
-    F: Clone + Fn(&mut Vm, Arity) -> Result<Value, Fault> + 'static,
+    F: Fn(&mut Vm, Arity) -> Result<Value, Fault> + 'static,
 {
     fn call(&self, vm: &mut Vm, _this: &Dynamic, arity: Arity) -> Result<Value, Fault> {
-        self.0(vm, arity)
+        vm.enter_anonymous_frame()?;
+        let result = self.0(vm, arity)?;
+        vm.exit_frame()?;
+        Ok(result)
     }
 }
 
@@ -881,10 +891,11 @@ impl<F> Debug for AsyncFunction<F> {
 
 impl<F, Fut> CustomType for AsyncFunction<F>
 where
-    F: Clone + Fn(&mut Vm, Arity) -> Fut + 'static,
+    F: Fn(&mut Vm, Arity) -> Fut + 'static,
     Fut: Future<Output = Result<Value, Fault>> + 'static,
 {
     fn call(&self, vm: &mut Vm, _this: &Dynamic, arity: Arity) -> Result<Value, Fault> {
+        vm.enter_anonymous_frame()?;
         if vm.current_instruction() == 0 {
             let future = self.0(vm, arity);
             vm.allocate(1)?;
@@ -903,8 +914,13 @@ where
         let mut future = future.0.lock().expect("poisoned");
         let mut cx = Context::from_waker(vm.waker());
         match Future::poll(std::pin::pin!(&mut *future), &mut cx) {
-            Poll::Ready(result) => result,
-            Poll::Pending => Err(Fault::Waiting),
+            Poll::Ready(Ok(result)) => {
+                drop(future);
+                vm.exit_frame()?;
+                Ok(result)
+            }
+            Poll::Ready(Err(Fault::Waiting)) | Poll::Pending => Err(Fault::Waiting),
+            Poll::Ready(Err(err)) => Err(err),
         }
     }
 }
@@ -928,17 +944,12 @@ impl<F> Debug for ValueFuture<F> {
 pub trait DynamicValue: CustomType {
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
-    fn deep_clone(&self) -> Dynamic;
 }
 
 impl<T> DynamicValue for T
 where
-    T: Clone + CustomType,
+    T: CustomType,
 {
-    fn deep_clone(&self) -> Dynamic {
-        Dynamic::new(self.clone())
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -950,7 +961,11 @@ where
 
 #[test]
 fn dynamic() {
-    impl CustomType for usize {}
+    impl CustomType for usize {
+        fn deep_clone(&self) -> Option<Dynamic> {
+            Some(Dynamic::new(*self))
+        }
+    }
     let mut dynamic = Dynamic::new(1_usize);
     assert_eq!(dynamic.downcast_ref::<usize>(), Some(&1));
     let dynamic2 = dynamic.clone();

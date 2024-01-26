@@ -5,8 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::symbol::Symbol;
 use crate::syntax::{
-    self, BinaryExpression, BinaryKind, Expression, LogicalKind, Ranged, UnaryExpression,
-    UnaryKind, Variable,
+    self, BinaryExpression, BinaryKind, Expression, LogicalKind, Ranged, UnaryExpression, Variable,
 };
 use crate::vm::bitcode::{BitcodeBlock, BitcodeFunction, Op, OpDestination, ValueOrSource};
 use crate::vm::ops::Stack;
@@ -141,8 +140,17 @@ impl<'a> Scope<'a> {
                 dest,
                 kind: UnaryKind::Copy,
             }),
-            Expression::Lookup(name) => {
-                if let Some(var) = self.declarations.get(name) {
+            Expression::Lookup(lookup) => {
+                if let Some(base) = &lookup.base {
+                    let target = self.compile_source(base);
+                    self.compiler.code.copy(lookup.name.clone(), Register(0));
+                    self.compiler.code.push(Op::Invoke {
+                        target,
+                        arity: ValueOrSource::Int(1),
+                        name: Symbol::get_symbol(),
+                        dest,
+                    });
+                } else if let Some(var) = self.declarations.get(&lookup.name) {
                     self.compiler.code.push(Op::Unary {
                         op: ValueOrSource::Stack(var.stack),
                         dest,
@@ -150,11 +158,31 @@ impl<'a> Scope<'a> {
                     });
                 } else {
                     self.compiler.code.push(Op::Unary {
-                        op: ValueOrSource::Symbol(name.clone()),
+                        op: ValueOrSource::Symbol(lookup.name.clone()),
                         dest,
                         kind: UnaryKind::Resolve,
                     });
                 }
+            }
+            Expression::Map(map) => {
+                let mut elements = Vec::with_capacity(map.values.len());
+                for field in &map.values {
+                    let key = self.compile_expression_into_temporary(&field.key);
+                    let value = self.compile_expression_into_temporary(&field.value);
+                    elements.push((key, value));
+                }
+
+                let mut num_elements = u8::try_from(elements.len()).unwrap_or(u8::MAX);
+                if num_elements >= 128 {
+                    num_elements = 127;
+                    eprintln!("TODO Ignoring more than 127 elements in map");
+                }
+
+                for (index, (key, value)) in (0..=num_elements).zip(elements) {
+                    self.compiler.code.copy(key, Register(index * 2));
+                    self.compiler.code.copy(value, Register(index * 2 + 1));
+                }
+                self.compiler.code.new_map(num_elements, dest);
             }
             Expression::If(if_expr) => {
                 let condition = self.compile_source(&if_expr.condition);
@@ -170,7 +198,19 @@ impl<'a> Scope<'a> {
                 self.compiler.code.label(after_true);
             }
             Expression::Assign(assign) => {
-                if let Some(var) = self.declarations.get(&assign.target) {
+                if let Some(base) = &assign.target.base {
+                    self.compile_expression(&assign.value, OpDestination::Register(Register(1)));
+                    self.compiler
+                        .code
+                        .copy(assign.target.name.clone(), Register(0));
+                    let target = self.compile_source(base);
+                    self.compiler.code.push(Op::Invoke {
+                        target,
+                        name: Symbol::set_symbol(),
+                        arity: ValueOrSource::Int(2),
+                        dest,
+                    });
+                } else if let Some(var) = self.declarations.get(&assign.target.name) {
                     if var.mutable {
                         let var = var.stack;
                         self.compile_expression(&assign.value, OpDestination::Stack(var));
@@ -207,12 +247,12 @@ impl<'a> Scope<'a> {
             }
             Expression::Call(call) => {
                 let function = match &call.function.0 {
-                    Expression::Lookup(name)
+                    Expression::Lookup(lookup)
                         if self
                             .compiler
                             .function_name
                             .as_ref()
-                            .map_or(false, |f| f == name) =>
+                            .map_or(false, |f| f == &lookup.name) =>
                     {
                         ValueOrSource::Nil
                     }
@@ -303,7 +343,12 @@ impl<'a> Scope<'a> {
         self.compiler.code.push(Op::Unary {
             op,
             dest,
-            kind: unary.kind,
+            kind: match unary.kind {
+                syntax::UnaryKind::LogicalNot => UnaryKind::LogicalNot,
+                syntax::UnaryKind::BitwiseNot => UnaryKind::BitwiseNot,
+                syntax::UnaryKind::Negate => UnaryKind::Negate,
+                syntax::UnaryKind::Copy => UnaryKind::Copy,
+            },
         });
     }
 
@@ -340,13 +385,14 @@ impl<'a> Scope<'a> {
             Expression::Bool(bool) => ValueOrSource::Bool(*bool),
             Expression::Int(int) => ValueOrSource::Int(*int),
             Expression::Float(float) => ValueOrSource::Float(*float),
-            Expression::Lookup(name) if self.declarations.contains(name) => {
-                let Some(decl) = self.declarations.get(name) else {
-                    unreachable!()
-                };
-                ValueOrSource::Stack(decl.stack)
+            Expression::Lookup(lookup) => {
+                if let Some(decl) = self.declarations.get(&lookup.name) {
+                    ValueOrSource::Stack(decl.stack)
+                } else {
+                    self.compile_expression_into_temporary(source)
+                }
             }
-            Expression::Lookup(_)
+            Expression::Map(_)
             | Expression::If(_)
             | Expression::Function(_)
             | Expression::Call(_)
@@ -354,12 +400,14 @@ impl<'a> Scope<'a> {
             | Expression::Assign(_)
             | Expression::Unary(_)
             | Expression::Binary(_)
-            | Expression::Block { .. } => {
-                let var = self.new_temporary();
-                self.compile_expression(source, OpDestination::Stack(var));
-                ValueOrSource::Stack(var)
-            }
+            | Expression::Block { .. } => self.compile_expression_into_temporary(source),
         }
+    }
+
+    fn compile_expression_into_temporary(&mut self, source: &Ranged<Expression>) -> ValueOrSource {
+        let var = self.new_temporary();
+        self.compile_expression(source, OpDestination::Stack(var));
+        ValueOrSource::Stack(var)
     }
 }
 
@@ -394,4 +442,15 @@ impl From<Ranged<syntax::Error>> for Ranged<Error> {
     fn from(err: Ranged<syntax::Error>) -> Self {
         err.map(Error::Syntax)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum UnaryKind {
+    LogicalNot,
+    BitwiseNot,
+    Negate,
+    Copy,
+    Resolve,
+    Jump,
+    NewMap,
 }

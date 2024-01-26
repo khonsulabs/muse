@@ -36,5 +36,6 @@ fn main() {
 
     assert!(pollster::block_on(vm.execute_async(&code).unwrap())
         .unwrap()
-        .eq(&mut vm, &Value::Int(5)));
+        .eq(&mut vm, &Value::Int(5))
+        .unwrap());
 }
