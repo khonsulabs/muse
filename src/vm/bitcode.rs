@@ -163,6 +163,11 @@ impl BitcodeBlock {
         self.push(Op::DeclareFunction(function.into()));
     }
 
+    pub fn clear(&mut self) {
+        self.ops.clear();
+        self.labels = 0;
+    }
+
     pub fn compare(
         &mut self,
         comparison: CompareKind,
@@ -248,7 +253,7 @@ impl BitcodeBlock {
         });
     }
 
-    pub fn div_i(
+    pub fn idiv(
         &mut self,
         lhs: impl Into<ValueOrSource>,
         rhs: impl Into<ValueOrSource>,

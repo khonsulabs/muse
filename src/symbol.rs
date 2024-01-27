@@ -3,7 +3,7 @@ use std::ops::{Add, Deref};
 use std::sync::OnceLock;
 
 use ahash::RandomState;
-use interner::global::{GlobalString, StaticPooledString, StringPool};
+use interner::global::{GlobalString, StringPool};
 use serde::de::Visitor;
 use serde::{Deserialize, Serialize};
 
@@ -15,9 +15,9 @@ pub struct Symbol(GlobalString<RandomState>);
 macro_rules! static_symbols {
     ($($name:ident => $string:literal),+ $(,)?) => {
         impl Symbol {
-            $(pub fn $name() -> Self {
-                static S: StaticPooledString<RandomState> = SYMBOLS.get_static($string);
-                Self(S.clone())
+            $(pub fn $name() -> &'static Self {
+                static S: OnceLock<Symbol> = OnceLock::new();
+                S.get_or_init(|| Symbol::from($string))
             })+
         }
     };
@@ -79,9 +79,9 @@ impl PartialEq<str> for Symbol {
 impl From<bool> for Symbol {
     fn from(bool: bool) -> Self {
         if bool {
-            Symbol::true_symbol()
+            Symbol::true_symbol().clone()
         } else {
-            Symbol::false_symbol()
+            Symbol::false_symbol().clone()
         }
     }
 }

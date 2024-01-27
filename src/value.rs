@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use ahash::AHasher;
+pub type ValueHasher = ahash::AHasher;
 
 use crate::symbol::Symbol;
 use crate::vm::{Arity, Fault, Vm};
@@ -156,7 +156,7 @@ impl Value {
             (Value::Float(lhs), Value::UInt(rhs)) => Ok(Value::Float(lhs + *rhs as f64)),
             (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Float(lhs + rhs)),
 
-            (Value::Dynamic(lhs), rhs) => lhs.add(vm, rhs.clone()),
+            (Value::Dynamic(lhs), rhs) => lhs.add(vm, rhs),
             (lhs, Value::Dynamic(rhs)) => rhs.add_right(vm, lhs),
         }
     }
@@ -326,7 +326,7 @@ impl Value {
         }
     }
 
-    pub fn div_i(&self, vm: &mut Vm, rhs: &Self) -> Result<Value, Fault> {
+    pub fn idiv(&self, vm: &mut Vm, rhs: &Self) -> Result<Value, Fault> {
         match (self, rhs) {
             (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
 
@@ -389,8 +389,8 @@ impl Value {
             #[allow(clippy::cast_possible_truncation)]
             (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Int(*lhs as i64 / *rhs as i64)),
 
-            (Value::Dynamic(lhs), rhs) => lhs.divi(vm, rhs),
-            (lhs, Value::Dynamic(rhs)) => rhs.divi_right(vm, lhs),
+            (Value::Dynamic(lhs), rhs) => lhs.idiv(vm, rhs),
+            (lhs, Value::Dynamic(rhs)) => rhs.idiv_right(vm, lhs),
             _ => Err(Fault::UnsupportedOperation),
         }
     }
@@ -464,7 +464,7 @@ impl Value {
 
     pub fn to_string(&self, vm: &mut Vm) -> Result<Symbol, Fault> {
         match self {
-            Value::Nil => Ok(Symbol::empty()),
+            Value::Nil => Ok(Symbol::empty().clone()),
             Value::Bool(bool) => Ok(Symbol::from(*bool)),
             Value::Int(value) => Ok(Symbol::from(value.to_string())),
             Value::UInt(value) => Ok(Symbol::from(value.to_string())),
@@ -474,8 +474,21 @@ impl Value {
         }
     }
 
-    pub fn hash(&self, vm: &mut Vm) -> Result<u64, Fault> {
-        let mut hasher = AHasher::default();
+    pub fn hash_into(&self, vm: &mut Vm, hasher: &mut ValueHasher) {
+        core::mem::discriminant(self).hash(hasher);
+        match self {
+            Value::Nil => {}
+            Value::Bool(b) => b.hash(hasher),
+            Value::Int(i) => i.hash(hasher),
+            Value::UInt(i) => i.hash(hasher),
+            Value::Float(f) => f.to_bits().hash(hasher),
+            Value::Symbol(s) => s.hash(hasher),
+            Value::Dynamic(d) => d.hash(vm, hasher),
+        }
+    }
+
+    pub fn hash(&self, vm: &mut Vm) -> u64 {
+        let mut hasher = ValueHasher::default();
 
         core::mem::discriminant(self).hash(&mut hasher);
         match self {
@@ -485,12 +498,13 @@ impl Value {
             Value::UInt(i) => i.hash(&mut hasher),
             Value::Float(f) => f.to_bits().hash(&mut hasher),
             Value::Symbol(s) => s.hash(&mut hasher),
-            Value::Dynamic(d) => d.hash(vm).hash(&mut hasher),
+            Value::Dynamic(d) => d.hash(vm, &mut hasher),
         }
-        Ok(hasher.finish())
+
+        hasher.finish()
     }
 
-    pub fn eq(&self, vm: &mut Vm, other: &Self) -> Result<bool, Fault> {
+    pub fn equals(&self, vm: Option<&mut Vm>, other: &Self) -> Result<bool, Fault> {
         match (self, other) {
             (Self::Nil, Self::Nil) => Ok(true),
 
@@ -584,6 +598,24 @@ impl Value {
     pub fn take(&mut self) -> Value {
         std::mem::take(self)
     }
+
+    pub fn deep_clone(&self) -> Option<Value> {
+        match self {
+            Value::Nil => Some(Value::Nil),
+            Value::Bool(value) => Some(Value::Bool(*value)),
+            Value::Int(value) => Some(Value::Int(*value)),
+            Value::UInt(value) => Some(Value::UInt(*value)),
+            Value::Float(value) => Some(Value::Float(*value)),
+            Value::Symbol(value) => Some(Value::Symbol(value.clone())),
+            Value::Dynamic(value) => value.deep_clone().map(Value::Dynamic),
+        }
+    }
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        self.equals(None, other).unwrap_or(false)
+    }
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -653,11 +685,16 @@ impl Dynamic {
         Arc::ptr_eq(&a.0, &b.0)
     }
 
+    #[must_use]
+    pub fn deep_clone(&self) -> Option<Dynamic> {
+        self.0.deep_clone()
+    }
+
     pub fn call(&self, vm: &mut Vm, arity: impl Into<Arity>) -> Result<Value, Fault> {
         self.0.call(vm, self, arity.into())
     }
 
-    pub fn add(&self, vm: &mut Vm, rhs: Value) -> Result<Value, Fault> {
+    pub fn add(&self, vm: &mut Vm, rhs: &Value) -> Result<Value, Fault> {
         self.0.add(vm, rhs)
     }
 
@@ -697,16 +734,16 @@ impl Dynamic {
         self.0.rem_right(vm, lhs)
     }
 
-    pub fn divi(&self, vm: &mut Vm, rhs: &Value) -> Result<Value, Fault> {
+    pub fn idiv(&self, vm: &mut Vm, rhs: &Value) -> Result<Value, Fault> {
         self.0.div(vm, rhs)
     }
 
-    pub fn divi_right(&self, vm: &mut Vm, lhs: &Value) -> Result<Value, Fault> {
-        self.0.divi_right(vm, lhs)
+    pub fn idiv_right(&self, vm: &mut Vm, lhs: &Value) -> Result<Value, Fault> {
+        self.0.idiv_right(vm, lhs)
     }
 
-    pub fn hash(&self, vm: &mut Vm) -> u64 {
-        self.0.hash(vm)
+    pub fn hash(&self, vm: &mut Vm, hasher: &mut ValueHasher) {
+        self.0.hash(vm, hasher);
     }
 
     pub fn to_string(&self, vm: &mut Vm) -> Result<Symbol, Fault> {
@@ -717,7 +754,7 @@ impl Dynamic {
         self.0.truthy(vm)
     }
 
-    pub fn eq(&self, vm: &mut Vm, rhs: &Value) -> Result<bool, Fault> {
+    pub fn eq(&self, vm: Option<&mut Vm>, rhs: &Value) -> Result<bool, Fault> {
         match rhs {
             Value::Dynamic(dynamic) if Arc::ptr_eq(&self.0, &dynamic.0) => Ok(true),
             _ => self.0.eq(vm, rhs),
@@ -735,21 +772,19 @@ impl Debug for Dynamic {
     }
 }
 
-pub trait CustomType: Debug + 'static {
+pub trait CustomType: Send + Sync + Debug + 'static {
     #[allow(unused_variables)]
     fn call(&self, vm: &mut Vm, this: &Dynamic, arity: Arity) -> Result<Value, Fault> {
         Err(Fault::NotAFunction)
     }
 
     #[allow(unused_variables)]
-    fn hash(&self, vm: &mut Vm) -> u64 {
-        let mut ahash = AHasher::default();
-        (self as *const Self).hash(&mut ahash);
-        ahash.finish()
+    fn hash(&self, vm: &mut Vm, hasher: &mut ValueHasher) {
+        (self as *const Self).hash(hasher);
     }
 
     #[allow(unused_variables)]
-    fn eq(&self, vm: &mut Vm, rhs: &Value) -> Result<bool, Fault> {
+    fn eq(&self, vm: Option<&mut Vm>, rhs: &Value) -> Result<bool, Fault> {
         Ok(false)
     }
 
@@ -769,7 +804,7 @@ pub trait CustomType: Debug + 'static {
     }
 
     #[allow(unused_variables)]
-    fn add(&self, vm: &mut Vm, rhs: Value) -> Result<Value, Fault> {
+    fn add(&self, vm: &mut Vm, rhs: &Value) -> Result<Value, Fault> {
         Err(Fault::UnsupportedOperation)
     }
 
@@ -809,12 +844,12 @@ pub trait CustomType: Debug + 'static {
     }
 
     #[allow(unused_variables)]
-    fn divi(&self, vm: &mut Vm, rhs: &Value) -> Result<Value, Fault> {
+    fn idiv(&self, vm: &mut Vm, rhs: &Value) -> Result<Value, Fault> {
         Err(Fault::UnsupportedOperation)
     }
 
     #[allow(unused_variables)]
-    fn divi_right(&self, vm: &mut Vm, lhs: &Value) -> Result<Value, Fault> {
+    fn idiv_right(&self, vm: &mut Vm, lhs: &Value) -> Result<Value, Fault> {
         Err(Fault::UnsupportedOperation)
     }
 
@@ -862,7 +897,7 @@ impl<F> Debug for RustFunction<F> {
 
 impl<F> CustomType for RustFunction<F>
 where
-    F: Fn(&mut Vm, Arity) -> Result<Value, Fault> + 'static,
+    F: Fn(&mut Vm, Arity) -> Result<Value, Fault> + Send + Sync + 'static,
 {
     fn call(&self, vm: &mut Vm, _this: &Dynamic, arity: Arity) -> Result<Value, Fault> {
         vm.enter_anonymous_frame()?;
@@ -891,8 +926,8 @@ impl<F> Debug for AsyncFunction<F> {
 
 impl<F, Fut> CustomType for AsyncFunction<F>
 where
-    F: Fn(&mut Vm, Arity) -> Fut + 'static,
-    Fut: Future<Output = Result<Value, Fault>> + 'static,
+    F: Fn(&mut Vm, Arity) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<Value, Fault>> + Send + Sync + 'static,
 {
     fn call(&self, vm: &mut Vm, _this: &Dynamic, arity: Arity) -> Result<Value, Fault> {
         vm.enter_anonymous_frame()?;
@@ -933,7 +968,7 @@ impl<F> Clone for ValueFuture<F> {
     }
 }
 
-impl<F> CustomType for ValueFuture<F> where F: 'static {}
+impl<F> CustomType for ValueFuture<F> where F: Send + Sync + 'static {}
 
 impl<F> Debug for ValueFuture<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

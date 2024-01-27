@@ -218,10 +218,10 @@ impl Vm {
         }
     }
 
-    pub fn declare(&mut self, name: Symbol, value: Value) -> Option<Value> {
+    pub fn declare(&mut self, name: impl Into<Symbol>, value: Value) -> Option<Value> {
         self.module
             .declarations
-            .insert(name, value)
+            .insert(name.into(), value)
             .map(|f| f.value)
     }
 

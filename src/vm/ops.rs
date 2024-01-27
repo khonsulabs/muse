@@ -370,7 +370,7 @@ declare_binop_instruction!(Add, add, BinaryKind::Add);
 declare_binop_instruction!(Subtract, sub, BinaryKind::Subtract);
 declare_binop_instruction!(Multiply, mul, BinaryKind::Multiply);
 declare_binop_instruction!(Divide, div, BinaryKind::Divide);
-declare_binop_instruction!(IntegerDivide, div_i, BinaryKind::IntegerDivide);
+declare_binop_instruction!(IntegerDivide, idiv, BinaryKind::IntegerDivide);
 declare_binop_instruction!(Remainder, rem, BinaryKind::Remainder);
 declare_binop_instruction!(Power, pow, BinaryKind::Power);
 

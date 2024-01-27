@@ -1,11 +1,10 @@
-use std::mem;
-
 use kempt::Map;
 use serde::{Deserialize, Serialize};
 
 use crate::symbol::Symbol;
 use crate::syntax::{
-    self, BinaryExpression, BinaryKind, Expression, LogicalKind, Ranged, UnaryExpression, Variable,
+    self, BinaryExpression, BinaryKind, Chain, Expression, FunctionCall, LogicalKind, Ranged,
+    SourceRange, UnaryExpression, Variable,
 };
 use crate::vm::bitcode::{BitcodeBlock, BitcodeFunction, Op, OpDestination, ValueOrSource};
 use crate::vm::ops::Stack;
@@ -17,6 +16,7 @@ pub struct Compiler {
     parsed: Vec<Result<Ranged<Expression>, Ranged<syntax::Error>>>,
     errors: Vec<Ranged<Error>>,
     code: BitcodeBlock,
+    declarations: Map<Symbol, BlockDeclaration>,
 }
 
 impl Compiler {
@@ -34,7 +34,8 @@ impl Compiler {
         Self::default().with(source).build()
     }
 
-    pub fn build(mut self) -> Result<Code, Vec<Ranged<Error>>> {
+    pub fn build(&mut self) -> Result<Code, Vec<Ranged<Error>>> {
+        self.code.clear();
         let mut expressions = Vec::with_capacity(self.parsed.len());
 
         for result in self.parsed.drain(..) {
@@ -44,28 +45,14 @@ impl Compiler {
             }
         }
 
-        let expression = match expressions.len() {
-            0 => Ranged::new(0..0, Expression::Nil),
-            1 => mem::take(&mut expressions[0]),
-            len => {
-                let range = expressions[0].range().start..expressions[len - 1].range().end();
-                Ranged::new(
-                    range,
-                    Expression::Block {
-                        name: None,
-                        expressions,
-                    },
-                )
-            }
-        };
+        let expression = Chain::from_expressions(expressions);
 
-        Scope::root(&mut self, &mut Map::new())
-            .compile_expression(&expression, OpDestination::Register(Register(0)));
+        Scope::root(self).compile_expression(&expression, OpDestination::Register(Register(0)));
 
         if self.errors.is_empty() {
             Ok(Code::from(&self.code))
         } else {
-            Err(self.errors)
+            Err(std::mem::take(&mut self.errors))
         }
     }
 
@@ -76,6 +63,7 @@ impl Compiler {
     }
 }
 
+#[derive(Debug)]
 struct BlockDeclaration {
     stack: Stack,
     mutable: bool,
@@ -88,17 +76,17 @@ struct LocalDeclaration {
 
 struct Scope<'a> {
     compiler: &'a mut Compiler,
-    declarations: &'a mut Map<Symbol, BlockDeclaration>,
+    depth: usize,
     locals_count: usize,
     local_declarations: Vec<LocalDeclaration>,
 }
 
 impl<'a> Scope<'a> {
-    fn root(compiler: &'a mut Compiler, variables: &'a mut Map<Symbol, BlockDeclaration>) -> Self {
+    fn root(compiler: &'a mut Compiler) -> Self {
         Self {
             compiler,
+            depth: 0,
             locals_count: 0,
-            declarations: variables,
             local_declarations: Vec::new(),
         }
     }
@@ -106,7 +94,7 @@ impl<'a> Scope<'a> {
     fn enter_block(&mut self) -> Scope<'_> {
         Scope {
             compiler: self.compiler,
-            declarations: self.declarations,
+            depth: self.depth + 1,
             locals_count: 0,
             local_declarations: Vec::new(),
         }
@@ -147,10 +135,10 @@ impl<'a> Scope<'a> {
                     self.compiler.code.push(Op::Invoke {
                         target,
                         arity: ValueOrSource::Int(1),
-                        name: Symbol::get_symbol(),
+                        name: Symbol::get_symbol().clone(),
                         dest,
                     });
-                } else if let Some(var) = self.declarations.get(&lookup.name) {
+                } else if let Some(var) = self.compiler.declarations.get(&lookup.name) {
                     self.compiler.code.push(Op::Unary {
                         op: ValueOrSource::Stack(var.stack),
                         dest,
@@ -206,11 +194,11 @@ impl<'a> Scope<'a> {
                     let target = self.compile_source(base);
                     self.compiler.code.push(Op::Invoke {
                         target,
-                        name: Symbol::set_symbol(),
+                        name: Symbol::set_symbol().clone(),
                         arity: ValueOrSource::Int(2),
                         dest,
                     });
-                } else if let Some(var) = self.declarations.get(&assign.target.name) {
+                } else if let Some(var) = self.compiler.declarations.get(&assign.target.name) {
                     if var.mutable {
                         let var = var.stack;
                         self.compile_expression(&assign.value, OpDestination::Stack(var));
@@ -234,47 +222,15 @@ impl<'a> Scope<'a> {
             Expression::Binary(binop) => {
                 self.compile_binop(binop, dest);
             }
-            Expression::Block { expressions, .. } => {
-                let mut block = self.enter_block();
-                for (index, exp) in expressions.iter().enumerate() {
-                    let dest = if index == expressions.len() - 1 {
-                        dest
-                    } else {
-                        OpDestination::Void
-                    };
-                    block.compile_expression(exp, dest);
-                }
+            Expression::Chain(chain) => {
+                self.compile_expression(&chain.0, OpDestination::Void);
+                self.compile_expression(&chain.1, dest);
             }
-            Expression::Call(call) => {
-                let function = match &call.function.0 {
-                    Expression::Lookup(lookup)
-                        if self
-                            .compiler
-                            .function_name
-                            .as_ref()
-                            .map_or(false, |f| f == &lookup.name) =>
-                    {
-                        ValueOrSource::Nil
-                    }
-                    _ => self.compile_source(&call.function),
-                };
-                let arity = if let Ok(arity) = u8::try_from(call.parameters.len()) {
-                    arity
-                } else {
-                    self.compiler
-                        .errors
-                        .push(Ranged::new(expr.range(), Error::TooManyArguments));
-                    255
-                };
-                let mut parameters = Vec::with_capacity(call.parameters.len());
-                for param in &call.parameters[..usize::from(arity)] {
-                    parameters.push(self.compile_source(param));
-                }
-                for (parameter, index) in parameters.into_iter().zip(0..arity) {
-                    self.compiler.code.copy(parameter, Register(index));
-                }
-                self.compiler.code.call(function, arity, dest);
+            Expression::Block(block) => {
+                let mut scope = self.enter_block();
+                scope.compile_expression(&block.body, dest);
             }
+            Expression::Call(call) => self.compile_function_call(call, expr.range(), dest),
             Expression::Variable(decl) => {
                 self.declare_variable(decl, dest);
             }
@@ -291,12 +247,11 @@ impl<'a> Scope<'a> {
                     function_name: Some(decl.name.0.clone()),
                     ..Compiler::default()
                 };
-                let mut fn_variables = Map::new();
-                let mut fn_scope = Scope::root(&mut fn_compiler, &mut fn_variables);
+                let mut fn_scope = Scope::root(&mut fn_compiler);
                 for (var, index) in decl.parameters.iter().zip(0..arity) {
                     let stack = fn_scope.new_temporary();
                     fn_scope.compiler.code.copy(Register(index), stack);
-                    fn_scope.declarations.insert(
+                    fn_scope.compiler.declarations.insert(
                         var.0.clone(),
                         BlockDeclaration {
                             stack,
@@ -323,6 +278,7 @@ impl<'a> Scope<'a> {
             kind: UnaryKind::Copy,
         });
         let previous_declaration = self
+            .compiler
             .declarations
             .insert(
                 decl.name.clone(),
@@ -386,7 +342,7 @@ impl<'a> Scope<'a> {
             Expression::Int(int) => ValueOrSource::Int(*int),
             Expression::Float(float) => ValueOrSource::Float(*float),
             Expression::Lookup(lookup) => {
-                if let Some(decl) = self.declarations.get(&lookup.name) {
+                if let Some(decl) = self.compiler.declarations.get(&lookup.name) {
                     ValueOrSource::Stack(decl.stack)
                 } else {
                     self.compile_expression_into_temporary(source)
@@ -400,7 +356,8 @@ impl<'a> Scope<'a> {
             | Expression::Assign(_)
             | Expression::Unary(_)
             | Expression::Binary(_)
-            | Expression::Block { .. } => self.compile_expression_into_temporary(source),
+            | Expression::Block(_)
+            | Expression::Chain(_) => self.compile_expression_into_temporary(source),
         }
     }
 
@@ -409,21 +366,78 @@ impl<'a> Scope<'a> {
         self.compile_expression(source, OpDestination::Stack(var));
         ValueOrSource::Stack(var)
     }
+
+    fn compile_function_call(
+        &mut self,
+        call: &FunctionCall,
+        range: SourceRange,
+        dest: OpDestination,
+    ) {
+        let arity = if let Ok(arity) = u8::try_from(call.parameters.len()) {
+            arity
+        } else {
+            self.compiler
+                .errors
+                .push(Ranged::new(range, Error::TooManyArguments));
+            255
+        };
+        let function = match &call.function.0 {
+            Expression::Lookup(lookup)
+                if self
+                    .compiler
+                    .function_name
+                    .as_ref()
+                    .map_or(false, |f| f == &lookup.name) =>
+            {
+                ValueOrSource::Nil
+            }
+            Expression::Lookup(lookup) if lookup.base.is_some() => {
+                let base = lookup.base.as_ref().expect("just matched");
+                let base = self.compile_source(base);
+
+                self.compile_function_args(&call.parameters, arity);
+                self.compiler.code.push(Op::Invoke {
+                    target: base,
+                    arity: arity.into(),
+                    name: lookup.name.clone(),
+                    dest,
+                });
+                return;
+            }
+            _ => self.compile_source(&call.function),
+        };
+
+        self.compile_function_args(&call.parameters, arity);
+        self.compiler.code.call(function, arity, dest);
+    }
+
+    fn compile_function_args(&mut self, args: &[Ranged<Expression>], arity: u8) {
+        let mut parameters = Vec::with_capacity(args.len());
+        for param in &args[..usize::from(arity)] {
+            parameters.push(self.compile_source(param));
+        }
+        for (parameter, index) in parameters.into_iter().zip(0..arity) {
+            self.compiler.code.copy(parameter, Register(index));
+        }
+    }
 }
 
 impl Drop for Scope<'_> {
     fn drop(&mut self) {
-        while let Some(LocalDeclaration {
-            name,
-            previous_declaration,
-        }) = self.local_declarations.pop()
-        {
-            match previous_declaration {
-                Some(previous) => {
-                    self.declarations.insert(name, previous);
-                }
-                None => {
-                    self.declarations.remove(&name);
+        // The root scope preserves its declarations.
+        if self.depth > 0 {
+            while let Some(LocalDeclaration {
+                name,
+                previous_declaration,
+            }) = self.local_declarations.pop()
+            {
+                match previous_declaration {
+                    Some(previous) => {
+                        self.compiler.declarations.insert(name, previous);
+                    }
+                    None => {
+                        self.compiler.declarations.remove(&name);
+                    }
                 }
             }
         }

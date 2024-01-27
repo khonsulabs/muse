@@ -1,9 +1,10 @@
+workspace = { members = [ "amuse","muse-ui"] }
+
 [package]
 name = "muse"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 ahash = "0.8.7"
@@ -12,7 +13,6 @@ interner = "0.2.1"
 kempt = { version = "0.2.3", features = ["serde"] }
 serde = { version = "1.0.195", features = ["derive"] }
 unicode-ident = "1.0.12"
-# cushy = { path = "../cushy" }
 
 [dev-dependencies]
 rsn = "0.1"

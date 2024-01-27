@@ -15,13 +15,13 @@ impl Map {
     }
 
     pub fn get(&self, vm: &mut Vm, key: &Value) -> Result<Option<Value>, Fault> {
-        let hash = key.hash(vm)?;
+        let hash = key.hash(vm);
         let contents = self.0.lock().expect("poisoned");
         for field in &*contents {
             match hash.cmp(&field.key.hash) {
                 Ordering::Less => continue,
                 Ordering::Equal => {
-                    if key.eq(vm, &field.key.value)? {
+                    if key.equals(Some(vm), &field.key.value)? {
                         return Ok(Some(field.value.clone()));
                     }
                 }
@@ -33,14 +33,14 @@ impl Map {
     }
 
     pub fn insert(&self, vm: &mut Vm, key: Value, value: Value) -> Result<Option<Value>, Fault> {
-        let key = MapKey::new(vm, key)?;
+        let key = MapKey::new(vm, key);
         let mut contents = self.0.lock().expect("poisoned");
         let mut insert_at = contents.len();
         for (index, field) in contents.iter_mut().enumerate() {
             match key.hash.cmp(&field.key.hash) {
                 Ordering::Less => continue,
                 Ordering::Equal => {
-                    if key.value.eq(vm, &field.key.value)? {
+                    if key.value.equals(Some(vm), &field.key.value)? {
                         return Ok(Some(std::mem::replace(&mut field.value, value)));
                     }
                 }
@@ -59,7 +59,7 @@ impl Map {
 
 impl CustomType for Map {
     fn invoke(&self, vm: &mut Vm, name: &Symbol, arity: Arity) -> Result<Value, Fault> {
-        if name == &Symbol::set_symbol() && (arity == 1 || arity == 2) {
+        if name == Symbol::set_symbol() && (arity == 1 || arity == 2) {
             let key = vm[Register(0)].take();
             let value = if arity == 2 {
                 vm[Register(1)].take()
@@ -68,7 +68,7 @@ impl CustomType for Map {
             };
             self.insert(vm, key, value.clone())?;
             Ok(value)
-        } else if name == &Symbol::get_symbol() && arity == 1 {
+        } else if name == Symbol::get_symbol() && arity == 1 {
             let key = vm[Register(0)].take();
             Ok(self.get(vm, &key)?.unwrap_or_default())
         } else {
@@ -90,10 +90,10 @@ struct MapKey {
 }
 
 impl MapKey {
-    pub fn new(vm: &mut Vm, key: Value) -> Result<Self, Fault> {
-        Ok(Self {
-            hash: key.hash(vm)?,
+    pub fn new(vm: &mut Vm, key: Value) -> Self {
+        Self {
+            hash: key.hash(vm),
             value: key,
-        })
+        }
     }
 }

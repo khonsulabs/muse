@@ -22,9 +22,5 @@ fn main() {
             }
         })),
     );
-    assert!(vm
-        .execute(&code)
-        .unwrap()
-        .eq(&mut vm, &Value::Bool(true))
-        .unwrap());
+    assert_eq!(vm.execute(&code).unwrap(), Value::Bool(true));
 }

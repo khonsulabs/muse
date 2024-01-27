@@ -103,15 +103,35 @@ pub enum Expression {
     Assign(Box<Assignment>),
     Unary(Box<UnaryExpression>),
     Binary(Box<BinaryExpression>),
-    Block {
-        name: Option<Symbol>,
-        expressions: Vec<Ranged<Expression>>,
-    },
+    Chain(Box<Chain>),
+    Block(Box<Block>),
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Chain(pub Ranged<Expression>, pub Ranged<Expression>);
+
+impl Chain {
+    #[must_use]
+    pub fn from_expressions(mut expressions: Vec<Ranged<Expression>>) -> Ranged<Expression> {
+        let Some(mut expression) = expressions.pop() else {
+            return Ranged::new(0..0, Expression::Nil);
+        };
+
+        while let Some(previous) = expressions.pop() {
+            expression = Ranged::new(
+                previous.range().start..expression.range().end(),
+                Expression::Chain(Box::new(Chain(previous, expression))),
+            );
+        }
+
+        expression
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block {
     pub name: Option<Symbol>,
-    pub expressions: Vec<Ranged<Expression>>,
+    pub body: Ranged<Expression>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq)]
@@ -242,6 +262,14 @@ pub fn parse(source: &str) -> Result<Ranged<Expression>, Ranged<Error>> {
     };
     let mut results = Vec::new();
     loop {
+        if tokens.peek().is_none() {
+            results.push(Ranged::new(
+                tokens.last_index..tokens.last_index,
+                Expression::Nil,
+            ));
+            break;
+        }
+
         results.push(config.parse(&mut tokens)?);
         match tokens.next() {
             Ok(token) if token.0 == Token::Char(';') => {}
@@ -253,19 +281,7 @@ pub fn parse(source: &str) -> Result<Ranged<Expression>, Ranged<Error>> {
         }
     }
 
-    if results.len() == 1 {
-        Ok(results.into_iter().next().expect("length checked"))
-    } else {
-        let start = results[0].range().start;
-        let end = results[results.len() - 1].range().end();
-        Ok(Ranged::new(
-            start..end,
-            Expression::Block {
-                name: None,
-                expressions: results,
-            },
-        ))
-    }
+    Ok(Chain::from_expressions(results))
 }
 
 struct TokenReader<'a> {
@@ -601,7 +617,7 @@ macro_rules! impl_prefix_unary_parselet {
     };
 }
 
-impl_prefix_unary_parselet!(LogicalNot, Token::Identifier(Symbol::not_symbol()));
+impl_prefix_unary_parselet!(LogicalNot, Token::Identifier(Symbol::not_symbol().clone()));
 impl_prefix_unary_parselet!(BitwiseNot, Token::Char('!'));
 
 macro_rules! impl_prefix_standalone_parselet {
@@ -629,12 +645,12 @@ macro_rules! impl_prefix_standalone_parselet {
 
 impl_prefix_standalone_parselet!(
     True,
-    Token::Identifier(Symbol::true_symbol()),
+    Token::Identifier(Symbol::true_symbol().clone()),
     Expression::Bool(true)
 );
 impl_prefix_standalone_parselet!(
     False,
-    Token::Identifier(Symbol::false_symbol()),
+    Token::Identifier(Symbol::false_symbol().clone()),
     Expression::Bool(false)
 );
 
@@ -668,7 +684,7 @@ struct Let;
 
 impl Parselet for Let {
     fn token(&self) -> Option<Token> {
-        Some(Token::Identifier(Symbol::let_symbol()))
+        Some(Token::Identifier(Symbol::let_symbol().clone()))
     }
 }
 
@@ -687,7 +703,7 @@ struct Var;
 
 impl Parselet for Var {
     fn token(&self) -> Option<Token> {
-        Some(Token::Identifier(Symbol::var_symbol()))
+        Some(Token::Identifier(Symbol::var_symbol().clone()))
     }
 }
 
@@ -737,10 +753,10 @@ impl Braces {
         match tokens.next() {
             Ok(Ranged(Token::Close(Paired::Brace), _)) => Ok(tokens.ranged(
                 start..,
-                Expression::Block {
+                Expression::Block(Box::new(Block {
                     name: None,
-                    expressions,
-                },
+                    body: Chain::from_expressions(expressions),
+                })),
             )),
             Ok(Ranged(_, range)) | Err(Ranged(_, range)) => {
                 Err(Ranged::new(range, Error::MissingEnd(Paired::Brace)))
@@ -779,10 +795,10 @@ impl PrefixParselet for Braces {
                 tokens.next()?;
                 Ok(tokens.ranged(
                     token.range().start..,
-                    Expression::Block {
+                    Expression::Block(Box::new(Block {
                         name: None,
-                        expressions: vec![expr],
-                    },
+                        body: expr,
+                    })),
                 ))
             }
             other => Err(tokens.ranged(
@@ -807,6 +823,7 @@ fn parse_paired(
         inner(tokens)?;
 
         if tokens.peek_token().as_ref() == Some(separator) {
+            tokens.next()?;
             ended_in_separator = true;
         } else {
             ended_in_separator = false;
@@ -925,7 +942,7 @@ struct If;
 
 impl Parselet for If {
     fn token(&self) -> Option<Token> {
-        Some(Token::Identifier(Symbol::if_symbol()))
+        Some(Token::Identifier(Symbol::if_symbol().clone()))
     }
 }
 
@@ -940,15 +957,17 @@ impl PrefixParselet for If {
         let brace_or_then = tokens.next()?;
         let when_true = match &brace_or_then.0 {
             Token::Open(Paired::Brace) => Braces.parse(brace_or_then, tokens, config)?,
-            Token::Identifier(ident) if ident == &Symbol::then_symbol() => {
+            Token::Identifier(ident) if ident == Symbol::then_symbol() => {
                 config.parse_expression(tokens)?
             }
             _ => return Err(brace_or_then.map(|_| Error::ExpectedThenOrBrace)),
         };
-        let when_false = if tokens.peek_token() == Some(Token::Identifier(Symbol::else_symbol())) {
+        let when_false = if tokens.peek_token()
+            == Some(Token::Identifier(Symbol::else_symbol().clone()))
+        {
             tokens.next()?;
             Some(match tokens.peek_token() {
-                Some(Token::Identifier(ident)) if ident == Symbol::if_symbol() => {
+                Some(Token::Identifier(ident)) if ident == *Symbol::if_symbol() => {
                     Self.parse(tokens.next()?, tokens, config)?
                 }
                 Some(Token::Open(Paired::Brace)) => Braces.parse(tokens.next()?, tokens, config)?,
@@ -977,7 +996,7 @@ impl Parselet for Fn {
     }
 
     fn matches(&self, token: &Token, tokens: &mut TokenReader<'_>) -> bool {
-        matches!(token, Token::Identifier(ident) if ident == &Symbol::fn_symbol())
+        matches!(token, Token::Identifier(ident) if ident == Symbol::fn_symbol())
             && tokens
                 .peek_token()
                 .map_or(false, |t| matches!(t, Token::Identifier(_)))
@@ -1079,17 +1098,17 @@ impl_infix_parselet!(
 );
 impl_infix_parselet!(
     And,
-    Token::Identifier(Symbol::and_symbol()),
+    Token::Identifier(Symbol::and_symbol().clone()),
     BinaryKind::Logical(LogicalKind::And)
 );
 impl_infix_parselet!(
     Or,
-    Token::Identifier(Symbol::or_symbol()),
+    Token::Identifier(Symbol::or_symbol().clone()),
     BinaryKind::Logical(LogicalKind::Or)
 );
 impl_infix_parselet!(
     Xor,
-    Token::Identifier(Symbol::xor_symbol()),
+    Token::Identifier(Symbol::xor_symbol().clone()),
     BinaryKind::Logical(LogicalKind::Xor)
 );
 impl_infix_parselet!(
@@ -1172,8 +1191,8 @@ fn parselets() -> Parselets {
     parser.push_infix(parselets![BitwiseOr]);
     parser.push_infix(parselets![BitwiseXor]);
     parser.push_infix(parselets![BitwiseAnd]);
-    parser.push_infix(parselets![Multiply, Divide, Remainder, IntegerDivide]);
     parser.push_infix(parselets![Add, Subtract]);
+    parser.push_infix(parselets![Multiply, Divide, Remainder, IntegerDivide]);
     parser.push_infix(parselets![Parentheses, Dot]);
     parser.push_prefix(parselets![
         Braces,
