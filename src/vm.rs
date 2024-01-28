@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use self::bitcode::{BitcodeFunction, OpDestination, ValueOrSource};
 use self::ops::Stack;
-use crate::symbol::Symbol;
+use crate::symbol::{IntoOptionSymbol, Symbol};
 use crate::value::{CustomType, Dynamic, Value};
 
 pub mod bitcode;
@@ -226,9 +226,10 @@ impl Vm {
     }
 
     pub fn declare_function(&mut self, function: Function) -> Option<Value> {
+        let name = function.name().as_ref()?.clone();
         self.module
             .declarations
-            .insert(function.name().clone(), Value::dynamic(function))
+            .insert(name, Value::dynamic(function))
             .map(|f| f.value)
     }
 
@@ -461,16 +462,16 @@ pub enum Fault {
 
 #[derive(Debug, Clone)]
 pub struct Function {
-    name: Symbol,
+    name: Option<Symbol>,
     bodies: Map<Arity, Code>,
     varg_bodies: Map<Arity, Code>,
 }
 
 impl Function {
     #[must_use]
-    pub fn new(name: impl Into<Symbol>) -> Self {
+    pub fn new(name: impl IntoOptionSymbol) -> Self {
         Self {
-            name: name.into(),
+            name: name.into_symbol(),
             bodies: Map::new(),
             varg_bodies: Map::new(),
         }
@@ -487,7 +488,7 @@ impl Function {
     }
 
     #[must_use]
-    pub const fn name(&self) -> &Symbol {
+    pub const fn name(&self) -> &Option<Symbol> {
         &self.name
     }
 }
@@ -507,14 +508,31 @@ impl CustomType for Function {
     }
 }
 
-impl Instruction for Function {
+#[derive(Debug)]
+struct DeclareFunction<Dest> {
+    function: Function,
+    dest: Dest,
+}
+
+impl<Dest> Instruction for DeclareFunction<Dest>
+where
+    Dest: Destination,
+{
     fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
-        vm.declare_function(self.clone());
+        let function = Value::dynamic(self.function.clone());
+        if let Some(name) = &self.function.name {
+            vm.declare(name.clone(), function.clone());
+        }
+        self.dest.store(vm, function)?;
+
         Ok(ControlFlow::Continue(()))
     }
 
     fn as_op(&self) -> bitcode::Op {
-        bitcode::Op::DeclareFunction(BitcodeFunction::from(self))
+        bitcode::Op::DeclareFunction {
+            function: BitcodeFunction::from(&self.function),
+            dest: self.dest.as_dest(),
+        }
     }
 }
 

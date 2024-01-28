@@ -166,7 +166,7 @@ pub struct IfExpression {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDefinition {
-    pub name: Ranged<Symbol>,
+    pub name: Option<Ranged<Symbol>>,
     pub parameters: Vec<Ranged<Symbol>>,
     pub body: Ranged<Expression>,
 }
@@ -997,9 +997,14 @@ impl Parselet for Fn {
 
     fn matches(&self, token: &Token, tokens: &mut TokenReader<'_>) -> bool {
         matches!(token, Token::Identifier(ident) if ident == Symbol::fn_symbol())
-            && tokens
-                .peek_token()
-                .map_or(false, |t| matches!(t, Token::Identifier(_)))
+            && tokens.peek_token().map_or(false, |t| {
+                matches!(
+                    t,
+                    Token::Identifier(_)
+                        | Token::Open(Paired::Brace | Paired::Paren)
+                        | Token::FatArrow
+                )
+            })
     }
 }
 
@@ -1010,9 +1015,10 @@ impl PrefixParselet for Fn {
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
-        let name_token = tokens.next()?;
-        let Token::Identifier(name) = &name_token.0 else {
-            return Err(name_token.map(|_| Error::ExpectedName));
+        let name = if let Some(Token::Identifier(name)) = tokens.peek_token() {
+            Some(tokens.next()?.map(|_| name))
+        } else {
+            None
         };
         let mut parameters = Vec::new();
         if tokens.peek_token() == Some(Token::Open(Paired::Paren)) {
@@ -1030,14 +1036,49 @@ impl PrefixParselet for Fn {
         let body_indicator = tokens.next()?;
         let body = match &body_indicator.0 {
             Token::Open(Paired::Brace) => Braces.parse(body_indicator, tokens, config)?,
-            Token::Char('=') => config.parse_expression(tokens)?,
+            Token::FatArrow => config.parse_expression(tokens)?,
             _ => todo!("expected body"),
         };
 
         Ok(tokens.ranged(
             token.range().start..,
             Expression::Function(Box::new(FunctionDefinition {
-                name: Ranged::new(name_token.1, name.clone()),
+                name,
+                parameters,
+                body,
+            })),
+        ))
+    }
+}
+
+struct ArrowFn;
+
+impl Parselet for ArrowFn {
+    fn token(&self) -> Option<Token> {
+        Some(Token::FatArrow)
+    }
+}
+
+impl InfixParselet for ArrowFn {
+    fn parse(
+        &self,
+        lhs: Ranged<Expression>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        let parameters = match &lhs.0 {
+            Expression::Lookup(lookup) if lookup.base.is_none() => {
+                vec![Ranged::new(lhs.range(), lookup.name.clone())]
+            }
+            // TODO tuples
+            _ => todo!("not a parameter list"),
+        };
+
+        let body = config.parse_expression(tokens)?;
+        Ok(tokens.ranged(
+            lhs.range().start..,
+            Expression::Function(Box::new(FunctionDefinition {
+                name: None,
                 parameters,
                 body,
             })),
@@ -1178,6 +1219,7 @@ fn parselets() -> Parselets {
     let mut parser = Parselets::new();
     parser.markers.expression = parser.precedence;
     parser.push_infix(parselets![Assign]);
+    parser.push_infix(parselets![ArrowFn]);
     parser.push_infix(parselets![
         LessThanOrEqual,
         LessThan,

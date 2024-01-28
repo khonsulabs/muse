@@ -64,6 +64,25 @@ impl From<&'_ str> for Symbol {
     }
 }
 
+pub trait IntoOptionSymbol {
+    fn into_symbol(self) -> Option<Symbol>;
+}
+
+impl<T> IntoOptionSymbol for T
+where
+    T: Into<Symbol>,
+{
+    fn into_symbol(self) -> Option<Symbol> {
+        Some(self.into())
+    }
+}
+
+impl IntoOptionSymbol for Option<Symbol> {
+    fn into_symbol(self) -> Option<Symbol> {
+        self
+    }
+}
+
 impl PartialEq<&'_ str> for Symbol {
     fn eq(&self, other: &&'_ str) -> bool {
         self.0 == *other

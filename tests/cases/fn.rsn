@@ -1,0 +1,89 @@
+
+fn_named_arrow: {
+    src: r#"
+        fn test(a) => a * 2;
+        test(3)
+    "#,
+    output: Int(6),
+}
+
+fn_named_block: {
+    src: r#"
+        fn test(a) { a * 2 };
+        test(3)
+    "#,
+    output: Int(6),
+}
+
+fn_no_params_arrow: {
+    src: r#"
+        fn test => 42;
+        test()
+    "#,
+    output: Int(42),
+}
+
+fn_no_params_block: {
+    src: r#"
+        fn test { 42 };
+        test()
+    "#,
+    output: Int(42),
+}
+
+nameless_arrow: {
+    src: r#"
+        let test = fn(a) => a * 2;
+        test(3)
+    "#,
+    output: Int(6),
+}
+
+nameless_block: {
+    src: r#"
+        let test = fn(a) { a * 2 };
+        test(3)
+    "#,
+    output: Int(6),
+}
+
+nameless_no_params: {
+    src: r#"
+        let test = fn => 42;
+        test()
+    "#,
+    output: Int(42),
+}
+
+nameless_no_params_block: {
+    src: r#"
+        let test = fn { 42 };
+        test()
+    "#,
+    output: Int(42),
+}
+
+named_and_bound: {
+    src: r#"
+        let test = fn answer { 42 };
+        test() * answer()
+    "#,
+    output: Int(1764),
+}
+
+
+lambda_block: {
+    src: r#"
+        let test = n => { n * 2 };
+        test(3)
+    "#,
+    output: Int(6),
+}
+
+lambda_expr: {
+    src: r#"
+        let test = n => n * 2;
+        test(3)
+    "#,
+    output: Int(6),
+}

@@ -244,7 +244,7 @@ impl<'a> Scope<'a> {
                     255
                 };
                 let mut fn_compiler = Compiler {
-                    function_name: Some(decl.name.0.clone()),
+                    function_name: decl.name.as_ref().map(|name| name.0.clone()),
                     ..Compiler::default()
                 };
                 let mut fn_scope = Scope::root(&mut fn_compiler);
@@ -263,8 +263,9 @@ impl<'a> Scope<'a> {
                 drop(fn_scope);
 
                 self.compiler.errors.append(&mut fn_compiler.errors);
-                let fun = BitcodeFunction::new(&decl.name.0).when(arity, fn_compiler.code);
-                self.compiler.code.declare_function(fun);
+                let fun = BitcodeFunction::new(decl.name.as_ref().map(|name| name.0.clone()))
+                    .when(arity, fn_compiler.code);
+                self.compiler.code.declare_function(fun, dest);
             }
         }
     }

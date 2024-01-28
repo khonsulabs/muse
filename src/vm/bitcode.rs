@@ -10,7 +10,7 @@ use super::ops::{
     Jump, JumpIf, LessThan, LessThanOrEqual, Load, Multiply, NewMap, Power, Remainder, Resolve,
     Return, Source, Subtract,
 };
-use super::{Arity, Code, Fault, Function, Register};
+use super::{Arity, Code, DeclareFunction, Fault, Function, Register};
 use crate::compiler::UnaryKind;
 use crate::symbol::Symbol;
 use crate::syntax::{BinaryKind, CompareKind};
@@ -74,7 +74,10 @@ impl_from!(OpDestination, Label, Label);
 pub enum Op {
     Return,
     Label(Label),
-    DeclareFunction(BitcodeFunction),
+    DeclareFunction {
+        function: BitcodeFunction,
+        dest: OpDestination,
+    },
     Unary {
         op: ValueOrSource,
         dest: OpDestination,
@@ -159,8 +162,15 @@ impl BitcodeBlock {
         self.ops.push(op);
     }
 
-    pub fn declare_function(&mut self, function: impl Into<BitcodeFunction>) {
-        self.push(Op::DeclareFunction(function.into()));
+    pub fn declare_function(
+        &mut self,
+        function: impl Into<BitcodeFunction>,
+        dest: impl Into<OpDestination>,
+    ) {
+        self.push(Op::DeclareFunction {
+            function: function.into(),
+            dest: dest.into(),
+        });
     }
 
     pub fn clear(&mut self) {
@@ -387,7 +397,9 @@ impl From<&'_ BitcodeBlock> for Code {
                     code.push(Return);
                 }
                 Op::Label(_) => {}
-                Op::DeclareFunction(func) => code.push(Function::from(func)),
+                Op::DeclareFunction { function, dest } => {
+                    match_declare_function(function, dest, &mut code);
+                }
                 Op::Unary {
                     op: source,
                     dest,
@@ -522,6 +534,24 @@ where
     Dest: Destination,
 {
     code.push(Load { source, dest });
+}
+
+fn match_declare_function(f: &BitcodeFunction, d: &OpDestination, code: &mut Code) {
+    decode_dest!(d, d, code, compile_declare_function, f);
+}
+
+fn compile_declare_function<Dest>(
+    _dest: &OpDestination,
+    code: &mut Code,
+    f: &BitcodeFunction,
+    dest: Dest,
+) where
+    Dest: Destination,
+{
+    code.push(DeclareFunction {
+        function: Function::from(f),
+        dest,
+    });
 }
 
 decode_sd!(match_resolve, compile_resolve);
@@ -696,13 +726,13 @@ define_match_binop!(match_gte, compile_gte, GreaterThanOrEqual);
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BitcodeFunction {
-    name: Symbol,
+    name: Option<Symbol>,
     bodies: Map<Arity, BitcodeBlock>,
     varg_bodies: Map<Arity, BitcodeBlock>,
 }
 
 impl BitcodeFunction {
-    pub fn new(name: impl Into<Symbol>) -> Self {
+    pub fn new(name: impl Into<Option<Symbol>>) -> Self {
         Self {
             name: name.into(),
             bodies: Map::new(),
@@ -721,7 +751,7 @@ impl BitcodeFunction {
     }
 
     #[must_use]
-    pub const fn name(&self) -> &Symbol {
+    pub const fn name(&self) -> &Option<Symbol> {
         &self.name
     }
 }
