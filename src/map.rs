@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::sync::Mutex;
 
 use crate::symbol::Symbol;
-use crate::value::{CustomType, Value};
+use crate::value::{CustomType, StaticRustFunctionTable, Value};
 use crate::vm::{Arity, Fault, Register, Vm};
 
 #[derive(Debug)]
@@ -59,21 +59,26 @@ impl Map {
 
 impl CustomType for Map {
     fn invoke(&self, vm: &mut Vm, name: &Symbol, arity: Arity) -> Result<Value, Fault> {
-        if name == Symbol::set_symbol() && (arity == 1 || arity == 2) {
-            let key = vm[Register(0)].take();
-            let value = if arity == 2 {
-                vm[Register(1)].take()
-            } else {
-                key.clone()
-            };
-            self.insert(vm, key, value.clone())?;
-            Ok(value)
-        } else if name == Symbol::get_symbol() && arity == 1 {
-            let key = vm[Register(0)].take();
-            Ok(self.get(vm, &key)?.unwrap_or_default())
-        } else {
-            Err(Fault::UnknownSymbol(name.clone()))
-        }
+        static FUNCTIONS: StaticRustFunctionTable<Map> = StaticRustFunctionTable::new(|table| {
+            table
+                .with_fn(Symbol::set_symbol(), 1, |vm, this| {
+                    let key = vm[Register(0)].take();
+                    let value = key.clone();
+                    this.insert(vm, key, value.clone())?;
+                    Ok(value)
+                })
+                .with_fn(Symbol::set_symbol(), 2, |vm, this| {
+                    let key = vm[Register(0)].take();
+                    let value = vm[Register(1)].take();
+                    this.insert(vm, key, value.clone())?;
+                    Ok(value)
+                })
+                .with_fn(Symbol::get_symbol(), 1, |vm, this| {
+                    let key = vm[Register(0)].take();
+                    Ok(this.get(vm, &key)?.unwrap_or_default())
+                })
+        });
+        FUNCTIONS.invoke(vm, name, arity, self)
     }
 }
 

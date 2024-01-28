@@ -3,11 +3,14 @@ use std::cmp::Ordering;
 use std::fmt::Debug;
 use std::future::Future;
 use std::hash::{Hash, Hasher};
+use std::ops::Deref;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 
 pub type ValueHasher = ahash::AHasher;
+
+use kempt::Map;
 
 use crate::symbol::Symbol;
 use crate::vm::{Arity, Fault, Vm};
@@ -875,6 +878,87 @@ pub trait CustomType: Send + Sync + Debug + 'static {
 
     fn deep_clone(&self) -> Option<Dynamic> {
         None
+    }
+}
+
+pub struct RustFunctionTable<T> {
+    functions: Map<Symbol, Map<Arity, Arc<dyn RustFn<T>>>>,
+}
+
+impl<T> RustFunctionTable<T>
+where
+    T: 'static,
+{
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            functions: Map::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_fn<F>(mut self, name: impl Into<Symbol>, arity: impl Into<Arity>, func: F) -> Self
+    where
+        F: Fn(&mut Vm, &T) -> Result<Value, Fault> + Send + Sync + 'static,
+    {
+        self.functions
+            .entry(name.into())
+            .or_default()
+            .insert(arity.into(), Arc::new(func));
+        self
+    }
+
+    pub fn invoke(
+        &self,
+        vm: &mut Vm,
+        name: &Symbol,
+        arity: Arity,
+        this: &T,
+    ) -> Result<Value, Fault> {
+        if let Some(by_arity) = self.functions.get(name) {
+            if let Some(func) = by_arity.get(&arity) {
+                func.invoke(vm, this)
+            } else {
+                Err(Fault::IncorrectNumberOfArguments)
+            }
+        } else {
+            Err(Fault::UnknownSymbol(name.clone()))
+        }
+    }
+}
+
+pub struct StaticRustFunctionTable<T>(
+    OnceLock<RustFunctionTable<T>>,
+    fn(RustFunctionTable<T>) -> RustFunctionTable<T>,
+);
+
+impl<T> StaticRustFunctionTable<T> {
+    pub const fn new(init: fn(RustFunctionTable<T>) -> RustFunctionTable<T>) -> Self {
+        Self(OnceLock::new(), init)
+    }
+}
+
+impl<T> Deref for StaticRustFunctionTable<T>
+where
+    T: 'static,
+{
+    type Target = RustFunctionTable<T>;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.get_or_init(|| self.1(RustFunctionTable::new()))
+    }
+}
+
+trait RustFn<T>: Send + Sync + 'static {
+    fn invoke(&self, vm: &mut Vm, this: &T) -> Result<Value, Fault>;
+}
+
+impl<T, F> RustFn<T> for F
+where
+    F: Fn(&mut Vm, &T) -> Result<Value, Fault> + Send + Sync + 'static,
+{
+    fn invoke(&self, vm: &mut Vm, this: &T) -> Result<Value, Fault> {
+        self(vm, this)
     }
 }
 
