@@ -1,10 +1,15 @@
-workspace = { members = [ "amuse","muse-ui"] }
+[workspace]
+members = ["amuse", "muse-ui"]
+
+[workspace.dependencies]
+muse = { path = "." }
+muse-ui = { path = "muse-ui" }
+cushy = { git = "https://github.com/khonsulabs/cushy" }
 
 [package]
 name = "muse"
 version = "0.1.0"
 edition = "2021"
-
 
 [dependencies]
 ahash = "0.8.7"

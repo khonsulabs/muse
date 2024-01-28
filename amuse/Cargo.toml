@@ -6,6 +6,6 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-muse = { path = "../" }
-muse-ui = { path = "../muse-ui" }
-cushy = { path = "../../cushy" }
+muse = { workspace = true }
+muse-ui = { workspace = true }
+cushy = { workspace = true }
