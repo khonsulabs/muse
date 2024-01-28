@@ -1,0 +1,29 @@
+empty_list: {
+    src: r#"[]"#,
+    output: List([]),
+}
+
+single_list: {
+    src: r#"[1]"#,
+    output: List([Int(1)]),
+}
+
+multi_list: {
+    src: r#"[1,2]"#,
+    output: List([Int(1), Int(2)]),
+}
+
+empty_tuple: {
+    src: r#"()"#,
+    output: List([]),
+}
+
+single_tuple: {
+    src: r#"(1,)"#,
+    output: List([Int(1)]),
+}
+
+multi_tuple: {
+    src: r#"(1,2)"#,
+    output: List([Int(1), Int(2)]),
+}

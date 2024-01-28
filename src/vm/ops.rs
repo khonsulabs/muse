@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use super::bitcode::{Op, OpDestination, ValueOrSource};
 use super::Register;
 use crate::compiler::UnaryKind;
+use crate::list::List;
 use crate::map::Map;
+use crate::string::MuseString;
 use crate::symbol::Symbol;
 use crate::syntax::{BinaryKind, CompareKind};
 use crate::value::Value;
@@ -160,10 +162,46 @@ where
             let map = Map::new();
             for reg_index in (0..element_count * 2).step_by(2) {
                 let key = vm[Register(reg_index)].take();
-                let value = vm[Register(reg_index)].take();
+                let value = vm[Register(reg_index + 1)].take();
                 map.insert(vm, key, value)?;
             }
             self.dest.store(vm, Value::dynamic(map))?;
+
+            Ok(ControlFlow::Continue(()))
+        } else {
+            Err(Fault::InvalidArity)
+        }
+    }
+
+    fn as_op(&self) -> Op {
+        Op::Unary {
+            op: self.element_count.as_source(),
+            dest: self.dest.as_dest(),
+            kind: UnaryKind::Copy,
+        }
+    }
+}
+
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
+pub struct NewList<Count, Dest> {
+    pub element_count: Count,
+    pub dest: Dest,
+}
+
+impl<From, Dest> Instruction for NewList<From, Dest>
+where
+    From: Source,
+    Dest: Destination,
+{
+    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+        let element_count = self.element_count.load(vm)?;
+        if let Some(element_count) = element_count.as_u64().and_then(|c| u8::try_from(c).ok()) {
+            let list = List::new();
+            for reg_index in 0..element_count {
+                let value = vm[Register(reg_index)].take();
+                list.push(vm, value)?;
+            }
+            self.dest.store(vm, Value::dynamic(list))?;
 
             Ok(ControlFlow::Continue(()))
         } else {
@@ -377,6 +415,30 @@ declare_binop_instruction!(Power, pow, BinaryKind::Power);
 pub trait Source: Send + Sync + Debug + 'static {
     fn load(&self, vm: &Vm) -> Result<Value, Fault>;
     fn as_source(&self) -> ValueOrSource;
+}
+
+impl Source for Value {
+    fn load(&self, _vm: &Vm) -> Result<Value, Fault> {
+        Ok(self.clone())
+    }
+
+    fn as_source(&self) -> ValueOrSource {
+        match self {
+            Value::Nil => ValueOrSource::Nil,
+            Value::Bool(value) => ValueOrSource::Bool(*value),
+            Value::Int(value) => ValueOrSource::Int(*value),
+            Value::UInt(value) => ValueOrSource::UInt(*value),
+            Value::Float(value) => ValueOrSource::Float(*value),
+            Value::Symbol(value) => ValueOrSource::Symbol(value.clone()),
+            Value::Dynamic(value) => {
+                if let Some(str) = value.downcast_ref::<MuseString>() {
+                    ValueOrSource::String(str.to_string())
+                } else {
+                    todo!("Error handling")
+                }
+            }
+        }
+    }
 }
 
 impl Source for () {

@@ -55,6 +55,10 @@ impl Map {
 
         Ok(None)
     }
+
+    pub fn to_vec(&self) -> Vec<Field> {
+        self.0.lock().expect("poisoned").clone()
+    }
 }
 
 impl CustomType for Map {
@@ -83,9 +87,16 @@ impl CustomType for Map {
 }
 
 #[derive(Debug, Clone)]
-struct Field {
+pub struct Field {
     key: MapKey,
     value: Value,
+}
+
+impl Field {
+    #[must_use]
+    pub fn into_parts(self) -> (Value, Value) {
+        (self.key.value, self.value)
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt::Debug;
 use std::future::Future;
 use std::hash::Hash;
@@ -439,7 +440,7 @@ impl Frame {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Eq, PartialEq, Serialize, Deserialize, Clone)]
 pub enum Fault {
     UnknownSymbol(Symbol),
     IncorrectNumberOfArguments,
@@ -447,6 +448,7 @@ pub enum Fault {
     NotAFunction,
     StackOverflow,
     StackUnderflow,
+    InvalidIndex,
     UnsupportedOperation,
     OutOfMemory,
     OutOfBounds,
@@ -458,6 +460,11 @@ pub enum Fault {
     NoBudget,
     Timeout,
     Waiting,
+    Custom {
+        // TODO add an optional Type as a source.
+        code: u32,
+        message: Cow<'static, String>,
+    },
 }
 
 #[derive(Debug, Clone)]

@@ -128,6 +128,16 @@ impl<'a> Scope<'a> {
                 dest,
                 kind: UnaryKind::Copy,
             }),
+            Expression::String(string) => self.compiler.code.push(Op::Unary {
+                op: ValueOrSource::String(string.clone()),
+                dest,
+                kind: UnaryKind::Copy,
+            }),
+            Expression::RegEx(regex) => self.compiler.code.push(Op::Unary {
+                op: ValueOrSource::RegEx(regex.clone()),
+                dest,
+                kind: UnaryKind::Copy,
+            }),
             Expression::Lookup(lookup) => {
                 if let Some(base) = &lookup.base {
                     let target = self.compile_source(base);
@@ -171,6 +181,25 @@ impl<'a> Scope<'a> {
                     self.compiler.code.copy(value, Register(index * 2 + 1));
                 }
                 self.compiler.code.new_map(num_elements, dest);
+            }
+            Expression::List(list) | Expression::Tuple(list) => {
+                let mut elements = Vec::with_capacity(list.len());
+                for field in list {
+                    let value = self.compile_expression_into_temporary(field);
+                    elements.push(value);
+                }
+
+                let num_elements = if let Ok(elements) = u8::try_from(elements.len()) {
+                    elements
+                } else {
+                    eprintln!("TODO Ignoring more than 127 elements in map");
+                    255
+                };
+
+                for (index, value) in (0..=num_elements).zip(elements) {
+                    self.compiler.code.copy(value, Register(index));
+                }
+                self.compiler.code.new_list(num_elements, dest);
             }
             Expression::If(if_expr) => {
                 let condition = self.compile_source(&if_expr.condition);
@@ -342,6 +371,8 @@ impl<'a> Scope<'a> {
             Expression::Bool(bool) => ValueOrSource::Bool(*bool),
             Expression::Int(int) => ValueOrSource::Int(*int),
             Expression::Float(float) => ValueOrSource::Float(*float),
+            Expression::RegEx(regex) => ValueOrSource::RegEx(regex.clone()),
+            Expression::String(string) => ValueOrSource::String(string.clone()),
             Expression::Lookup(lookup) => {
                 if let Some(decl) = self.compiler.declarations.get(&lookup.name) {
                     ValueOrSource::Stack(decl.stack)
@@ -350,6 +381,8 @@ impl<'a> Scope<'a> {
                 }
             }
             Expression::Map(_)
+            | Expression::List(_)
+            | Expression::Tuple(_)
             | Expression::If(_)
             | Expression::Function(_)
             | Expression::Call(_)
@@ -468,4 +501,5 @@ pub enum UnaryKind {
     Resolve,
     Jump,
     NewMap,
+    NewList,
 }

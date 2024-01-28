@@ -1,0 +1,20 @@
+basic_regex: {
+    src: r#"\hello/"#,
+    output: RegEx {
+        pattern: "hello",
+        expanded: false,
+    },
+}
+
+regex_no_eol: {
+    src: "\\\n/",
+    output: Error([Ranged(Syntax(Token(UnexpectedChar('\n'))), SourceRange { start: 1, length: 1 })]),
+}
+
+expanded_regex: {
+    src: "w\\hello # world\n/",
+    output: RegEx {
+        pattern: "hello # world\n",
+        expanded: true,
+    },
+}

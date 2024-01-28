@@ -63,6 +63,17 @@ impl Value {
     }
 
     #[must_use]
+    pub fn as_usize(&self) -> Option<usize> {
+        match self {
+            Value::Int(value) => usize::try_from(*value).ok(),
+            Value::UInt(value) => usize::try_from(*value).ok(),
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Value::Float(value) => Some(*value as usize),
+            _ => None,
+        }
+    }
+
+    #[must_use]
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             #[allow(clippy::cast_precision_loss)]
@@ -84,6 +95,17 @@ impl Value {
     pub fn as_dynamic(&self) -> Option<&Dynamic> {
         match self {
             Value::Dynamic(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_downcast_ref<T>(&self) -> Option<&T>
+    where
+        T: DynamicValue,
+    {
+        match self {
+            Value::Dynamic(value) => value.downcast_ref(),
             _ => None,
         }
     }

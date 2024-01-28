@@ -16,6 +16,7 @@ ahash = "0.8.7"
 crossbeam-utils = "0.8.19"
 interner = "0.2.1"
 kempt = { version = "0.2.3", features = ["serde"] }
+regex = "1.10.3"
 serde = { version = "1.0.195", features = ["derive"] }
 unicode-ident = "1.0.12"
 

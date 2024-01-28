@@ -1,0 +1,14 @@
+basic_string: {
+    src: r#""hello, world""#,
+    output: String("hello, world"),
+}
+
+ascii_escape: {
+    src: r#""\x4E\x6e""#,
+    output: String("Nn"),
+}
+
+unicode_escape: {
+    src: r#""\u{1F980}""#,
+    output: String("🦀"),
+}

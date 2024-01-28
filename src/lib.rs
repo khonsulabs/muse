@@ -10,10 +10,13 @@ macro_rules! impl_from {
 
 pub mod compiler;
 pub mod map;
+pub mod string;
 pub mod symbol;
 pub mod syntax;
 pub mod value;
 pub mod vm;
 
+pub mod list;
+pub mod regex;
 #[cfg(test)]
 mod tests;

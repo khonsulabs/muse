@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::ops::{Deref, DerefMut};
 use std::str;
 use std::sync::Arc;
@@ -7,12 +8,15 @@ use serde::{Deserialize, Serialize};
 
 use super::ops::{
     Add, Call, Destination, Divide, Equal, GreaterThan, GreaterThanOrEqual, IntegerDivide, Invoke,
-    Jump, JumpIf, LessThan, LessThanOrEqual, Load, Multiply, NewMap, Power, Remainder, Resolve,
-    Return, Source, Subtract,
+    Jump, JumpIf, LessThan, LessThanOrEqual, Load, Multiply, NewList, NewMap, Power, Remainder,
+    Resolve, Return, Source, Subtract,
 };
 use super::{Arity, Code, DeclareFunction, Fault, Function, Register};
 use crate::compiler::UnaryKind;
+use crate::regex::MuseRegEx;
+use crate::string::MuseString;
 use crate::symbol::Symbol;
+use crate::syntax::token::RegExLiteral;
 use crate::syntax::{BinaryKind, CompareKind};
 use crate::value::Value;
 use crate::vm::ops::Stack;
@@ -25,6 +29,8 @@ pub enum ValueOrSource {
     UInt(u64),
     Float(f64),
     Symbol(Symbol),
+    String(String),
+    RegEx(RegExLiteral),
     Register(Register),
     Stack(Stack),
     Label(Label),
@@ -325,6 +331,18 @@ impl BitcodeBlock {
         });
     }
 
+    pub fn new_list(
+        &mut self,
+        element_count: impl Into<ValueOrSource>,
+        dest: impl Into<OpDestination>,
+    ) {
+        self.push(Op::Unary {
+            op: element_count.into(),
+            dest: dest.into(),
+            kind: UnaryKind::NewList,
+        });
+    }
+
     pub fn resolve(&mut self, source: impl Into<ValueOrSource>, dest: impl Into<OpDestination>) {
         self.push(Op::Unary {
             op: source.into(),
@@ -409,6 +427,7 @@ impl From<&'_ BitcodeBlock> for Code {
                     UnaryKind::Resolve => match_resolve(source, dest, &mut code),
                     UnaryKind::Jump => match_jump(source, dest, &mut code),
                     UnaryKind::NewMap => match_new_map(source, dest, &mut code),
+                    UnaryKind::NewList => match_new_list(source, dest, &mut code),
                     UnaryKind::LogicalNot => todo!(),
                     UnaryKind::BitwiseNot => todo!(),
                     UnaryKind::Negate => todo!(),
@@ -484,6 +503,34 @@ impl DerefMut for BitcodeBlock {
     }
 }
 
+fn precompiled_regex(regex: &RegExLiteral) -> PrecompiledRegex {
+    PrecompiledRegex {
+        literal: regex.clone(),
+        result: MuseRegEx::new(regex)
+            .map(Value::dynamic)
+            .map_err(|err| Fault::Custom {
+                code: 0,
+                message: Cow::Owned(err.to_string()),
+            }),
+    }
+}
+
+#[derive(Debug)]
+struct PrecompiledRegex {
+    literal: RegExLiteral,
+    result: Result<Value, Fault>,
+}
+
+impl Source for PrecompiledRegex {
+    fn load(&self, _vm: &super::Vm) -> Result<Value, Fault> {
+        self.result.clone()
+    }
+
+    fn as_source(&self) -> ValueOrSource {
+        ValueOrSource::RegEx(self.literal.clone())
+    }
+}
+
 macro_rules! decode_source {
     ($decode:expr, $source:expr, $code:ident, $next_fn:ident $(, $($arg:tt)*)?) => {{
         match $decode {
@@ -492,6 +539,8 @@ macro_rules! decode_source {
             ValueOrSource::Int(source) => $next_fn($source, $code $(, $($arg)*)?, *source),
             ValueOrSource::UInt(source) => $next_fn($source, $code $(, $($arg)*)?, *source),
             ValueOrSource::Float(source) => $next_fn($source, $code $(, $($arg)*)?, *source),
+            ValueOrSource::RegEx(source) => $next_fn($source, $code $(, $($arg)*)?, precompiled_regex(source)),
+            ValueOrSource::String(source) => $next_fn($source, $code $(, $($arg)*)?, Value::dynamic(MuseString::from(source.clone()))),
             ValueOrSource::Symbol(source) => $next_fn($source, $code $(, $($arg)*)?, source.clone()),
             ValueOrSource::Register(source) => $next_fn($source, $code $(, $($arg)*)?, *source),
             ValueOrSource::Stack(source) => $next_fn($source, $code $(, $($arg)*)?, *source),
@@ -589,6 +638,23 @@ fn compile_new_map<Arity, Dest>(
     Dest: Destination,
 {
     code.push(NewMap {
+        element_count,
+        dest,
+    });
+}
+
+decode_sd!(match_new_list, compile_new_list);
+
+fn compile_new_list<Arity, Dest>(
+    _dest: &OpDestination,
+    code: &mut Code,
+    element_count: Arity,
+    dest: Dest,
+) where
+    Arity: Source,
+    Dest: Destination,
+{
+    code.push(NewList {
         element_count,
         dest,
     });

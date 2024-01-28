@@ -17,6 +17,8 @@ pub enum Token {
     Int(i64),
     Float(f64),
     Char(char),
+    String(String),
+    RegEx(RegExLiteral),
     Power,
     LessThanOrEqual,
     GreaterThanOrEqual,
@@ -65,6 +67,8 @@ impl Hash for Token {
             Token::Float(t) => t.to_bits().hash(state),
             Token::Char(t) => t.hash(state),
             Token::Open(t) | Token::Close(t) => t.hash(state),
+            Token::String(t) => t.hash(state),
+            Token::RegEx(t) => t.hash(state),
             Token::Whitespace
             | Token::Comment
             | Token::Power
@@ -135,6 +139,96 @@ pub struct Tokens<'a> {
     scratch: String,
     include_whitespace: bool,
     include_comments: bool,
+}
+
+impl Iterator for Tokens<'_> {
+    type Item = Result<Ranged<Token>, Ranged<Error>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            break Some(match self.chars.next()? {
+                (start, ch) if ch.is_ascii_whitespace() => {
+                    if self.include_whitespace {
+                        Ok(self.tokenize_whitespace(start))
+                    } else {
+                        continue;
+                    }
+                }
+                (start, '#') => {
+                    if self.include_comments {
+                        Ok(self.tokenize_oneline_comment(start))
+                    } else {
+                        continue;
+                    }
+                }
+
+                (start, '"') => self.tokenize_string(start),
+                (start, '\\') => self.tokenize_regex(start, false),
+                (start, 'w') if self.chars.peek().map_or(false, |ch| ch == '\\') => {
+                    self.chars.next()?;
+                    self.tokenize_regex(start, true)
+                }
+                (start, '{') => Ok(self.chars.ranged(start.., Token::Open(Paired::Brace))),
+                (start, '}') => Ok(self.chars.ranged(start.., Token::Close(Paired::Brace))),
+                (start, '(') => Ok(self.chars.ranged(start.., Token::Open(Paired::Paren))),
+                (start, ')') => Ok(self.chars.ranged(start.., Token::Close(Paired::Paren))),
+                (start, '[') => Ok(self.chars.ranged(start.., Token::Open(Paired::Bracket))),
+                (start, ']') => Ok(self.chars.ranged(start.., Token::Close(Paired::Bracket))),
+                (start, ch) if ch.is_ascii_digit() => self.tokenize_number(start, ch),
+                (start, '.' | '-') if self.chars.peek().map_or(false, |ch| ch.is_ascii_digit()) => {
+                    self.tokenize_number(start, '.')
+                }
+                (start, '.') if self.chars.peek() == Some('.') => {
+                    self.chars.next();
+                    if self.chars.peek() == Some('=') {
+                        self.chars.next();
+                        Ok(self.chars.ranged(start.., Token::RangeInclusive))
+                    } else {
+                        Ok(self.chars.ranged(start.., Token::Range))
+                    }
+                }
+                (start, '*') if self.chars.peek() == Some('*') => {
+                    self.chars.next();
+                    Ok(self.chars.ranged(start.., Token::Power))
+                }
+                (start, '/') if self.chars.peek() == Some('/') => {
+                    self.chars.next();
+                    Ok(self.chars.ranged(start.., Token::IntegerDivide))
+                }
+                (start, '=') if self.chars.peek() == Some('=') => {
+                    self.chars.next();
+                    Ok(self.chars.ranged(start.., Token::Equals))
+                }
+                (start, '<') if self.chars.peek() == Some('=') => {
+                    self.chars.next();
+                    Ok(self.chars.ranged(start.., Token::LessThanOrEqual))
+                }
+                (start, '>') if self.chars.peek() == Some('=') => {
+                    self.chars.next();
+                    Ok(self.chars.ranged(start.., Token::GreaterThanOrEqual))
+                }
+                (start, '!') if self.chars.peek() == Some('=') => {
+                    self.chars.next();
+                    Ok(self.chars.ranged(start.., Token::NotEqual))
+                }
+                (start, '-') if self.chars.peek() == Some('>') => {
+                    self.chars.next();
+                    Ok(self.chars.ranged(start.., Token::SlimArrow))
+                }
+                (start, '=') if self.chars.peek() == Some('>') => {
+                    self.chars.next();
+                    Ok(self.chars.ranged(start.., Token::FatArrow))
+                }
+                (start, ch) if ch.is_ascii_punctuation() => {
+                    Ok(self.chars.ranged(start.., Token::Char(ch)))
+                }
+                (start, ch) if unicode_ident::is_xid_start(ch) => {
+                    Ok(self.tokenize_identifier(start, ch))
+                }
+                (start, ch) => Err(self.chars.ranged(start.., Error::UnexpectedChar(ch))),
+            });
+        }
+    }
 }
 
 impl<'a> Tokens<'a> {
@@ -250,90 +344,165 @@ impl<'a> Tokens<'a> {
         }
         self.chars.ranged(start.., Token::Comment)
     }
-}
 
-impl Iterator for Tokens<'_> {
-    type Item = Result<Ranged<Token>, Ranged<Error>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+    fn tokenize_string(&mut self, start: usize) -> Result<Ranged<Token>, Ranged<Error>> {
+        self.scratch.clear();
         loop {
-            break Some(match self.chars.next()? {
-                (start, ch) if ch.is_ascii_whitespace() => {
-                    if self.include_whitespace {
-                        Ok(self.tokenize_whitespace(start))
-                    } else {
-                        continue;
-                    }
+            match self.chars.next() {
+                Some((_, '"')) => break,
+                Some((index, '\\')) => match self.chars.next() {
+                    Some((_, '"')) => self.scratch.push('"'),
+                    Some((_, 'n')) => self.scratch.push('\n'),
+                    Some((_, 'r')) => self.scratch.push('\r'),
+                    Some((_, 't')) => self.scratch.push('\t'),
+                    Some((_, '\\')) => self.scratch.push('\\'),
+                    Some((_, '\0')) => self.scratch.push('\0'),
+                    Some((_, 'u')) => self
+                        .decode_unicode_escape_into_scratch()
+                        .map_err(|()| self.chars.ranged(index.., Error::InvalidEscapeSequence))?,
+                    Some((_, 'x')) => self
+                        .decode_ascii_escape_into_scratch()
+                        .map_err(|()| self.chars.ranged(index.., Error::InvalidEscapeSequence))?,
+                    _ => return Err(self.chars.ranged(index.., Error::InvalidEscapeSequence)),
+                },
+                Some((_, ch)) => {
+                    self.scratch.push(ch);
                 }
-                (start, '#') => {
-                    if self.include_comments {
-                        Ok(self.tokenize_oneline_comment(start))
-                    } else {
-                        continue;
-                    }
+                None => {
+                    return Err(self
+                        .chars
+                        .ranged(self.chars.last_index.., Error::MissingEndQuote))
                 }
+            }
+        }
 
-                (start, '{') => Ok(self.chars.ranged(start.., Token::Open(Paired::Brace))),
-                (start, '}') => Ok(self.chars.ranged(start.., Token::Close(Paired::Brace))),
-                (start, '(') => Ok(self.chars.ranged(start.., Token::Open(Paired::Paren))),
-                (start, ')') => Ok(self.chars.ranged(start.., Token::Close(Paired::Paren))),
-                (start, '[') => Ok(self.chars.ranged(start.., Token::Open(Paired::Bracket))),
-                (start, ']') => Ok(self.chars.ranged(start.., Token::Close(Paired::Bracket))),
-                (start, ch) if ch.is_ascii_digit() => self.tokenize_number(start, ch),
-                (start, '.' | '-') if self.chars.peek().map_or(false, |ch| ch.is_ascii_digit()) => {
-                    self.tokenize_number(start, '.')
+        Ok(self
+            .chars
+            .ranged(start.., Token::String(self.scratch.clone())))
+    }
+
+    fn decode_unicode_escape_into_scratch(&mut self) -> Result<(), ()> {
+        match self.chars.next() {
+            Some((_, '{')) => {}
+            _ => return Err(()),
+        }
+
+        let mut decoded = 0_u32;
+        let mut digit_count = 0;
+        let mut found_brace = false;
+        while digit_count < 6 {
+            match self.chars.next() {
+                Some((_, '}')) => {
+                    found_brace = true;
+                    break;
                 }
-                (start, '.') if self.chars.peek() == Some('.') => {
-                    self.chars.next();
-                    if self.chars.peek() == Some('=') {
-                        self.chars.next();
-                        Ok(self.chars.ranged(start.., Token::RangeInclusive))
+                Some((_, ch)) => {
+                    if let Some(digit) = decode_hex_char(ch) {
+                        decoded <<= 4;
+                        decoded |= u32::from(digit);
+                        digit_count += 1;
                     } else {
-                        Ok(self.chars.ranged(start.., Token::Range))
+                        return Err(());
                     }
                 }
-                (start, '*') if self.chars.peek() == Some('*') => {
-                    self.chars.next();
-                    Ok(self.chars.ranged(start.., Token::Power))
+                None => break,
+            }
+        }
+
+        if digit_count == 0 {
+            return Err(());
+        }
+
+        if !found_brace {
+            match self.chars.next() {
+                Some((_, '}')) => {}
+                _ => return Err(()),
+            }
+        }
+
+        let ch = char::from_u32(decoded).ok_or(())?;
+
+        self.scratch.push(ch);
+        Ok(())
+    }
+
+    fn decode_ascii_escape_into_scratch(&mut self) -> Result<(), ()> {
+        match (self.chars.next(), self.chars.next()) {
+            (Some((_, high)), Some((_, low))) => {
+                match (decode_hex_char(high), decode_hex_char(low)) {
+                    (Some(high), Some(low)) => {
+                        let ascii = (high << 4) | low;
+                        if ascii <= 127 {
+                            self.scratch.push(char::from(ascii));
+                            Ok(())
+                        } else {
+                            Err(())
+                        }
+                    }
+                    _ => Err(()),
                 }
-                (start, '/') if self.chars.peek() == Some('/') => {
-                    self.chars.next();
-                    Ok(self.chars.ranged(start.., Token::IntegerDivide))
-                }
-                (start, '=') if self.chars.peek() == Some('=') => {
-                    self.chars.next();
-                    Ok(self.chars.ranged(start.., Token::Equals))
-                }
-                (start, '<') if self.chars.peek() == Some('=') => {
-                    self.chars.next();
-                    Ok(self.chars.ranged(start.., Token::LessThanOrEqual))
-                }
-                (start, '>') if self.chars.peek() == Some('=') => {
-                    self.chars.next();
-                    Ok(self.chars.ranged(start.., Token::GreaterThanOrEqual))
-                }
-                (start, '!') if self.chars.peek() == Some('=') => {
-                    self.chars.next();
-                    Ok(self.chars.ranged(start.., Token::NotEqual))
-                }
-                (start, '-') if self.chars.peek() == Some('>') => {
-                    self.chars.next();
-                    Ok(self.chars.ranged(start.., Token::SlimArrow))
-                }
-                (start, '=') if self.chars.peek() == Some('>') => {
-                    self.chars.next();
-                    Ok(self.chars.ranged(start.., Token::FatArrow))
-                }
-                (start, ch) if ch.is_ascii_punctuation() => {
-                    Ok(self.chars.ranged(start.., Token::Char(ch)))
-                }
-                (start, ch) if unicode_ident::is_xid_start(ch) => {
-                    Ok(self.tokenize_identifier(start, ch))
-                }
-                (start, ch) => Err(self.chars.ranged(start.., Error::UnexpectedChar(ch))),
-            });
+            }
+            _ => Err(()),
         }
     }
+
+    fn tokenize_regex(
+        &mut self,
+        start: usize,
+        expanded: bool,
+    ) -> Result<Ranged<Token>, Ranged<Error>> {
+        self.scratch.clear();
+        loop {
+            match self.chars.next() {
+                Some((_, '/')) => break,
+                Some((index, ch @ ('\r' | '\n'))) if !expanded => {
+                    return Err(self.chars.ranged(index.., Error::UnexpectedChar(ch)))
+                }
+                Some((index, '\\')) => match self.chars.next() {
+                    Some((_, '/')) => self.scratch.push('/'),
+                    Some((_, ch)) => {
+                        self.scratch.push('\\');
+                        self.scratch.push(ch);
+                    }
+                    _ => return Err(self.chars.ranged(index.., Error::InvalidEscapeSequence)),
+                },
+                Some((_, ch)) => {
+                    self.scratch.push(ch);
+                }
+                None => {
+                    return Err(self
+                        .chars
+                        .ranged(self.chars.last_index.., Error::MissingRegExEnd))
+                }
+            }
+        }
+
+        Ok(self.chars.ranged(
+            start..,
+            Token::RegEx(RegExLiteral {
+                pattern: self.scratch.clone(),
+                expanded,
+            }),
+        ))
+    }
+}
+
+fn decode_hex_char(ch: char) -> Option<u8> {
+    const ASCII_CASE_BIT: u8 = 0b10_0000;
+    let u8 = u8::try_from(ch).ok()? | ASCII_CASE_BIT;
+    match u8 {
+        b'0'..=b'9' => Some(u8 - b'0'),
+        b'a'..=b'f' => Some(u8 - b'a' + 10),
+        _ => None,
+    }
+}
+
+#[test]
+fn decode_hex_char_tests() {
+    assert_eq!(decode_hex_char('1'), Some(1));
+    assert_eq!(decode_hex_char('a'), Some(10));
+    assert_eq!(decode_hex_char('F'), Some(15));
+    assert_eq!(decode_hex_char('.'), None);
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -341,6 +510,15 @@ pub enum Error {
     UnexpectedChar(char),
     IntegerParse(String),
     FloatParse(String),
+    MissingEndQuote,
+    MissingRegExEnd,
+    InvalidEscapeSequence,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, Hash, PartialEq)]
+pub struct RegExLiteral {
+    pub pattern: String,
+    pub expanded: bool,
 }
 
 #[test]

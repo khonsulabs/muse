@@ -87,3 +87,19 @@ lambda_expr: {
     "#,
     output: Int(6),
 }
+
+fn_multi_params: {
+    src: r#"
+        fn test(a,b) => a * b;
+        test(2, 3)
+    "#,
+    output: Int(6),
+}
+
+lambda_multi_params: {
+    src: r#"
+        let test = (a,b) => a * b;
+        test(2, 3)
+    "#,
+    output: Int(6),
+}

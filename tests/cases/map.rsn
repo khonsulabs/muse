@@ -1,0 +1,19 @@
+single_map: {
+    src: r#"{1: true}"#,
+    output: Map({Int(1): Bool(true)}),
+}
+
+multi_map: {
+    src: r#"{1: true, 2: false}"#,
+    output: Map({Int(1): Bool(true), Int(2): Bool(false)}),
+}
+
+single_set: {
+    src: r#"{1,}"#,
+    output: Map({Int(1): Int(1)}),
+}
+
+multi_set: {
+    src: r#"{1,2}"#,
+    output: Map({Int(1): Int(1), Int(2): Int(2)}),
+}
