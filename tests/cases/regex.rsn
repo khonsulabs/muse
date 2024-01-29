@@ -18,3 +18,13 @@ expanded_regex: {
         expanded: true,
     },
 }
+
+regex_captures: {
+    src: r#"\(a)|(b)/.total_captures()"#,
+    output: UInt(3),
+}
+
+regex_static_captures: {
+    src: r#"\(a)|(b)/.total_static_captures()"#,
+    output: UInt(2),
+}

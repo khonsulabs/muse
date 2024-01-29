@@ -6,7 +6,7 @@ use regex::Regex;
 
 use crate::symbol::Symbol;
 use crate::syntax::token::RegExLiteral;
-use crate::value::{CustomType, Dynamic, Value, ValueHasher};
+use crate::value::{CustomType, Dynamic, StaticRustFunctionTable, Value, ValueHasher};
 use crate::vm::{Arity, Fault, Vm};
 
 #[derive(Debug, Clone)]
@@ -67,27 +67,26 @@ impl CustomType for MuseRegEx {
     }
 
     fn invoke(&self, vm: &mut Vm, name: &Symbol, arity: Arity) -> Result<Value, Fault> {
-        Err(Fault::UnknownSymbol(name.clone()))
-    }
+        static FUNCTIONS: StaticRustFunctionTable<MuseRegEx> =
+            StaticRustFunctionTable::new(|table| {
+                table
+                    .with_fn("total_captures", 0, |_vm: &mut Vm, this: &MuseRegEx| {
+                        Value::try_from(this.captures_len())
+                    })
+                    .with_fn(
+                        "total_static_captures",
+                        0,
+                        |_vm: &mut Vm, this: &MuseRegEx| {
+                            Ok(this
+                                .static_captures_len()
+                                .map(Value::try_from)
+                                .transpose()?
+                                .unwrap_or_default())
+                        },
+                    )
+            });
 
-    fn add(&self, vm: &mut Vm, rhs: &Value) -> Result<Value, Fault> {
-        Err(Fault::UnsupportedOperation)
-    }
-
-    fn add_right(&self, vm: &mut Vm, lhs: &Value) -> Result<Value, Fault> {
-        Err(Fault::UnsupportedOperation)
-    }
-
-    fn mul(&self, vm: &mut Vm, rhs: &Value) -> Result<Value, Fault> {
-        Err(Fault::UnsupportedOperation)
-    }
-
-    fn mul_right(&self, vm: &mut Vm, lhs: &Value) -> Result<Value, Fault> {
-        Err(Fault::UnsupportedOperation)
-    }
-
-    fn div(&self, vm: &mut Vm, rhs: &Value) -> Result<Value, Fault> {
-        Err(Fault::UnsupportedOperation)
+        FUNCTIONS.invoke(vm, name, arity, self)
     }
 
     fn truthy(&self, _vm: &mut Vm) -> bool {

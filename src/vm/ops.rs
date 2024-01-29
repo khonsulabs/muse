@@ -199,7 +199,7 @@ where
             let list = List::new();
             for reg_index in 0..element_count {
                 let value = vm[Register(reg_index)].take();
-                list.push(vm, value)?;
+                list.push(value)?;
             }
             self.dest.store(vm, Value::dynamic(list))?;
 

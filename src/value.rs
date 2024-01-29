@@ -673,6 +673,25 @@ impl_from!(Value, u32, UInt);
 impl_from!(Value, u64, UInt);
 impl_from!(Value, bool, Bool);
 
+macro_rules! impl_try_from {
+    ($on:ty, $from:ty, $variant:ident) => {
+        impl TryFrom<$from> for $on {
+            type Error = Fault;
+
+            fn try_from(value: $from) -> Result<Self, Self::Error> {
+                Ok(Self::$variant(
+                    value.try_into().map_err(|_| Fault::OutOfBounds)?,
+                ))
+            }
+        }
+    };
+}
+
+impl_try_from!(Value, u128, UInt);
+impl_try_from!(Value, usize, UInt);
+impl_try_from!(Value, isize, Int);
+impl_try_from!(Value, i128, UInt);
+
 #[derive(Clone)]
 pub struct Dynamic(Arc<Box<dyn DynamicValue>>);
 

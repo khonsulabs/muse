@@ -12,3 +12,23 @@ unicode_escape: {
     src: r#""\u{1F980}""#,
     output: String("🦀"),
 }
+
+split: {
+    src: r#""a, b, c".split(", ")"#,
+    output: List([
+        String("a"),
+        String("b"),
+        String("c"),
+    ]),
+}
+
+
+split_same: {
+    src: r#"
+        let a = "a";
+        a.split(a)
+    "#,
+    output: List([
+        String(""),
+    ]),
+}

@@ -455,6 +455,8 @@ pub enum Fault {
     DivideByZero,
     InvalidInstructionAddress,
     ExpectedSymbol,
+    ExpectedInteger,
+    ExpectedString,
     InvalidArity,
     InvalidLabel,
     NoBudget,
