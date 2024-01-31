@@ -10,7 +10,7 @@ use muse::symbol::Symbol;
 use muse::syntax::token::RegExLiteral;
 use muse::syntax::Ranged;
 use muse::value::Value;
-use muse::vm::{Fault, Vm};
+use muse::vm::{Code, Fault, Vm};
 use serde::de::Visitor;
 use serde::Deserialize;
 
@@ -46,13 +46,13 @@ struct Case {
 }
 
 impl Case {
-    fn run(&self) -> TestOutput {
+    fn run(&self) -> (Option<Code>, TestOutput) {
         match Compiler::compile(&self.src) {
             Ok(code) => match Vm::default().execute(&code) {
-                Ok(value) => TestOutput::from(value),
-                Err(fault) => TestOutput::Fault(fault),
+                Ok(value) => (Some(code), TestOutput::from(value)),
+                Err(fault) => (Some(code), TestOutput::Fault(fault)),
             },
-            Err(err) => TestOutput::Error(err),
+            Err(err) => (None, TestOutput::Error(err)),
         }
     }
 }
@@ -103,11 +103,11 @@ fn run_test_cases(path: &Path) {
     };
     for (name, case) in cases {
         println!("Running {name}");
-        let output = case.run();
+        let (code, output) = case.run();
         assert_eq!(
             output,
             case.output,
-            "in {path} @ {name}: expected {expected:?}, got {output:?}",
+            "in {path} @ {name}: expected {expected:?}, got {output:?}\n{code:#?}",
             path = path.display(),
             expected = case.output
         );

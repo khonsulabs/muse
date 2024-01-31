@@ -16,13 +16,14 @@ fn main() {
     let temporary = fib.new_variable();
     fib.sub(R(0), 1, temporary);
     // Recurse, calculating fib(n - 1), storing in R1.
-    fib.call((), 1, R(1));
+    fib.call((), 1);
+    fib.copy(R(0), R(1));
     // Move n - 2 into R0
     fib.copy(temporary, R(0));
     // Move fib(n - 1) into temporary.
     fib.copy(R(1), temporary);
     // Recurse, calculating fib(n - 2), storing into R0.
-    fib.call((), 1, R(0));
+    fib.call((), 1);
     // Add fib(n - 2) + fib(n - 1).
     fib.add(R(0), temporary, R(0));
     fib.return_early();
@@ -34,9 +35,9 @@ fn main() {
     vm.declare_function(dbg!(Function::new("fib").when(1, &fib)));
 
     let mut main = BitcodeBlock::default();
-    main.copy(10, R(0));
+    main.copy(35, R(0));
     main.resolve("fib", R(1));
-    main.call(R(1), 1, R(0));
+    main.call(R(1), 1);
     let code = Code::from(&main);
     dbg!(vm.execute(&code).unwrap());
 }

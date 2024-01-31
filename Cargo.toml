@@ -13,6 +13,7 @@ edition = "2021"
 
 [dependencies]
 ahash = "0.8.7"
+alot = "0.3.1"
 crossbeam-utils = "0.8.19"
 interner = "0.2.1"
 kempt = { version = "0.2.3", features = ["serde"] }
@@ -38,3 +39,6 @@ unsafe_code = "forbid"
 [[test]]
 name = "harness"
 harness = false
+
+[profile.release]
+debug = true

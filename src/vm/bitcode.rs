@@ -95,11 +95,14 @@ pub enum Op {
         dest: OpDestination,
         kind: BinaryKind,
     },
+    Call {
+        name: ValueOrSource,
+        arity: ValueOrSource,
+    },
     Invoke {
         target: ValueOrSource,
         arity: ValueOrSource,
         name: Symbol,
-        dest: OpDestination,
     },
 }
 
@@ -199,17 +202,10 @@ impl BitcodeBlock {
         });
     }
 
-    pub fn call(
-        &mut self,
-        function: impl Into<ValueOrSource>,
-        arity: impl Into<ValueOrSource>,
-        dest: impl Into<OpDestination>,
-    ) {
-        self.push(Op::BinOp {
-            op1: function.into(),
-            op2: arity.into(),
-            dest: dest.into(),
-            kind: BinaryKind::Call,
+    pub fn call(&mut self, function: impl Into<ValueOrSource>, arity: impl Into<ValueOrSource>) {
+        self.push(Op::Call {
+            name: function.into(),
+            arity: arity.into(),
         });
     }
 
@@ -445,7 +441,7 @@ impl From<&'_ BitcodeBlock> for Code {
                     BinaryKind::IntegerDivide => match_integer_divide(left, right, dest, &mut code),
                     BinaryKind::Remainder => match_remainder(left, right, dest, &mut code),
                     BinaryKind::Power => match_power(left, right, dest, &mut code),
-                    BinaryKind::Call => match_call(left, right, dest, &mut code),
+                    BinaryKind::Call => unreachable!("TODO split syntax::BinaryKind"),
                     BinaryKind::JumpIf => match_jump_if(left, right, dest, &mut code),
                     BinaryKind::Bitwise(_) => todo!(),
                     BinaryKind::Logical(_) => todo!(),
@@ -457,12 +453,12 @@ impl From<&'_ BitcodeBlock> for Code {
                         CompareKind::GreaterThanOrEqual => match_gte(left, right, dest, &mut code),
                     },
                 },
+                Op::Call { name, arity } => match_call(name, arity, &mut code),
                 Op::Invoke {
                     target,
                     arity,
                     name,
-                    dest,
-                } => match_invoke(target, arity, dest, &mut code, name),
+                } => match_invoke(target, arity, &mut code, name),
             }
         }
         code
@@ -695,45 +691,57 @@ macro_rules! decode_ssd {
     };
 }
 
-decode_ssd!(match_call, compile_call);
+macro_rules! decode_ss {
+    ($decode_name:ident, $compile_name:ident $(, $($name:ident: $type:ty),+)?) => {
+        fn $decode_name(
+            s1: &ValueOrSource,
+            s2: &ValueOrSource,
+            code: &mut Code,
+            $($($name: $type),+,)?
+        ) {
+            fn source<Lhs>(source: &ValueOrSource, code: &mut Code,
+            $($($name: $type),+,)? source1: Lhs)
+            where
+                Lhs: Source,
+            {
+                decode_source!(source, source, code, $compile_name, source1 $(, $($name),+)?)
+            }
 
-fn compile_call<Func, NumArgs, Dest>(
-    _source: (&ValueOrSource, &OpDestination),
-    code: &mut Code,
-    function: Func,
-    arity: NumArgs,
-    dest: Dest,
-) where
-    Func: Source,
-    NumArgs: Source,
-    Dest: Destination,
-{
-    code.push(Call {
-        function,
-        arity,
-        dest,
-    });
+            decode_source!(s1, s2, code, source $(, $($name),+)?)
+        }
+    };
 }
 
-decode_ssd!(match_invoke, compile_invoke, name: &Symbol);
+decode_ss!(match_call, compile_call);
 
-fn compile_invoke<Func, NumArgs, Dest>(
-    _source: (&ValueOrSource, &OpDestination),
+fn compile_call<Func, NumArgs>(
+    _source: &ValueOrSource,
     code: &mut Code,
     function: Func,
     arity: NumArgs,
-    name: &Symbol,
-    dest: Dest,
 ) where
     Func: Source,
     NumArgs: Source,
-    Dest: Destination,
+{
+    code.push(Call { function, arity });
+}
+
+decode_ss!(match_invoke, compile_invoke, name: &Symbol);
+
+fn compile_invoke<Func, NumArgs>(
+    _source: &ValueOrSource,
+    code: &mut Code,
+    function: Func,
+    name: &Symbol,
+    arity: NumArgs,
+) where
+    Func: Source,
+    NumArgs: Source,
 {
     code.push(Invoke {
         name: name.clone(),
         target: function,
         arity,
-        dest,
     });
 }
 

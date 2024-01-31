@@ -251,17 +251,15 @@ where
 }
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
-pub struct Call<Func, NumArgs, Dest> {
+pub struct Call<Func, NumArgs> {
     pub function: Func,
     pub arity: NumArgs,
-    pub dest: Dest,
 }
 
-impl<Func, NumArgs, Dest> Instruction for Call<Func, NumArgs, Dest>
+impl<Func, NumArgs> Instruction for Call<Func, NumArgs>
 where
     Func: Source,
     NumArgs: Source,
-    Dest: Destination,
 {
     fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
         let function = self.function.load(vm)?;
@@ -270,36 +268,30 @@ where
             Some(int) => u8::try_from(int).map_err(|_| Fault::InvalidArity)?,
             _ => return Err(Fault::InvalidArity),
         };
-        let result = function.call(vm, arity)?;
-
-        self.dest.store(vm, result)?;
+        vm[Register(0)] = function.call(vm, arity)?;
 
         Ok(ControlFlow::Continue(()))
     }
 
     fn as_op(&self) -> Op {
-        Op::BinOp {
-            op1: self.function.as_source(),
-            op2: self.arity.as_source(),
-            dest: self.dest.as_dest(),
-            kind: BinaryKind::Call,
+        Op::Call {
+            name: self.function.as_source(),
+            arity: self.arity.as_source(),
         }
     }
 }
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
-pub struct Invoke<Func, NumArgs, Dest> {
+pub struct Invoke<Func, NumArgs> {
     pub name: Symbol,
     pub target: Func,
     pub arity: NumArgs,
-    pub dest: Dest,
 }
 
-impl<Func, NumArgs, Dest> Instruction for Invoke<Func, NumArgs, Dest>
+impl<Func, NumArgs> Instruction for Invoke<Func, NumArgs>
 where
     Func: Source,
     NumArgs: Source,
-    Dest: Destination,
 {
     fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
         let target = self.target.load(vm)?;
@@ -308,9 +300,7 @@ where
             Some(int) => u8::try_from(int).map_err(|_| Fault::InvalidArity)?,
             _ => return Err(Fault::InvalidArity),
         };
-        let result = target.invoke(vm, &self.name, arity)?;
-
-        self.dest.store(vm, result)?;
+        vm[Register(0)] = target.invoke(vm, &self.name, arity)?;
 
         Ok(ControlFlow::Continue(()))
     }
@@ -320,7 +310,6 @@ where
             target: self.target.as_source(),
             arity: self.arity.as_source(),
             name: self.name.clone(),
-            dest: self.dest.as_dest(),
         }
     }
 }

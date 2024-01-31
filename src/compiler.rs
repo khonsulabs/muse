@@ -146,8 +146,8 @@ impl<'a> Scope<'a> {
                         target,
                         arity: ValueOrSource::Int(1),
                         name: Symbol::get_symbol().clone(),
-                        dest,
                     });
+                    self.compiler.code.copy(Register(0), dest);
                 } else if let Some(var) = self.compiler.declarations.get(&lookup.name) {
                     self.compiler.code.push(Op::Unary {
                         op: ValueOrSource::Stack(var.stack),
@@ -225,8 +225,8 @@ impl<'a> Scope<'a> {
                         target,
                         name: Symbol::set_symbol().clone(),
                         arity: ValueOrSource::Int(2),
-                        dest,
                     });
+                    self.compiler.code.copy(Register(0), dest);
                 } else if let Some(var) = self.compiler.declarations.get(&assign.target.name) {
                     if var.mutable {
                         let var = var.stack;
@@ -434,15 +434,16 @@ impl<'a> Scope<'a> {
                     target: base,
                     arity: arity.into(),
                     name: lookup.name.clone(),
-                    dest,
                 });
+                self.compiler.code.copy(Register(0), dest);
                 return;
             }
             _ => self.compile_source(&call.function),
         };
 
         self.compile_function_args(&call.parameters, arity);
-        self.compiler.code.call(function, arity, dest);
+        self.compiler.code.call(function, arity);
+        self.compiler.code.copy(Register(0), dest);
     }
 
     fn compile_function_args(&mut self, args: &[Ranged<Expression>], arity: u8) {

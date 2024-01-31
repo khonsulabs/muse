@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::fmt::Debug;
 use std::future::Future;
 use std::hash::Hash;
@@ -36,6 +37,8 @@ pub struct Vm {
     module: Module,
     waker: Waker,
     parker: Parker,
+    code: Vec<RegisteredCode>,
+    code_map: Map<usize, CodeIndex>,
 }
 
 impl Default for Vm {
@@ -55,13 +58,38 @@ impl Default for Vm {
             module: Module::default(),
             waker: Waker::from(Arc::new(VmWaker(unparker))),
             parker,
+            code: Vec::new(),
+            code_map: Map::new(),
         }
     }
 }
 
+struct RegisteredCode {
+    code: Code,
+    owner: Option<Dynamic>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct CodeIndex(usize);
+
 impl Vm {
+    fn push_code(&mut self, code: &Code, owner: Option<&Dynamic>) -> CodeIndex {
+        *self
+            .code_map
+            .entry(Arc::as_ptr(&code.data) as usize)
+            .or_insert_with(|| {
+                let index = CodeIndex(self.code.len());
+                self.code.push(RegisteredCode {
+                    code: code.clone(),
+                    owner: owner.cloned(),
+                });
+                index
+            })
+    }
+
     pub fn execute(&mut self, code: &Code) -> Result<Value, Fault> {
-        self.execute_owned(code, None)
+        let code = self.push_code(code, None);
+        self.execute_owned(code)
     }
 
     pub fn execute_for(&mut self, code: &Code, duration: Duration) -> Result<Value, Fault> {
@@ -72,27 +100,28 @@ impl Vm {
     }
 
     pub fn execute_until(&mut self, code: &Code, instant: Instant) -> Result<Value, Fault> {
+        let code = self.push_code(code, None);
         self.execute_until = Some(instant);
-        self.execute_owned(code, None)
+        self.execute_owned(code)
     }
 
-    fn prepare_owned(&mut self, code: &Code, owner: Option<Value>) -> Result<(), Fault> {
-        self.frames[self.current_frame].code = Some(code.clone());
-        self.frames[self.current_frame].code_owner = owner.unwrap_or_default();
+    fn prepare_owned(&mut self, code: CodeIndex) -> Result<(), Fault> {
+        self.frames[self.current_frame].code = Some(code);
         self.frames[self.current_frame].instruction = 0;
 
-        self.allocate(code.data.stack_requirement)?;
+        self.allocate(self.code[code.0].code.data.stack_requirement)?;
         Ok(())
     }
 
-    fn execute_owned(&mut self, code: &Code, owner: Option<Value>) -> Result<Value, Fault> {
-        self.prepare_owned(code, owner)?;
+    fn execute_owned(&mut self, code: CodeIndex) -> Result<Value, Fault> {
+        self.prepare_owned(code)?;
 
         self.resume()
     }
 
     pub fn execute_async(&mut self, code: &Code) -> Result<ExecuteAsync<'_>, Fault> {
-        self.prepare_owned(code, None)?;
+        let code = self.push_code(code, None);
+        self.prepare_owned(code)?;
 
         Ok(ExecuteAsync(self))
     }
@@ -140,14 +169,13 @@ impl Vm {
         }
         let base_frame = self.current_frame;
         let mut code_frame = base_frame;
-        let mut code = self.frames[base_frame]
+        let mut code = self.code[self.frames[base_frame].code.expect("missing frame code").0]
             .code
-            .clone()
-            .expect("missing frame code");
+            .clone();
         loop {
             self.budget.charge()?;
             match code.step(self, self.frames[code_frame].instruction)? {
-                StepResult::Complete if code_frame >= base_frame && base_frame > 0 => {
+                StepResult::Complete if code_frame >= base_frame && code_frame > 0 => {
                     self.exit_frame()?;
                     if self.current_frame < base_frame {
                         break;
@@ -162,10 +190,12 @@ impl Vm {
             if code_frame != self.current_frame {
                 self.check_timeout()?;
                 code_frame = self.current_frame;
-                code = self.frames[self.current_frame]
+                code = self.code[self.frames[self.current_frame]
                     .code
-                    .clone()
-                    .expect("missing frame code");
+                    .expect("missing frame code")
+                    .0]
+                    .code
+                    .clone();
             }
         }
 
@@ -190,19 +220,27 @@ impl Vm {
             Ok(())
         } else {
             self.has_anonymous_frame = true;
-            self.enter_frame(None, Value::Nil)
+            self.enter_frame(None)
         }
     }
 
-    fn execute_function(&mut self, body: &Code, function: Value) -> Result<Value, Fault> {
-        self.enter_frame(Some(body.clone()), function)?;
+    fn execute_function(&mut self, body: &Code, function: &Dynamic) -> Result<Value, Fault> {
+        let body_index = self.push_code(body, Some(function));
+        self.enter_frame(Some(body_index))?;
 
         self.allocate(body.data.stack_requirement)?;
-        self.resume()
+
+        Err(Fault::FrameChanged)
     }
 
     pub fn recurse_current_function(&mut self, arity: Arity) -> Result<Value, Fault> {
-        let current_function = self.frames[self.current_frame].code_owner.clone();
+        let current_function = self.code[self.frames[self.current_frame]
+            .code
+            .expect("missing function")
+            .0]
+            .owner
+            .clone()
+            .ok_or(Fault::NotAFunction)?;
         current_function.call(self, arity)
     }
 
@@ -245,7 +283,7 @@ impl Vm {
         }
     }
 
-    fn enter_frame(&mut self, code: Option<Code>, owner: Value) -> Result<(), Fault> {
+    fn enter_frame(&mut self, code: Option<CodeIndex>) -> Result<(), Fault> {
         if self.current_frame < self.max_depth {
             let current_frame_end = self.frames[self.current_frame].end;
 
@@ -256,13 +294,11 @@ impl Vm {
                 self.frames[self.current_frame].end = current_frame_end;
                 self.frames[self.current_frame].code = code;
                 self.frames[self.current_frame].instruction = 0;
-                self.frames[self.current_frame].code_owner = owner;
             } else {
                 self.frames.push(Frame {
                     start: current_frame_end,
                     end: current_frame_end,
                     code,
-                    code_owner: owner,
                     instruction: 0,
                     variables: Map::new(),
                 });
@@ -301,13 +337,15 @@ impl Vm {
     }
 
     #[must_use]
-    pub fn current_instruction(&self) -> usize {
-        self.frames[self.current_frame].instruction
+    pub fn current_code(&self) -> Option<&Code> {
+        self.frames[self.current_frame]
+            .code
+            .map(|index| &self.code[index.0].code)
     }
 
     #[must_use]
-    pub fn current_code(&self) -> Option<&Code> {
-        self.frames[self.current_frame].code.as_ref()
+    pub fn current_instruction(&self) -> usize {
+        self.frames[self.current_frame].instruction
     }
 
     pub fn jump_to(&mut self, instruction: usize) {
@@ -426,8 +464,7 @@ struct Frame {
     start: usize,
     end: usize,
     instruction: usize,
-    code: Option<Code>,
-    code_owner: Value,
+    code: Option<CodeIndex>,
     variables: Map<Symbol, Stack>,
 }
 
@@ -435,7 +472,6 @@ impl Frame {
     fn clear(&mut self) {
         self.variables.clear();
         self.instruction = usize::MAX;
-        self.code_owner = Value::default();
         self.code = None;
     }
 }
@@ -462,6 +498,7 @@ pub enum Fault {
     NoBudget,
     Timeout,
     Waiting,
+    FrameChanged,
     Custom {
         // TODO add an optional Type as a source.
         code: u32,
@@ -510,7 +547,7 @@ impl CustomType for Function {
                 .rev()
                 .find_map(|va| (va.key() <= &arity).then_some(&va.value))
         }) {
-            vm.execute_function(body, Value::Dynamic(this.clone()))
+            vm.execute_function(body, this)
         } else {
             Err(Fault::IncorrectNumberOfArguments)
         }
@@ -600,32 +637,32 @@ impl Code {
     }
 
     fn step(&self, vm: &mut Vm, address: usize) -> Result<StepResult, Fault> {
-        let instruction = self
-            .data
-            .instructions
-            .get(address)
-            .ok_or(Fault::InvalidInstructionAddress)?;
+        let instruction = match address.cmp(&self.data.instructions.len()) {
+            Ordering::Less => &self.data.instructions[address],
+            Ordering::Equal => return Ok(StepResult::Complete),
+            Ordering::Greater => return Err(Fault::InvalidInstructionAddress),
+        };
         // println!("Executing {instruction:?}");
-        if instruction.execute(vm)?.is_break() {
-            Ok(StepResult::Complete)
-        } else if vm.current_instruction() == address {
-            match address.checked_add(1) {
-                Some(next) if next < self.data.instructions.len() => {
-                    Ok(StepResult::NextAddress(next))
+        let next_address_step = match address.checked_add(1) {
+            Some(next) if next <= self.data.instructions.len() => StepResult::NextAddress(next),
+            _ => StepResult::Complete,
+        };
+        match instruction.execute(vm) {
+            Ok(ControlFlow::Continue(())) => {
+                if vm.current_instruction() == address {
+                    Ok(next_address_step)
+                } else if vm.current_instruction() < self.data.instructions.len() {
+                    // Execution caused a jump
+                    Ok(StepResult::NextAddress(vm.current_instruction()))
+                } else {
+                    Ok(StepResult::Complete)
                 }
-                _ => Ok(StepResult::Complete),
             }
-        } else if vm.current_instruction() < self.data.instructions.len() {
-            // Execution caused a jump
-            Ok(StepResult::NextAddress(vm.current_instruction()))
-        } else {
-            Ok(StepResult::Complete)
+            Ok(ControlFlow::Break(())) => Ok(StepResult::Complete),
+            Err(Fault::FrameChanged) => Ok(next_address_step),
+            Err(other) => Err(other),
         }
     }
-
-    // pub fn decode_from(encoded: &[u8]) -> Result<Self, DecodeError> {
-    //     bitcode::decode(encoded)
-    // }
 }
 
 impl Default for Code {

@@ -1404,6 +1404,7 @@ name = "muse"
 version = "0.1.0"
 dependencies = [
  "ahash",
+ "alot",
  "crossbeam-utils",
  "flume",
  "interner",
