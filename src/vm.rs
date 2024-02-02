@@ -1,10 +1,10 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::fmt::Debug;
+use std::fmt::{Debug, Write};
 use std::future::Future;
 use std::hash::Hash;
 use std::num::NonZeroUsize;
-use std::ops::{ControlFlow, Index, IndexMut};
+use std::ops::{Deref, Index, IndexMut};
 use std::pin::{pin, Pin};
 use std::sync::{Arc, OnceLock};
 use std::task::{Poll, Wake, Waker};
@@ -13,16 +13,42 @@ use std::{array, task};
 
 use crossbeam_utils::sync::{Parker, Unparker};
 use kempt::Map;
-use ops::{Destination, Instruction, Source};
 use serde::{Deserialize, Serialize};
 
-use self::bitcode::{BitcodeFunction, OpDestination, ValueOrSource};
-use self::ops::Stack;
+#[cfg(not(feature = "dispatched"))]
+use self::bitcode::trusted_loaded_source_to_value;
+use self::bitcode::{BinaryKind, Label, Op, OpDestination, ValueOrSource};
+use crate::compiler::UnaryKind;
+#[cfg(not(feature = "dispatched"))]
+use crate::list::List;
+#[cfg(not(feature = "dispatched"))]
+use crate::map;
+use crate::regex::MuseRegEx;
+use crate::string::MuseString;
 use crate::symbol::{IntoOptionSymbol, Symbol};
+use crate::syntax::token::RegExLiteral;
+use crate::syntax::{BitwiseKind, CompareKind};
 use crate::value::{CustomType, Dynamic, Value};
 
 pub mod bitcode;
-pub mod ops;
+
+macro_rules! try_all {
+    ($a:expr, $b:expr) => {
+        match ($a, $b) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(err), _) | (_, Err(err)) => return Err(err),
+        }
+    };
+    ($a:expr, $b:expr, $c:expr) => {
+        match ($a, $b, $c) {
+            (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+            (Err(err), _, _) | (_, Err(err), _) | (_, _, Err(err)) => return Err(err),
+        }
+    };
+}
+
+#[cfg(feature = "dispatched")]
+mod dispatched;
 
 pub struct Vm {
     registers: [Value; 256],
@@ -163,6 +189,7 @@ impl Vm {
         }
     }
 
+    #[cfg(feature = "dispatched")]
     fn resume_async_inner(&mut self) -> Result<Value, Fault> {
         if self.has_anonymous_frame {
             self.current_frame -= 1;
@@ -174,7 +201,8 @@ impl Vm {
             .clone();
         loop {
             self.budget.charge()?;
-            match code.step(self, self.frames[code_frame].instruction)? {
+            let instruction = self.frames[code_frame].instruction;
+            match self.step(&code, instruction)? {
                 StepResult::Complete if code_frame >= base_frame && code_frame > 0 => {
                     self.exit_frame()?;
                     if self.current_frame < base_frame {
@@ -183,7 +211,11 @@ impl Vm {
                 }
                 StepResult::Complete => break,
                 StepResult::NextAddress(addr) => {
-                    self.frames[code_frame].instruction = addr;
+                    // Only step to the next address if the frame's instruction
+                    // wasn't altered by a jump.
+                    if self.frames[code_frame].instruction == instruction {
+                        self.frames[code_frame].instruction = addr;
+                    }
                 }
             }
 
@@ -203,6 +235,25 @@ impl Vm {
             self.execute_until = None;
         }
         Ok(self.registers[0].take())
+    }
+
+    #[allow(clippy::too_many_lines)]
+    #[cfg(feature = "dispatched")]
+    fn step(&mut self, code: &Code, address: usize) -> Result<StepResult, Fault> {
+        use std::ops::ControlFlow;
+
+        let instructions = &code.data.instructions;
+        let instruction = match address.cmp(&instructions.len()) {
+            Ordering::Less => &instructions[address],
+            Ordering::Equal => return Ok(StepResult::Complete),
+            Ordering::Greater => return Err(Fault::InvalidInstructionAddress),
+        };
+        let next_instruction = StepResult::from(address.checked_add(1));
+        match instruction.execute(self) {
+            Ok(ControlFlow::Continue(())) | Err(Fault::FrameChanged) => Ok(next_instruction),
+            Ok(ControlFlow::Break(())) => Ok(StepResult::Complete),
+            Err(err) => Err(err),
+        }
     }
 
     fn check_timeout(&mut self) -> Result<(), Fault> {
@@ -248,7 +299,7 @@ impl Vm {
         let current_frame = &mut self.frames[self.current_frame];
         if current_frame.end < self.max_stack {
             Ok(*current_frame.variables.entry(name).or_insert_with(|| {
-                let index = Stack(current_frame.end);
+                let index = Stack(current_frame.end - current_frame.start);
                 current_frame.end += 1;
                 index
             }))
@@ -275,7 +326,10 @@ impl Vm {
     pub fn resolve(&self, name: &Symbol) -> Result<Value, Fault> {
         let current_frame = &self.frames[self.current_frame];
         if let Some(stack) = current_frame.variables.get(name) {
-            stack.load(self)
+            self.current_frame()
+                .get(stack.0)
+                .cloned()
+                .ok_or(Fault::OutOfBounds)
         } else if let Some(value) = self.module.declarations.get(name) {
             Ok(value.clone())
         } else {
@@ -323,7 +377,7 @@ impl Vm {
 
     pub fn allocate(&mut self, count: usize) -> Result<Stack, Fault> {
         let current_frame = &mut self.frames[self.current_frame];
-        let index = Stack(current_frame.end);
+        let index = Stack(current_frame.end - current_frame.start);
         match current_frame.end.checked_add(count) {
             Some(end) if end < self.max_stack => {
                 current_frame.end += count;
@@ -363,12 +417,6 @@ impl Vm {
     }
 
     #[must_use]
-    pub fn current_frame_start(&self) -> Option<Stack> {
-        (self.frames[self.current_frame].end > 0)
-            .then_some(Stack(self.frames[self.current_frame].start))
-    }
-
-    #[must_use]
     pub fn current_frame_size(&self) -> usize {
         self.frames[self.current_frame].end - self.frames[self.current_frame].start
     }
@@ -380,6 +428,587 @@ impl Vm {
         }
         self.registers.fill_with(|| Value::Nil);
         self.stack.fill_with(|| Value::Nil);
+    }
+}
+
+#[cfg(not(feature = "dispatched"))]
+impl Vm {
+    fn resume_async_inner(&mut self) -> Result<Value, Fault> {
+        if self.has_anonymous_frame {
+            self.current_frame -= 1;
+        }
+        let base_frame = self.current_frame;
+        let mut code_frame = base_frame;
+        let mut code = self.frames[base_frame].code.expect("missing frame code");
+        loop {
+            self.budget.charge()?;
+            let instruction = self.frames[code_frame].instruction;
+            match self.step(code.0, instruction)? {
+                StepResult::Complete if code_frame >= base_frame && code_frame > 0 => {
+                    self.exit_frame()?;
+                    if self.current_frame < base_frame {
+                        break;
+                    }
+                }
+                StepResult::Complete => break,
+                StepResult::NextAddress(addr) => {
+                    // Only step to the next address if the frame's instruction
+                    // wasn't altered by a jump.
+                    if self.frames[code_frame].instruction == instruction {
+                        self.frames[code_frame].instruction = addr;
+                    }
+                }
+            }
+
+            if code_frame != self.current_frame {
+                self.check_timeout()?;
+                code_frame = self.current_frame;
+                code = self.frames[self.current_frame]
+                    .code
+                    .expect("missing frame code");
+            }
+        }
+
+        if self.current_frame == 0 {
+            self.execute_until = None;
+        }
+        Ok(self.registers[0].take())
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn step(&mut self, code_index: usize, address: usize) -> Result<StepResult, Fault> {
+        let code = &self.code[code_index].code;
+        let instructions = &code.data.instructions;
+        let instruction = match address.cmp(&instructions.len()) {
+            Ordering::Less => &instructions[address],
+            Ordering::Equal => return Ok(StepResult::Complete),
+            Ordering::Greater => return Err(Fault::InvalidInstructionAddress),
+        };
+        let next_instruction = StepResult::from(address.checked_add(1));
+        let result = match instruction {
+            LoadedOp::Return => return Ok(StepResult::Complete),
+            LoadedOp::Declare { name, value, dest } => {
+                self.op_declare(code_index, *name, *value, *dest)
+            }
+            LoadedOp::Call { name, arity } => self.op_call(code_index, *name, *arity),
+            LoadedOp::Invoke {
+                target,
+                name,
+                arity,
+            } => self.op_invoke(code_index, *target, *name, *arity),
+            LoadedOp::Truthy(loaded) => self.op_truthy(code_index, loaded.op, loaded.dest),
+            LoadedOp::LogicalNot(loaded) => self.op_not(code_index, loaded.op, loaded.dest),
+            LoadedOp::BitwiseNot(loaded) => self.op_bitwise_not(code_index, loaded.op, loaded.dest),
+            LoadedOp::Negate(loaded) => self.op_negate(code_index, loaded.op, loaded.dest),
+            LoadedOp::Copy(loaded) => self.op_copy(code_index, loaded.op, loaded.dest),
+            LoadedOp::Resolve(loaded) => self.op_resolve(code_index, loaded.op, loaded.dest),
+            LoadedOp::Jump(loaded) => self.op_jump(code_index, loaded.op, loaded.dest),
+            LoadedOp::NewMap(loaded) => self.op_new_map(code_index, loaded.op, loaded.dest),
+            LoadedOp::NewList(loaded) => self.op_new_list(code_index, loaded.op, loaded.dest),
+            LoadedOp::LogicalXor(loaded) => self.op_binop(
+                code_index,
+                loaded.op1,
+                loaded.op2,
+                loaded.dest,
+                |vm, lhs, rhs| Ok(Value::Bool(lhs.truthy(vm) ^ rhs.truthy(vm))),
+            ),
+            LoadedOp::Add(loaded) => self.op_binop(
+                code_index,
+                loaded.op1,
+                loaded.op2,
+                loaded.dest,
+                |vm, lhs, rhs| lhs.add(vm, &rhs),
+            ),
+            LoadedOp::Subtract(loaded) => self.op_binop(
+                code_index,
+                loaded.op1,
+                loaded.op2,
+                loaded.dest,
+                |vm, lhs, rhs| lhs.sub(vm, &rhs),
+            ),
+            LoadedOp::Multiply(loaded) => self.op_binop(
+                code_index,
+                loaded.op1,
+                loaded.op2,
+                loaded.dest,
+                |vm, lhs, rhs| lhs.mul(vm, &rhs),
+            ),
+            LoadedOp::Divide(loaded) => self.op_binop(
+                code_index,
+                loaded.op1,
+                loaded.op2,
+                loaded.dest,
+                |vm, lhs, rhs| lhs.div(vm, &rhs),
+            ),
+            LoadedOp::IntegerDivide(loaded) => self.op_binop(
+                code_index,
+                loaded.op1,
+                loaded.op2,
+                loaded.dest,
+                |vm, lhs, rhs| lhs.idiv(vm, &rhs),
+            ),
+            LoadedOp::Remainder(loaded) => self.op_binop(
+                code_index,
+                loaded.op1,
+                loaded.op2,
+                loaded.dest,
+                |vm, lhs, rhs| lhs.rem(vm, &rhs),
+            ),
+            LoadedOp::Power(loaded) => self.op_binop(
+                code_index,
+                loaded.op1,
+                loaded.op2,
+                loaded.dest,
+                |vm, lhs, rhs| lhs.pow(vm, &rhs),
+            ),
+            LoadedOp::JumpIf(loaded) => {
+                self.op_jump_if(code_index, loaded.op1, loaded.op2, loaded.dest, false)
+            }
+            LoadedOp::JumpIfNot(loaded) => {
+                self.op_jump_if(code_index, loaded.op1, loaded.op2, loaded.dest, true)
+            }
+            LoadedOp::LessThanOrEqual(loaded) => {
+                self.op_compare(code_index, loaded.op1, loaded.op2, loaded.dest, |ord| {
+                    matches!(ord, Ordering::Less | Ordering::Equal)
+                })
+            }
+            LoadedOp::LessThan(loaded) => {
+                self.op_compare(code_index, loaded.op1, loaded.op2, loaded.dest, |ord| {
+                    matches!(ord, Ordering::Less)
+                })
+            }
+            LoadedOp::Equal(loaded) => {
+                self.op_compare(code_index, loaded.op1, loaded.op2, loaded.dest, |ord| {
+                    matches!(ord, Ordering::Equal)
+                })
+            }
+            LoadedOp::GreaterThan(loaded) => {
+                self.op_compare(code_index, loaded.op1, loaded.op2, loaded.dest, |ord| {
+                    matches!(ord, Ordering::Greater)
+                })
+            }
+            LoadedOp::GreaterThanOrEqual(loaded) => {
+                self.op_compare(code_index, loaded.op1, loaded.op2, loaded.dest, |ord| {
+                    matches!(ord, Ordering::Greater | Ordering::Equal)
+                })
+            }
+            LoadedOp::BitwiseAnd(loaded) => self.op_binop(
+                code_index,
+                loaded.op1,
+                loaded.op2,
+                loaded.dest,
+                |vm, lhs, rhs| lhs.bitwise_and(vm, &rhs),
+            ),
+            LoadedOp::BitwiseOr(loaded) => self.op_binop(
+                code_index,
+                loaded.op1,
+                loaded.op2,
+                loaded.dest,
+                |vm, lhs, rhs| lhs.bitwise_or(vm, &rhs),
+            ),
+            LoadedOp::BitwiseXor(loaded) => self.op_binop(
+                code_index,
+                loaded.op1,
+                loaded.op2,
+                loaded.dest,
+                |vm, lhs, rhs| lhs.bitwise_xor(vm, &rhs),
+            ),
+            LoadedOp::BitwiseShiftLeft(loaded) => self.op_binop(
+                code_index,
+                loaded.op1,
+                loaded.op2,
+                loaded.dest,
+                |vm, lhs, rhs| lhs.shift_left(vm, &rhs),
+            ),
+            LoadedOp::BitwiseShiftRight(loaded) => self.op_binop(
+                code_index,
+                loaded.op1,
+                loaded.op2,
+                loaded.dest,
+                |vm, lhs, rhs| lhs.shift_right(vm, &rhs),
+            ),
+        };
+
+        match result {
+            Ok(()) | Err(Fault::FrameChanged) => Ok(next_instruction),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn op_declare(
+        &mut self,
+        code_index: usize,
+        name: usize,
+        value: LoadedSource,
+        dest: OpDestination,
+    ) -> Result<(), Fault> {
+        let value = self.op_load(code_index, value)?;
+        let name = self.code[code_index]
+            .code
+            .data
+            .symbols
+            .get(name)
+            .cloned()
+            .ok_or(Fault::InvalidOpcode)?;
+
+        self.op_store(code_index, &value, dest)?;
+        self.declare(name, value);
+        Ok(())
+    }
+
+    fn op_bitwise_not(
+        &mut self,
+        code_index: usize,
+        value: LoadedSource,
+        dest: OpDestination,
+    ) -> Result<(), Fault> {
+        let value = self.op_load(code_index, value)?;
+        let value = value.bitwise_not(self)?;
+        self.op_store(code_index, value, dest)
+    }
+
+    fn op_truthy(
+        &mut self,
+        code_index: usize,
+        value: LoadedSource,
+        dest: OpDestination,
+    ) -> Result<(), Fault> {
+        let value = self.op_load(code_index, value)?;
+        let value = Value::Bool(value.truthy(self));
+        self.op_store(code_index, value, dest)
+    }
+
+    fn op_not(
+        &mut self,
+        code_index: usize,
+        value: LoadedSource,
+        dest: OpDestination,
+    ) -> Result<(), Fault> {
+        let value = self.op_load(code_index, value)?;
+        let value = value.not(self)?;
+        self.op_store(code_index, value, dest)
+    }
+
+    fn op_negate(
+        &mut self,
+        code_index: usize,
+        value: LoadedSource,
+        dest: OpDestination,
+    ) -> Result<(), Fault> {
+        let value = self.op_load(code_index, value)?;
+        let value = value.negate(self)?;
+        self.op_store(code_index, value, dest)
+    }
+
+    fn op_copy(
+        &mut self,
+        code_index: usize,
+        value: LoadedSource,
+        dest: OpDestination,
+    ) -> Result<(), Fault> {
+        let value = self.op_load(code_index, value)?;
+        self.op_store(code_index, value, dest)
+    }
+
+    fn op_resolve(
+        &mut self,
+        code_index: usize,
+        value: LoadedSource,
+        dest: OpDestination,
+    ) -> Result<(), Fault> {
+        let Value::Symbol(name) = self.op_load(code_index, value)? else {
+            return Err(Fault::ExpectedSymbol);
+        };
+
+        let resolved = self.resolve(&name)?;
+        self.op_store(code_index, resolved, dest)
+    }
+
+    fn op_call(
+        &mut self,
+        code_index: usize,
+        function: LoadedSource,
+        arity: LoadedSource,
+    ) -> Result<(), Fault> {
+        let (function, arity) = try_all!(
+            self.op_load(code_index, function),
+            self.op_load(code_index, arity)
+        );
+
+        let Some(arity) = arity.as_u64().and_then(|arity| u8::try_from(arity).ok()) else {
+            return Err(Fault::InvalidArity);
+        };
+
+        self[Register(0)] = function.call(self, arity)?;
+
+        Ok(())
+    }
+
+    fn op_invoke(
+        &mut self,
+        code_index: usize,
+        target: LoadedSource,
+        name: usize,
+        arity: LoadedSource,
+    ) -> Result<(), Fault> {
+        let (target, arity, name) = try_all!(
+            self.op_load(code_index, target),
+            self.op_load(code_index, arity),
+            self.op_load_symbol(code_index, name)
+        );
+
+        let Some(arity) = arity.as_u64().and_then(|arity| u8::try_from(arity).ok()) else {
+            return Err(Fault::InvalidArity);
+        };
+
+        self[Register(0)] = target.invoke(self, &name, arity)?;
+
+        Ok(())
+    }
+
+    fn op_compare(
+        &mut self,
+        code_index: usize,
+        lhs: LoadedSource,
+        rhs: LoadedSource,
+        dest: OpDestination,
+        op: impl FnOnce(Ordering) -> bool,
+    ) -> Result<(), Fault> {
+        self.op_binop(code_index, lhs, rhs, dest, |vm, lhs, rhs| {
+            lhs.total_cmp(vm, &rhs).map(|ord| Value::Bool(op(ord)))
+        })
+    }
+
+    fn op_binop(
+        &mut self,
+        code_index: usize,
+        lhs: LoadedSource,
+        rhs: LoadedSource,
+        dest: OpDestination,
+        op: impl FnOnce(&mut Self, Value, Value) -> Result<Value, Fault>,
+    ) -> Result<(), Fault> {
+        let (s1, s2) = try_all!(self.op_load(code_index, lhs), self.op_load(code_index, rhs));
+
+        let result = op(self, s1, s2)?;
+
+        self.op_store(code_index, result, dest)
+    }
+
+    fn op_jump(
+        &mut self,
+        code_index: usize,
+        target: LoadedSource,
+        previous_instruction: OpDestination,
+    ) -> Result<(), Fault> {
+        let target = self.op_load(code_index, target)?;
+
+        let current_instruction = self.current_instruction();
+        self.jump_to(target.as_usize().ok_or(Fault::InvalidLabel)?);
+        self.op_store(
+            code_index,
+            Value::try_from(current_instruction)?,
+            previous_instruction,
+        )
+    }
+
+    fn op_jump_if(
+        &mut self,
+        code_index: usize,
+        target: LoadedSource,
+        condition: LoadedSource,
+        previous_instruction: OpDestination,
+        not: bool,
+    ) -> Result<(), Fault> {
+        let (target, condition) = try_all!(
+            self.op_load(code_index, target),
+            self.op_load(code_index, condition)
+        );
+
+        let mut condition = condition.truthy(self);
+        if not {
+            condition = !condition;
+        }
+
+        if condition {
+            let current_instruction = self.current_instruction();
+            self.jump_to(target.as_usize().ok_or(Fault::InvalidLabel)?);
+            self.op_store(
+                code_index,
+                Value::try_from(current_instruction)?,
+                previous_instruction,
+            )
+        } else {
+            Ok(())
+        }
+    }
+
+    fn op_new_map(
+        &mut self,
+        code_index: usize,
+        element_count: LoadedSource,
+        dest: OpDestination,
+    ) -> Result<(), Fault> {
+        let element_count = self.op_load(code_index, element_count)?;
+        if let Some(element_count) = element_count
+            .as_u64()
+            .and_then(|c| u8::try_from(c).ok())
+            .filter(|count| count < &128)
+        {
+            let map = map::Map::new();
+            for reg_index in (0..element_count * 2).step_by(2) {
+                let key = self[Register(reg_index)].take();
+                let value = self[Register(reg_index + 1)].take();
+                map.insert(self, key, value)?;
+            }
+            self.op_store(code_index, Value::dynamic(map), dest)
+        } else {
+            // TODO handle large map initialization
+            Err(Fault::InvalidArity)
+        }
+    }
+
+    fn op_new_list(
+        &mut self,
+        code_index: usize,
+        element_count: LoadedSource,
+        dest: OpDestination,
+    ) -> Result<(), Fault> {
+        let element_count = self.op_load(code_index, element_count)?;
+        if let Some(element_count) = element_count.as_u64().and_then(|c| u8::try_from(c).ok()) {
+            let list = List::new();
+            for reg_index in 0..element_count {
+                let value = self[Register(reg_index)].take();
+                list.push(value)?;
+            }
+            self.op_store(code_index, Value::dynamic(list), dest)
+        } else {
+            // TODO handle large list initialization
+            Err(Fault::InvalidArity)
+        }
+    }
+
+    fn op_load_symbol(&mut self, code_index: usize, symbol: usize) -> Result<Symbol, Fault> {
+        self.code[code_index]
+            .code
+            .data
+            .symbols
+            .get(symbol)
+            .cloned()
+            .ok_or(Fault::InvalidOpcode)
+    }
+
+    fn op_load(&mut self, code_index: usize, value: LoadedSource) -> Result<Value, Fault> {
+        match value {
+            LoadedSource::Nil => Ok(Value::Nil),
+            LoadedSource::Bool(v) => Ok(Value::Bool(v)),
+            LoadedSource::Int(v) => Ok(Value::Int(v)),
+            LoadedSource::UInt(v) => Ok(Value::UInt(v)),
+            LoadedSource::Float(v) => Ok(Value::Float(v)),
+            LoadedSource::Symbol(v) => self.op_load_symbol(code_index, v).map(Value::Symbol),
+            LoadedSource::Register(v) => Ok(self[v].clone()),
+            LoadedSource::Dynamic(v) => self.code[code_index]
+                .code
+                .data
+                .dynamics
+                .get(v)
+                .cloned()
+                .map(Value::Dynamic)
+                .ok_or(Fault::InvalidOpcode),
+            LoadedSource::Stack(v) => self
+                .current_frame()
+                .get(v.0)
+                .cloned()
+                .ok_or(Fault::InvalidOpcode),
+            LoadedSource::Label(v) => self.code[code_index]
+                .code
+                .data
+                .labels
+                .get(v.0)
+                .and_then(|label| u64::try_from(*label).ok())
+                .map(Value::UInt)
+                .ok_or(Fault::InvalidOpcode),
+            LoadedSource::Regex(v) => self.code[code_index]
+                .code
+                .data
+                .regexes
+                .get(v)
+                .ok_or(Fault::InvalidOpcode)
+                .and_then(|regex| regex.result.clone()),
+        }
+    }
+
+    fn op_store<'a>(
+        &mut self,
+        code_index: usize,
+        value: impl Into<MaybeOwnedValue<'a>>,
+        dest: OpDestination,
+    ) -> Result<(), Fault> {
+        let value = value.into();
+        match dest {
+            OpDestination::Void => Ok(()),
+            OpDestination::Register(register) => {
+                self[register] = value.into_owned();
+                Ok(())
+            }
+            OpDestination::Stack(stack) => {
+                if let Some(stack) = self.current_frame_mut().get_mut(stack.0) {
+                    *stack = value.into_owned();
+                    Ok(())
+                } else {
+                    Err(Fault::InvalidOpcode)
+                }
+            }
+            OpDestination::Label(label) => {
+                if value.truthy(self) {
+                    let instruction = self.code[code_index]
+                        .code
+                        .data
+                        .labels
+                        .get(label.0)
+                        .ok_or(Fault::InvalidLabel)?;
+                    self.jump_to(*instruction);
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+enum MaybeOwnedValue<'a> {
+    Ref(&'a Value),
+    Owned(Value),
+}
+
+#[cfg(not(feature = "dispatched"))]
+impl MaybeOwnedValue<'_> {
+    fn into_owned(self) -> Value {
+        match self {
+            MaybeOwnedValue::Ref(value) => value.clone(),
+            MaybeOwnedValue::Owned(value) => value,
+        }
+    }
+}
+
+impl Deref for MaybeOwnedValue<'_> {
+    type Target = Value;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            MaybeOwnedValue::Ref(value) => value,
+            MaybeOwnedValue::Owned(value) => value,
+        }
+    }
+}
+
+impl<'a> From<&'a Value> for MaybeOwnedValue<'a> {
+    fn from(value: &'a Value) -> Self {
+        Self::Ref(value)
+    }
+}
+
+impl From<Value> for MaybeOwnedValue<'_> {
+    fn from(value: Value) -> Self {
+        Self::Owned(value)
     }
 }
 
@@ -421,27 +1050,6 @@ impl Index<Register> for Vm {
 impl IndexMut<Register> for Vm {
     fn index_mut(&mut self, index: Register) -> &mut Self::Output {
         &mut self.registers[usize::from(index)]
-    }
-}
-
-impl Source for Register {
-    fn load(&self, vm: &Vm) -> Result<Value, Fault> {
-        Ok(vm[*self].clone())
-    }
-
-    fn as_source(&self) -> ValueOrSource {
-        ValueOrSource::Register(*self)
-    }
-}
-
-impl Destination for Register {
-    fn store(&self, vm: &mut Vm, value: Value) -> Result<(), Fault> {
-        vm[*self] = value;
-        Ok(())
-    }
-
-    fn as_dest(&self) -> OpDestination {
-        OpDestination::Register(*self)
     }
 }
 
@@ -495,6 +1103,7 @@ pub enum Fault {
     ExpectedString,
     InvalidArity,
     InvalidLabel,
+    InvalidOpcode,
     NoBudget,
     Timeout,
     Waiting,
@@ -502,7 +1111,7 @@ pub enum Fault {
     Custom {
         // TODO add an optional Type as a source.
         code: u32,
-        message: Cow<'static, String>,
+        message: Box<Cow<'static, String>>,
     },
 }
 
@@ -523,12 +1132,12 @@ impl Function {
         }
     }
 
-    pub fn insert_arity(&mut self, arity: impl Into<Arity>, body: impl Into<Code>) {
-        self.bodies.insert(arity.into(), body.into());
+    pub fn insert_arity(&mut self, arity: impl Into<Arity>, body: Code) {
+        self.bodies.insert(arity.into(), body);
     }
 
     #[must_use]
-    pub fn when(mut self, arity: impl Into<Arity>, body: impl Into<Code>) -> Self {
+    pub fn when(mut self, arity: impl Into<Arity>, body: Code) -> Self {
         self.insert_arity(arity, body);
         self
     }
@@ -550,34 +1159,6 @@ impl CustomType for Function {
             vm.execute_function(body, this)
         } else {
             Err(Fault::IncorrectNumberOfArguments)
-        }
-    }
-}
-
-#[derive(Debug)]
-struct DeclareFunction<Dest> {
-    function: Function,
-    dest: Dest,
-}
-
-impl<Dest> Instruction for DeclareFunction<Dest>
-where
-    Dest: Destination,
-{
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
-        let function = Value::dynamic(self.function.clone());
-        if let Some(name) = &self.function.name {
-            vm.declare(name.clone(), function.clone());
-        }
-        self.dest.store(vm, function)?;
-
-        Ok(ControlFlow::Continue(()))
-    }
-
-    fn as_op(&self) -> bitcode::Op {
-        bitcode::Op::DeclareFunction {
-            function: BitcodeFunction::from(&self.function),
-            dest: self.dest.as_dest(),
         }
     }
 }
@@ -608,60 +1189,9 @@ pub struct Code {
     data: Arc<CodeData>,
 }
 
-#[derive(Default, Debug, Clone)]
-struct CodeData {
-    instructions: Vec<Arc<dyn Instruction>>,
-    labels: Vec<usize>,
-    stack_requirement: usize,
-}
-
 impl Code {
-    pub fn push_boxed(&mut self, instruction: Arc<dyn Instruction>) {
-        Arc::make_mut(&mut self.data).instructions.push(instruction);
-    }
-
-    pub fn push<I>(&mut self, instruction: I)
-    where
-        I: Instruction,
-    {
-        self.push_boxed(Arc::new(instruction));
-    }
-
-    #[must_use]
-    pub fn with<I>(mut self, instruction: I) -> Self
-    where
-        I: Instruction,
-    {
-        self.push(instruction);
-        self
-    }
-
-    fn step(&self, vm: &mut Vm, address: usize) -> Result<StepResult, Fault> {
-        let instruction = match address.cmp(&self.data.instructions.len()) {
-            Ordering::Less => &self.data.instructions[address],
-            Ordering::Equal => return Ok(StepResult::Complete),
-            Ordering::Greater => return Err(Fault::InvalidInstructionAddress),
-        };
-        // println!("Executing {instruction:?}");
-        let next_address_step = match address.checked_add(1) {
-            Some(next) if next <= self.data.instructions.len() => StepResult::NextAddress(next),
-            _ => StepResult::Complete,
-        };
-        match instruction.execute(vm) {
-            Ok(ControlFlow::Continue(())) => {
-                if vm.current_instruction() == address {
-                    Ok(next_address_step)
-                } else if vm.current_instruction() < self.data.instructions.len() {
-                    // Execution caused a jump
-                    Ok(StepResult::NextAddress(vm.current_instruction()))
-                } else {
-                    Ok(StepResult::Complete)
-                }
-            }
-            Ok(ControlFlow::Break(())) => Ok(StepResult::Complete),
-            Err(Fault::FrameChanged) => Ok(next_address_step),
-            Err(other) => Err(other),
-        }
+    pub fn push(&mut self, op: &Op) {
+        Arc::make_mut(&mut self.data).push(op);
     }
 }
 
@@ -676,9 +1206,203 @@ impl Default for Code {
     }
 }
 
+#[cfg(feature = "dispatched")]
+type Inst = Arc<dyn dispatched::Instruction>;
+
+#[cfg(not(feature = "dispatched"))]
+type Inst = LoadedOp;
+
+#[derive(Default, Debug, Clone)]
+struct CodeData {
+    instructions: Vec<Inst>,
+    labels: Vec<usize>,
+    regexes: Vec<PrecompiledRegex>,
+    stack_requirement: usize,
+    symbols: Vec<Symbol>,
+    dynamics: Vec<Dynamic>,
+}
+
+impl CodeData {
+    pub fn push(&mut self, op: &Op) {
+        match op {
+            Op::Return => self.push_loaded(LoadedOp::Return),
+            Op::Label(label) => {
+                if self.labels.len() <= label.0 {
+                    self.labels.resize(label.0 + 1, usize::MAX);
+                }
+                self.labels[label.0] = self.instructions.len();
+            }
+            Op::Declare { name, value, dest } => {
+                let name = self.push_symbol(name.clone());
+                let value = self.load_source(value);
+                let dest = self.load_dest(dest);
+                self.push_loaded(LoadedOp::Declare { name, value, dest });
+            }
+            Op::Unary {
+                dest: OpDestination::Void,
+                kind: UnaryKind::Copy,
+                ..
+            } => {}
+            Op::Unary { op, dest, kind } => {
+                let op = self.load_source(op);
+                let dest = self.load_dest(dest);
+                let unary = LoadedUnary { op, dest };
+                self.push_loaded(match kind {
+                    UnaryKind::Truthy => LoadedOp::Truthy(unary),
+                    UnaryKind::LogicalNot => LoadedOp::LogicalNot(unary),
+                    UnaryKind::BitwiseNot => LoadedOp::BitwiseNot(unary),
+                    UnaryKind::Negate => LoadedOp::Negate(unary),
+                    UnaryKind::Copy => LoadedOp::Copy(unary),
+                    UnaryKind::Resolve => LoadedOp::Resolve(unary),
+                    UnaryKind::Jump => LoadedOp::Jump(unary),
+                    UnaryKind::NewMap => LoadedOp::NewMap(unary),
+                    UnaryKind::NewList => LoadedOp::NewList(unary),
+                });
+            }
+            Op::BinOp {
+                op1,
+                op2,
+                dest,
+                kind,
+            } => {
+                let op1 = self.load_source(op1);
+                let op2 = self.load_source(op2);
+                let dest = self.load_dest(dest);
+                let binary = LoadedBinary { op1, op2, dest };
+                self.push_loaded(match kind {
+                    BinaryKind::Add => LoadedOp::Add(binary),
+                    BinaryKind::Subtract => LoadedOp::Subtract(binary),
+                    BinaryKind::Multiply => LoadedOp::Multiply(binary),
+                    BinaryKind::Divide => LoadedOp::Divide(binary),
+                    BinaryKind::IntegerDivide => LoadedOp::IntegerDivide(binary),
+                    BinaryKind::Remainder => LoadedOp::Remainder(binary),
+                    BinaryKind::Power => LoadedOp::Power(binary),
+                    BinaryKind::JumpIf => LoadedOp::JumpIf(binary),
+                    BinaryKind::JumpIfNot => LoadedOp::JumpIfNot(binary),
+                    BinaryKind::LogicalXor => LoadedOp::LogicalXor(binary),
+                    BinaryKind::Bitwise(kind) => match kind {
+                        BitwiseKind::And => LoadedOp::BitwiseAnd(binary),
+                        BitwiseKind::Or => LoadedOp::BitwiseOr(binary),
+                        BitwiseKind::Xor => LoadedOp::BitwiseXor(binary),
+                        BitwiseKind::ShiftLeft => LoadedOp::BitwiseShiftLeft(binary),
+                        BitwiseKind::ShiftRight => LoadedOp::BitwiseShiftRight(binary),
+                    },
+                    BinaryKind::Compare(kind) => match kind {
+                        CompareKind::LessThanOrEqual => LoadedOp::LessThanOrEqual(binary),
+                        CompareKind::LessThan => LoadedOp::LessThan(binary),
+                        CompareKind::Equal => LoadedOp::Equal(binary),
+                        CompareKind::GreaterThan => LoadedOp::GreaterThan(binary),
+                        CompareKind::GreaterThanOrEqual => LoadedOp::GreaterThanOrEqual(binary),
+                    },
+                });
+            }
+            Op::Call { name, arity } => {
+                let name = self.load_source(name);
+                let arity = self.load_source(arity);
+                self.push_loaded(LoadedOp::Call { name, arity });
+            }
+            Op::Invoke {
+                target,
+                name,
+                arity,
+            } => {
+                let target = self.load_source(target);
+                let name = self.push_symbol(name.clone());
+                let arity = self.load_source(arity);
+                self.push_loaded(LoadedOp::Invoke {
+                    target,
+                    name,
+                    arity,
+                });
+            }
+        }
+    }
+
+    #[cfg(not(feature = "dispatched"))]
+    fn push_loaded(&mut self, loaded: LoadedOp) {
+        self.instructions.push(loaded);
+    }
+
+    fn push_dynamic(&mut self, dynamic: Dynamic) -> usize {
+        let index = self.dynamics.len();
+        self.dynamics.push(dynamic);
+        index
+    }
+
+    fn push_symbol(&mut self, symbol: Symbol) -> usize {
+        let index = self.symbols.len();
+        self.symbols.push(symbol);
+        index
+    }
+
+    fn push_regex(&mut self, regex: &RegExLiteral) -> usize {
+        let index = self.regexes.len();
+        self.regexes.push(precompiled_regex(regex));
+        index
+    }
+
+    fn load_source(&mut self, source: &ValueOrSource) -> LoadedSource {
+        match source {
+            ValueOrSource::Nil => LoadedSource::Nil,
+            ValueOrSource::Bool(bool) => LoadedSource::Bool(*bool),
+
+            ValueOrSource::Int(int) => LoadedSource::Int(*int),
+            ValueOrSource::UInt(uint) => LoadedSource::UInt(*uint),
+            ValueOrSource::Float(float) => LoadedSource::Float(*float),
+            ValueOrSource::Symbol(sym) => LoadedSource::Symbol(self.push_symbol(sym.clone())),
+            ValueOrSource::String(string) => LoadedSource::Dynamic(
+                self.push_dynamic(Dynamic::new(MuseString::from(string.as_str()))),
+            ),
+            ValueOrSource::RegEx(regex) => LoadedSource::Regex(self.push_regex(regex)),
+            ValueOrSource::Register(reg) => LoadedSource::Register(*reg),
+            ValueOrSource::Stack(stack) => {
+                self.stack_requirement = self.stack_requirement.max(stack.0 + 1);
+                LoadedSource::Stack(*stack)
+            }
+            ValueOrSource::Label(label) => LoadedSource::Label(*label),
+            ValueOrSource::Function(function) => {
+                let function = self.push_dynamic(Dynamic::new(Function::from(function)));
+                LoadedSource::Dynamic(function)
+            }
+        }
+    }
+
+    fn load_dest(&mut self, dest: &OpDestination) -> OpDestination {
+        match *dest {
+            OpDestination::Stack(stack) => {
+                self.stack_requirement = self.stack_requirement.max(stack.0 + 1);
+                OpDestination::Stack(stack)
+            }
+            other => other,
+        }
+    }
+}
+
+struct InstructionFormatter<'a>(&'a [u64]);
+
+impl Debug for InstructionFormatter<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut i = f.debug_list();
+        let mut hex = String::new();
+        for op in self.0 {
+            hex.clear();
+            write!(&mut hex, "{op:x}")?;
+            i.entry(&hex);
+        }
+        i.finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 enum StepResult {
     Complete,
     NextAddress(usize),
+}
+
+impl From<Option<usize>> for StepResult {
+    fn from(value: Option<usize>) -> Self {
+        value.map_or(StepResult::Complete, StepResult::NextAddress)
+    }
 }
 
 #[derive(Default, Debug)]
@@ -730,3 +1454,123 @@ impl Wake for VmWaker {
         self.0.unpark();
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LoadedOp {
+    Return,
+    Declare {
+        name: usize,
+        value: LoadedSource,
+        dest: OpDestination,
+    },
+    Truthy(LoadedUnary),
+    LogicalNot(LoadedUnary),
+    BitwiseNot(LoadedUnary),
+    Negate(LoadedUnary),
+    Copy(LoadedUnary),
+    Resolve(LoadedUnary),
+    Jump(LoadedUnary),
+    NewMap(LoadedUnary),
+    NewList(LoadedUnary),
+    LogicalXor(LoadedBinary),
+    Add(LoadedBinary),
+    Subtract(LoadedBinary),
+    Multiply(LoadedBinary),
+    Divide(LoadedBinary),
+    IntegerDivide(LoadedBinary),
+    Remainder(LoadedBinary),
+    Power(LoadedBinary),
+    JumpIf(LoadedBinary),
+    JumpIfNot(LoadedBinary),
+    LessThanOrEqual(LoadedBinary),
+    LessThan(LoadedBinary),
+    Equal(LoadedBinary),
+    GreaterThan(LoadedBinary),
+    GreaterThanOrEqual(LoadedBinary),
+    Call {
+        name: LoadedSource,
+        arity: LoadedSource,
+    },
+    Invoke {
+        target: LoadedSource,
+        name: usize,
+        arity: LoadedSource,
+    },
+    BitwiseAnd(LoadedBinary),
+    BitwiseOr(LoadedBinary),
+    BitwiseXor(LoadedBinary),
+    BitwiseShiftLeft(LoadedBinary),
+    BitwiseShiftRight(LoadedBinary),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LoadedUnary {
+    op: LoadedSource,
+    dest: OpDestination,
+}
+
+impl LoadedUnary {
+    #[cfg(not(feature = "dispatched"))]
+    fn as_op(&self, kind: UnaryKind, code: &Code) -> Op {
+        Op::Unary {
+            op: trusted_loaded_source_to_value(&self.op, &code.data),
+            dest: self.dest,
+            kind,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LoadedBinary {
+    op1: LoadedSource,
+    op2: LoadedSource,
+    dest: OpDestination,
+}
+
+impl LoadedBinary {
+    #[cfg(not(feature = "dispatched"))]
+    fn as_op(&self, kind: BinaryKind, code: &Code) -> Op {
+        Op::BinOp {
+            op1: trusted_loaded_source_to_value(&self.op1, &code.data),
+            op2: trusted_loaded_source_to_value(&self.op2, &code.data),
+            dest: self.dest,
+            kind,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LoadedSource {
+    Nil,
+    Bool(bool),
+    Int(i64),
+    UInt(u64),
+    Float(f64),
+    Symbol(usize),
+    Register(Register),
+    Dynamic(usize),
+    Stack(Stack),
+    Label(Label),
+    Regex(usize),
+}
+
+#[derive(Debug, Clone)]
+struct PrecompiledRegex {
+    literal: RegExLiteral,
+    result: Result<Value, Fault>,
+}
+fn precompiled_regex(regex: &RegExLiteral) -> PrecompiledRegex {
+    PrecompiledRegex {
+        literal: regex.clone(),
+        result: MuseRegEx::new(regex)
+            .map(Value::dynamic)
+            .map_err(|err| Fault::Custom {
+                code: 0,
+                message: Box::new(Cow::Owned(err.to_string())),
+            }),
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Stack(pub usize);

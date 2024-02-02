@@ -3,12 +3,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::symbol::Symbol;
 use crate::syntax::{
-    self, BinaryExpression, BinaryKind, Chain, Expression, FunctionCall, LogicalKind, Ranged,
-    SourceRange, UnaryExpression, Variable,
+    self, BinaryExpression, Chain, Expression, FunctionCall, LogicalKind, Ranged, SourceRange,
+    UnaryExpression, Variable,
 };
-use crate::vm::bitcode::{BitcodeBlock, BitcodeFunction, Op, OpDestination, ValueOrSource};
-use crate::vm::ops::Stack;
-use crate::vm::{Code, Register};
+use crate::vm::bitcode::{
+    BinaryKind, BitcodeBlock, BitcodeFunction, Op, OpDestination, ValueOrSource,
+};
+use crate::vm::{Code, Register, Stack};
 
 #[derive(Default, Debug)]
 pub struct Compiler {
@@ -144,8 +145,8 @@ impl<'a> Scope<'a> {
                     self.compiler.code.copy(lookup.name.clone(), Register(0));
                     self.compiler.code.push(Op::Invoke {
                         target,
-                        arity: ValueOrSource::Int(1),
                         name: Symbol::get_symbol().clone(),
+                        arity: ValueOrSource::Int(1),
                     });
                     self.compiler.code.copy(Register(0), dest);
                 } else if let Some(var) = self.compiler.declarations.get(&lookup.name) {
@@ -339,24 +340,44 @@ impl<'a> Scope<'a> {
     }
 
     fn compile_binop(&mut self, binop: &BinaryExpression, dest: OpDestination) {
-        if matches!(
-            binop.kind,
-            BinaryKind::Logical(LogicalKind::And | LogicalKind::Or)
-        ) {
-            todo!("implement short circuiting logic operators")
-        }
-        self.compile_basic_binop(&binop.left, &binop.right, dest, binop.kind);
-    }
+        let left = self.compile_source(&binop.left);
+        let kind = match binop.kind {
+            syntax::BinaryKind::Add => BinaryKind::Add,
+            syntax::BinaryKind::Subtract => BinaryKind::Subtract,
+            syntax::BinaryKind::Multiply => BinaryKind::Multiply,
+            syntax::BinaryKind::Divide => BinaryKind::Divide,
+            syntax::BinaryKind::IntegerDivide => BinaryKind::IntegerDivide,
+            syntax::BinaryKind::Remainder => BinaryKind::Remainder,
+            syntax::BinaryKind::Power => BinaryKind::Power,
+            syntax::BinaryKind::Bitwise(kind) => BinaryKind::Bitwise(kind),
+            syntax::BinaryKind::Compare(kind) => BinaryKind::Compare(kind),
+            syntax::BinaryKind::Logical(LogicalKind::And) => {
+                let after = self.compiler.code.new_label();
+                self.compile_expression(&binop.left, dest);
+                self.compiler.code.jump_if_not(after, dest, ());
 
-    fn compile_basic_binop(
-        &mut self,
-        lhs: &Ranged<Expression>,
-        rhs: &Ranged<Expression>,
-        dest: OpDestination,
-        kind: BinaryKind,
-    ) {
-        let left = self.compile_source(lhs);
-        let right = self.compile_source(rhs);
+                self.compile_expression(&binop.right, dest);
+                self.compiler.code.truthy(dest, dest);
+
+                self.compiler.code.label(after);
+
+                return;
+            }
+            syntax::BinaryKind::Logical(LogicalKind::Or) => {
+                let after = self.compiler.code.new_label();
+                self.compile_expression(&binop.left, dest);
+                self.compiler.code.jump_if(after, dest, ());
+
+                self.compile_expression(&binop.right, dest);
+                self.compiler.code.truthy(dest, dest);
+
+                self.compiler.code.label(after);
+
+                return;
+            }
+            syntax::BinaryKind::Logical(LogicalKind::Xor) => BinaryKind::LogicalXor,
+        };
+        let right = self.compile_source(&binop.right);
         self.compiler.code.push(Op::BinOp {
             op1: left,
             op2: right,
@@ -432,8 +453,8 @@ impl<'a> Scope<'a> {
                 self.compile_function_args(&call.parameters, arity);
                 self.compiler.code.push(Op::Invoke {
                     target: base,
-                    arity: arity.into(),
                     name: lookup.name.clone(),
+                    arity: arity.into(),
                 });
                 self.compiler.code.copy(Register(0), dest);
                 return;
@@ -484,6 +505,7 @@ pub enum Error {
     UnknownVariable,
     VariableNotMutable,
     TooManyArguments,
+    UsizeTooLarge,
     Syntax(syntax::Error),
 }
 
@@ -495,6 +517,7 @@ impl From<Ranged<syntax::Error>> for Ranged<Error> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum UnaryKind {
+    Truthy,
     LogicalNot,
     BitwiseNot,
     Negate,

@@ -1,0 +1,4 @@
+negate: {
+    src: r#"--1"#,
+    output: Int(1),
+}

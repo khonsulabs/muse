@@ -63,6 +63,17 @@ impl Value {
     }
 
     #[must_use]
+    pub fn as_u32(&self) -> Option<u32> {
+        match self {
+            Value::Int(value) => u32::try_from(*value).ok(),
+            Value::UInt(value) => u32::try_from(*value).ok(),
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Value::Float(value) => Some(*value as u32),
+            _ => None,
+        }
+    }
+
+    #[must_use]
     pub fn as_usize(&self) -> Option<usize> {
         match self {
             Value::Int(value) => usize::try_from(*value).ok(),
@@ -80,6 +91,72 @@ impl Value {
             Value::Int(value) => Some(*value as f64),
             Value::Float(value) => Some(*value),
             _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn to_i64(&self) -> Option<i64> {
+        match self {
+            Value::Int(value) => Some(*value),
+            Value::UInt(value) => i64::try_from(*value).ok(),
+            #[allow(clippy::cast_possible_truncation)]
+            Value::Float(value) => Some(*value as i64),
+            Value::Nil => Some(0),
+            Value::Bool(bool) => Some(i64::from(*bool)),
+            Value::Symbol(_) | Value::Dynamic(_) => None, // TODO offer dynamic conversion
+        }
+    }
+
+    #[must_use]
+    pub fn to_u64(&self) -> Option<u64> {
+        match self {
+            Value::Int(value) => u64::try_from(*value).ok(),
+            Value::UInt(value) => Some(*value),
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Value::Float(value) => Some(*value as u64),
+            Value::Nil => Some(0),
+            Value::Bool(bool) => Some(u64::from(*bool)),
+            Value::Symbol(_) | Value::Dynamic(_) => None, // TODO offer dynamic conversion
+        }
+    }
+
+    #[must_use]
+    pub fn to_u32(&self) -> Option<u32> {
+        match self {
+            Value::Int(value) => u32::try_from(*value).ok(),
+            Value::UInt(value) => u32::try_from(*value).ok(),
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Value::Float(value) => Some(*value as u32),
+            Value::Nil => Some(0),
+            Value::Bool(bool) => Some(u32::from(*bool)),
+            Value::Symbol(_) | Value::Dynamic(_) => None, // TODO offer dynamic conversion
+        }
+    }
+
+    #[must_use]
+    pub fn to_usize(&self) -> Option<usize> {
+        match self {
+            Value::Int(value) => usize::try_from(*value).ok(),
+            Value::UInt(value) => usize::try_from(*value).ok(),
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Value::Float(value) => Some(*value as usize),
+            Value::Nil => Some(0),
+            Value::Bool(bool) => Some(usize::from(*bool)),
+            Value::Symbol(_) | Value::Dynamic(_) => None, // TODO offer dynamic conversion
+        }
+    }
+
+    #[must_use]
+    pub fn to_f64(&self) -> Option<f64> {
+        match self {
+            #[allow(clippy::cast_precision_loss)]
+            Value::Int(value) => Some(*value as f64),
+            #[allow(clippy::cast_precision_loss)]
+            Value::UInt(value) => Some(*value as f64),
+            Value::Float(value) => Some(*value),
+            Value::Nil => Some(0.),
+            Value::Bool(bool) => Some(f64::from(*bool)),
+            Value::Symbol(_) | Value::Dynamic(_) => None, // TODO offer dynamic conversion
         }
     }
 
@@ -487,6 +564,226 @@ impl Value {
         }
     }
 
+    pub fn not(&self, vm: &mut Vm) -> Result<Self, Fault> {
+        match self {
+            Value::Dynamic(value) => value.not(vm),
+            _ => Ok(Value::Bool(!self.truthy(vm))),
+        }
+    }
+
+    pub fn negate(&self, vm: &mut Vm) -> Result<Self, Fault> {
+        match self {
+            Value::Nil => Ok(Value::Nil),
+            Value::Bool(bool) => Ok(Value::Bool(!bool)),
+            Value::Int(value) => Ok(Value::Int(-*value)),
+            Value::UInt(value) => Ok(if let Ok(value) = i64::try_from(*value) {
+                Value::Int(value.saturating_neg())
+            } else {
+                Value::Int(i64::MIN)
+            }),
+            Value::Float(value) => Ok(Value::Float(-*value)),
+            Value::Dynamic(value) => value.negate(vm),
+            Value::Symbol(_) => Err(Fault::UnsupportedOperation),
+        }
+    }
+
+    pub fn bitwise_not(&self, vm: &mut Vm) -> Result<Self, Fault> {
+        match self {
+            Value::Nil => Ok(Value::Nil),
+            Value::Bool(bool) => Ok(Value::Bool(!bool)),
+            Value::Int(value) => Ok(Value::Int(!*value)),
+            Value::UInt(value) => Ok(Value::UInt(!*value)),
+            Value::Dynamic(value) => value.bitwise_not(vm),
+            Value::Float(_) | Value::Symbol(_) => Err(Fault::UnsupportedOperation),
+        }
+    }
+
+    pub fn bitwise_and(&self, vm: &mut Vm, rhs: &Value) -> Result<Self, Fault> {
+        match (self, rhs) {
+            (Value::Dynamic(dymamic), other) | (other, Value::Dynamic(dymamic)) => {
+                dymamic.bitwise_and(vm, other)
+            }
+
+            (Value::Int(lhs), Value::Int(rhs)) => Ok(Value::Int(lhs & rhs)),
+            #[allow(clippy::cast_possible_wrap)]
+            (Value::Int(lhs), Value::UInt(rhs)) => Ok(Value::Int(lhs & *rhs as i64)),
+            (Value::Int(lhs), _) => {
+                if let Some(rhs) = rhs.as_i64() {
+                    Ok(Value::Int(lhs & rhs))
+                } else {
+                    Err(Fault::UnsupportedOperation)
+                }
+            }
+
+            (Value::UInt(lhs), Value::UInt(rhs)) => Ok(Value::UInt(lhs & rhs)),
+            #[allow(clippy::cast_sign_loss)]
+            (Value::UInt(lhs), Value::Int(rhs)) => Ok(Value::UInt(lhs & *rhs as u64)),
+            (Value::UInt(lhs), _) => {
+                if let Some(rhs) = rhs.to_u64() {
+                    Ok(Value::UInt(lhs & rhs))
+                } else {
+                    Err(Fault::UnsupportedOperation)
+                }
+            }
+
+            (Value::Float(lhs), _) if lhs.is_sign_negative() => {
+                match (self.as_i64(), rhs.as_i64()) {
+                    (Some(lhs), Some(rhs)) => Ok(Value::Int(lhs & rhs)),
+                    // If either are none, we know the result is 0.
+                    _ => Ok(Value::Int(0)),
+                }
+            }
+
+            _ => match (self.to_u64(), rhs.to_u64()) {
+                (Some(lhs), Some(rhs)) => Ok(Value::UInt(lhs & rhs)),
+                // If either are none, we know the result is 0.
+                _ => Ok(Value::UInt(0)),
+            },
+        }
+    }
+
+    pub fn bitwise_or(&self, vm: &mut Vm, rhs: &Value) -> Result<Self, Fault> {
+        match (self, rhs) {
+            (Value::Dynamic(dymamic), other) | (other, Value::Dynamic(dymamic)) => {
+                dymamic.bitwise_or(vm, other)
+            }
+
+            (Value::Int(lhs), Value::Int(rhs)) => Ok(Value::Int(lhs | rhs)),
+            #[allow(clippy::cast_possible_wrap)]
+            (Value::Int(lhs), Value::UInt(rhs)) => Ok(Value::Int(lhs | *rhs as i64)),
+            (Value::Int(lhs), _) => {
+                if let Some(rhs) = rhs.to_i64() {
+                    Ok(Value::Int(lhs | rhs))
+                } else {
+                    Err(Fault::UnsupportedOperation)
+                }
+            }
+
+            (Value::UInt(lhs), Value::UInt(rhs)) => Ok(Value::UInt(lhs | rhs)),
+            #[allow(clippy::cast_sign_loss)]
+            (Value::UInt(lhs), Value::Int(rhs)) => Ok(Value::UInt(lhs | *rhs as u64)),
+            (Value::UInt(lhs), _) => {
+                if let Some(rhs) = rhs.to_u64() {
+                    Ok(Value::UInt(lhs | rhs))
+                } else {
+                    Err(Fault::UnsupportedOperation)
+                }
+            }
+
+            (Value::Float(lhs), _) if lhs.is_sign_negative() => {
+                match (self.to_i64(), rhs.to_i64()) {
+                    (Some(lhs), Some(rhs)) => Ok(Value::Int(lhs | rhs)),
+                    (Some(result), None) | (None, Some(result)) => Ok(Value::Int(result)),
+                    (None, None) => Ok(Value::Int(0)),
+                }
+            }
+
+            _ => match (self.to_u64(), rhs.to_u64()) {
+                (Some(lhs), Some(rhs)) => Ok(Value::UInt(lhs | rhs)),
+                (Some(result), None) | (None, Some(result)) => Ok(Value::UInt(result)),
+                (None, None) => Ok(Value::UInt(0)),
+            },
+        }
+    }
+
+    pub fn bitwise_xor(&self, vm: &mut Vm, rhs: &Value) -> Result<Self, Fault> {
+        match (self, rhs) {
+            (Value::Dynamic(dymamic), other) | (other, Value::Dynamic(dymamic)) => {
+                dymamic.bitwise_xor(vm, other)
+            }
+
+            (Value::Int(lhs), Value::Int(rhs)) => Ok(Value::Int(lhs ^ rhs)),
+            #[allow(clippy::cast_possible_wrap)]
+            (Value::Int(lhs), Value::UInt(rhs)) => Ok(Value::Int(lhs ^ *rhs as i64)),
+            (Value::Int(lhs), _) => {
+                if let Some(rhs) = rhs.to_i64() {
+                    Ok(Value::Int(lhs ^ rhs))
+                } else {
+                    Err(Fault::UnsupportedOperation)
+                }
+            }
+
+            (Value::UInt(lhs), Value::UInt(rhs)) => Ok(Value::UInt(lhs ^ rhs)),
+            #[allow(clippy::cast_sign_loss)]
+            (Value::UInt(lhs), Value::Int(rhs)) => Ok(Value::UInt(lhs ^ *rhs as u64)),
+            (Value::UInt(lhs), _) => {
+                if let Some(rhs) = rhs.to_u64() {
+                    Ok(Value::UInt(lhs ^ rhs))
+                } else {
+                    Err(Fault::UnsupportedOperation)
+                }
+            }
+
+            (Value::Float(lhs), _) if lhs.is_sign_negative() => {
+                match (self.to_i64(), rhs.to_i64()) {
+                    (Some(lhs), Some(rhs)) => Ok(Value::Int(lhs ^ rhs)),
+                    (Some(result), None) | (None, Some(result)) => Ok(Value::Int(result)),
+                    (None, None) => Ok(Value::Int(0)),
+                }
+            }
+
+            _ => match (self.to_u64(), rhs.to_u64()) {
+                (Some(lhs), Some(rhs)) => Ok(Value::UInt(lhs ^ rhs)),
+                (Some(result), None) | (None, Some(result)) => Ok(Value::UInt(result)),
+                (None, None) => Ok(Value::UInt(0)),
+            },
+        }
+    }
+
+    pub fn shift_left(&self, vm: &mut Vm, rhs: &Value) -> Result<Self, Fault> {
+        match self {
+            Value::Dynamic(dymamic) => dymamic.shift_left(vm, rhs),
+
+            Value::Int(lhs) => Ok(Value::Int(
+                lhs.checked_shl(rhs.to_u32().ok_or(Fault::UnsupportedOperation)?)
+                    .unwrap_or_default(),
+            )),
+            Value::UInt(lhs) => Ok(Value::UInt(
+                lhs.checked_shl(rhs.to_u32().ok_or(Fault::UnsupportedOperation)?)
+                    .unwrap_or_default(),
+            )),
+
+            #[allow(clippy::cast_possible_truncation)]
+            Value::Float(lhs) if lhs.is_sign_negative() => Ok(Value::Int(
+                (*lhs as i64)
+                    .checked_shl(rhs.to_u32().ok_or(Fault::UnsupportedOperation)?)
+                    .unwrap_or_default(),
+            )),
+
+            _ => match (self.to_u64(), rhs.to_u32()) {
+                (Some(lhs), Some(rhs)) => Ok(Value::UInt(lhs.checked_shl(rhs).unwrap_or_default())),
+                _ => Err(Fault::UnsupportedOperation),
+            },
+        }
+    }
+
+    pub fn shift_right(&self, vm: &mut Vm, rhs: &Value) -> Result<Self, Fault> {
+        match self {
+            Value::Dynamic(dymamic) => dymamic.shift_right(vm, rhs),
+
+            Value::Int(lhs) => Ok(Value::Int(
+                lhs.checked_shr(rhs.to_u32().ok_or(Fault::UnsupportedOperation)?)
+                    .unwrap_or_default(),
+            )),
+            Value::UInt(lhs) => Ok(Value::UInt(
+                lhs.checked_shr(rhs.to_u32().ok_or(Fault::UnsupportedOperation)?)
+                    .unwrap_or_default(),
+            )),
+
+            #[allow(clippy::cast_possible_truncation)]
+            Value::Float(lhs) if lhs.is_sign_negative() => Ok(Value::Int(
+                (*lhs as i64)
+                    .checked_shr(rhs.to_u32().ok_or(Fault::UnsupportedOperation)?)
+                    .unwrap_or_default(),
+            )),
+
+            _ => match (self.to_u64(), rhs.to_u32()) {
+                (Some(lhs), Some(rhs)) => Ok(Value::UInt(lhs.checked_shr(rhs).unwrap_or_default())),
+                _ => Err(Fault::UnsupportedOperation),
+            },
+        }
+    }
+
     pub fn to_string(&self, vm: &mut Vm) -> Result<Symbol, Fault> {
         match self {
             Value::Nil => Ok(Symbol::empty().clone()),
@@ -790,6 +1087,38 @@ impl Dynamic {
         self.0.hash(vm, hasher);
     }
 
+    pub fn not(&self, vm: &mut Vm) -> Result<Value, Fault> {
+        self.0.not(vm)
+    }
+
+    pub fn bitwise_not(&self, vm: &mut Vm) -> Result<Value, Fault> {
+        self.0.bitwise_not(vm)
+    }
+
+    pub fn bitwise_and(&self, vm: &mut Vm, other: &Value) -> Result<Value, Fault> {
+        self.0.bitwise_and(vm, other)
+    }
+
+    pub fn bitwise_or(&self, vm: &mut Vm, other: &Value) -> Result<Value, Fault> {
+        self.0.bitwise_or(vm, other)
+    }
+
+    pub fn bitwise_xor(&self, vm: &mut Vm, other: &Value) -> Result<Value, Fault> {
+        self.0.bitwise_xor(vm, other)
+    }
+
+    pub fn shift_left(&self, vm: &mut Vm, amount: &Value) -> Result<Value, Fault> {
+        self.0.shift_left(vm, amount)
+    }
+
+    pub fn shift_right(&self, vm: &mut Vm, amount: &Value) -> Result<Value, Fault> {
+        self.0.shift_right(vm, amount)
+    }
+
+    pub fn negate(&self, vm: &mut Vm) -> Result<Value, Fault> {
+        self.0.negate(vm)
+    }
+
     pub fn to_string(&self, vm: &mut Vm) -> Result<Symbol, Fault> {
         self.0.to_string(vm)
     }
@@ -825,6 +1154,51 @@ pub trait CustomType: Send + Sync + Debug + 'static {
     #[allow(unused_variables)]
     fn hash(&self, vm: &mut Vm, hasher: &mut ValueHasher) {
         (self as *const Self).hash(hasher);
+    }
+
+    #[allow(unused_variables)]
+    fn not(&self, vm: &mut Vm) -> Result<Value, Fault> {
+        Err(Fault::UnsupportedOperation)
+    }
+
+    #[allow(unused_variables)]
+    fn and(&self, vm: &mut Vm, rhs: &Value) -> Result<Value, Fault> {
+        Err(Fault::UnsupportedOperation)
+    }
+
+    #[allow(unused_variables)]
+    fn bitwise_not(&self, vm: &mut Vm) -> Result<Value, Fault> {
+        Err(Fault::UnsupportedOperation)
+    }
+
+    #[allow(unused_variables)]
+    fn bitwise_and(&self, vm: &mut Vm, other: &Value) -> Result<Value, Fault> {
+        Err(Fault::UnsupportedOperation)
+    }
+
+    #[allow(unused_variables)]
+    fn bitwise_or(&self, vm: &mut Vm, other: &Value) -> Result<Value, Fault> {
+        Err(Fault::UnsupportedOperation)
+    }
+
+    #[allow(unused_variables)]
+    fn bitwise_xor(&self, vm: &mut Vm, other: &Value) -> Result<Value, Fault> {
+        Err(Fault::UnsupportedOperation)
+    }
+
+    #[allow(unused_variables)]
+    fn shift_left(&self, vm: &mut Vm, amount: &Value) -> Result<Value, Fault> {
+        Err(Fault::UnsupportedOperation)
+    }
+
+    #[allow(unused_variables)]
+    fn shift_right(&self, vm: &mut Vm, amount: &Value) -> Result<Value, Fault> {
+        Err(Fault::UnsupportedOperation)
+    }
+
+    #[allow(unused_variables)]
+    fn negate(&self, vm: &mut Vm) -> Result<Value, Fault> {
+        Err(Fault::UnsupportedOperation)
     }
 
     #[allow(unused_variables)]

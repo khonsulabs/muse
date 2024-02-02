@@ -1,25 +1,18 @@
-use std::borrow::Cow;
 use std::ops::{Deref, DerefMut};
 use std::str;
-use std::sync::Arc;
 
 use kempt::Map;
 use serde::{Deserialize, Serialize};
 
-use super::ops::{
-    Add, Call, Destination, Divide, Equal, GreaterThan, GreaterThanOrEqual, IntegerDivide, Invoke,
-    Jump, JumpIf, LessThan, LessThanOrEqual, Load, Multiply, NewList, NewMap, Power, Remainder,
-    Resolve, Return, Source, Subtract,
-};
-use super::{Arity, Code, DeclareFunction, Fault, Function, Register};
+#[cfg(not(feature = "dispatched"))]
+use super::LoadedOp;
+use super::{Arity, Code, CodeData, Function, LoadedSource, Register};
 use crate::compiler::UnaryKind;
-use crate::regex::MuseRegEx;
 use crate::string::MuseString;
 use crate::symbol::Symbol;
 use crate::syntax::token::RegExLiteral;
-use crate::syntax::{BinaryKind, CompareKind};
-use crate::value::Value;
-use crate::vm::ops::Stack;
+use crate::syntax::{BitwiseKind, CompareKind};
+use crate::vm::Stack;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ValueOrSource {
@@ -32,6 +25,7 @@ pub enum ValueOrSource {
     String(String),
     RegEx(RegExLiteral),
     Register(Register),
+    Function(BitcodeFunction),
     Stack(Stack),
     Label(Label),
 }
@@ -39,6 +33,17 @@ pub enum ValueOrSource {
 impl From<()> for ValueOrSource {
     fn from(_value: ()) -> Self {
         Self::Nil
+    }
+}
+
+impl From<OpDestination> for ValueOrSource {
+    fn from(value: OpDestination) -> Self {
+        match value {
+            OpDestination::Void => Self::Nil,
+            OpDestination::Register(dest) => Self::Register(dest),
+            OpDestination::Stack(dest) => Self::Stack(dest),
+            OpDestination::Label(dest) => Self::Label(dest),
+        }
     }
 }
 
@@ -80,8 +85,9 @@ impl_from!(OpDestination, Label, Label);
 pub enum Op {
     Return,
     Label(Label),
-    DeclareFunction {
-        function: BitcodeFunction,
+    Declare {
+        name: Symbol,
+        value: ValueOrSource,
         dest: OpDestination,
     },
     Unary {
@@ -101,51 +107,13 @@ pub enum Op {
     },
     Invoke {
         target: ValueOrSource,
-        arity: ValueOrSource,
         name: Symbol,
+        arity: ValueOrSource,
     },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Label(usize);
-
-impl Source for Label {
-    fn load(&self, vm: &super::Vm) -> Result<Value, Fault> {
-        let instruction = vm
-            .current_code()
-            .expect("missing frame code")
-            .data
-            .labels
-            .get(self.0)
-            .ok_or(Fault::InvalidLabel)?;
-        let instruction = u64::try_from(*instruction).map_err(|_| Fault::InvalidLabel)?;
-        Ok(Value::UInt(instruction))
-    }
-
-    fn as_source(&self) -> ValueOrSource {
-        ValueOrSource::Label(*self)
-    }
-}
-
-impl Destination for Label {
-    fn store(&self, vm: &mut super::Vm, value: Value) -> Result<(), Fault> {
-        if value.truthy(vm) {
-            let instruction = vm
-                .current_code()
-                .expect("missing frame code")
-                .data
-                .labels
-                .get(self.0)
-                .ok_or(Fault::InvalidLabel)?;
-            vm.jump_to(*instruction);
-        }
-        Ok(())
-    }
-
-    fn as_dest(&self) -> OpDestination {
-        OpDestination::Label(*self)
-    }
-}
+pub struct Label(pub(crate) usize);
 
 #[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct BitcodeBlock {
@@ -176,10 +144,20 @@ impl BitcodeBlock {
         function: impl Into<BitcodeFunction>,
         dest: impl Into<OpDestination>,
     ) {
-        self.push(Op::DeclareFunction {
-            function: function.into(),
-            dest: dest.into(),
-        });
+        let function = function.into();
+        if let Some(name) = function.name.clone() {
+            self.push(Op::Declare {
+                name,
+                value: ValueOrSource::Function(function),
+                dest: dest.into(),
+            });
+        } else {
+            self.push(Op::Unary {
+                op: ValueOrSource::Function(function),
+                dest: dest.into(),
+                kind: UnaryKind::Copy,
+            });
+        }
     }
 
     pub fn clear(&mut self) {
@@ -380,101 +358,171 @@ impl BitcodeBlock {
             kind: BinaryKind::JumpIf,
         });
     }
+
+    pub fn jump_if_not(
+        &mut self,
+        target: impl Into<ValueOrSource>,
+        condition: impl Into<ValueOrSource>,
+        instruction_before_jump: impl Into<OpDestination>,
+    ) {
+        self.push(Op::BinOp {
+            op1: target.into(),
+            op2: condition.into(),
+            dest: instruction_before_jump.into(),
+            kind: BinaryKind::JumpIfNot,
+        });
+    }
+
+    pub fn not(&mut self, value: impl Into<ValueOrSource>, dest: impl Into<OpDestination>) {
+        self.push(Op::Unary {
+            op: value.into(),
+            dest: dest.into(),
+            kind: UnaryKind::LogicalNot,
+        });
+    }
+
+    pub fn truthy(&mut self, value: impl Into<ValueOrSource>, dest: impl Into<OpDestination>) {
+        self.push(Op::Unary {
+            op: value.into(),
+            dest: dest.into(),
+            kind: UnaryKind::Truthy,
+        });
+    }
+
+    pub fn bitwise_not(&mut self, value: impl Into<ValueOrSource>, dest: impl Into<OpDestination>) {
+        self.push(Op::Unary {
+            op: value.into(),
+            dest: dest.into(),
+            kind: UnaryKind::BitwiseNot,
+        });
+    }
 }
 
 impl From<&'_ BitcodeBlock> for Code {
     fn from(bitcode: &'_ BitcodeBlock) -> Self {
-        let mut labels = Vec::new();
-        labels.resize(bitcode.labels, usize::MAX);
-
-        let mut found_labels = 0;
-        for (index, op) in bitcode.ops.iter().enumerate() {
-            if let Op::Label(label) = op {
-                let instruction_index = index - found_labels;
-                found_labels += 1;
-                if let Some(label_instruction) = labels.get_mut(label.0) {
-                    *label_instruction = instruction_index;
-                }
-            }
-        }
-
-        let mut code = Code {
-            data: Arc::new(super::CodeData {
-                instructions: Vec::with_capacity(bitcode.len()),
-                stack_requirement: bitcode.stack_requirement,
-                labels,
-            }),
-        };
+        let mut code = Code::default();
         for op in &bitcode.ops {
-            match op {
-                Op::Return => {
-                    code.push(Return);
-                }
-                Op::Label(_) => {}
-                Op::DeclareFunction { function, dest } => {
-                    match_declare_function(function, dest, &mut code);
-                }
-                Op::Unary {
-                    op: source,
-                    dest,
-                    kind,
-                } => match kind {
-                    UnaryKind::Copy => match_copy(source, dest, &mut code),
-                    UnaryKind::Resolve => match_resolve(source, dest, &mut code),
-                    UnaryKind::Jump => match_jump(source, dest, &mut code),
-                    UnaryKind::NewMap => match_new_map(source, dest, &mut code),
-                    UnaryKind::NewList => match_new_list(source, dest, &mut code),
-                    UnaryKind::LogicalNot => todo!(),
-                    UnaryKind::BitwiseNot => todo!(),
-                    UnaryKind::Negate => todo!(),
-                },
-                Op::BinOp {
-                    op1: left,
-                    op2: right,
-                    dest,
-                    kind,
-                } => match kind {
-                    BinaryKind::Add => match_add(left, right, dest, &mut code),
-                    BinaryKind::Subtract => match_subtract(left, right, dest, &mut code),
-                    BinaryKind::Multiply => match_multiply(left, right, dest, &mut code),
-                    BinaryKind::Divide => match_divide(left, right, dest, &mut code),
-                    BinaryKind::IntegerDivide => match_integer_divide(left, right, dest, &mut code),
-                    BinaryKind::Remainder => match_remainder(left, right, dest, &mut code),
-                    BinaryKind::Power => match_power(left, right, dest, &mut code),
-                    BinaryKind::Call => unreachable!("TODO split syntax::BinaryKind"),
-                    BinaryKind::JumpIf => match_jump_if(left, right, dest, &mut code),
-                    BinaryKind::Bitwise(_) => todo!(),
-                    BinaryKind::Logical(_) => todo!(),
-                    BinaryKind::Compare(kind) => match kind {
-                        CompareKind::LessThanOrEqual => match_lte(left, right, dest, &mut code),
-                        CompareKind::LessThan => match_lt(left, right, dest, &mut code),
-                        CompareKind::Equal => match_equal(left, right, dest, &mut code),
-                        CompareKind::GreaterThan => match_gt(left, right, dest, &mut code),
-                        CompareKind::GreaterThanOrEqual => match_gte(left, right, dest, &mut code),
-                    },
-                },
-                Op::Call { name, arity } => match_call(name, arity, &mut code),
-                Op::Invoke {
-                    target,
-                    arity,
-                    name,
-                } => match_invoke(target, arity, &mut code, name),
-            }
+            code.push(op);
         }
         code
     }
 }
 
+pub(super) fn trusted_loaded_source_to_value(
+    loaded: &LoadedSource,
+    code: &CodeData,
+) -> ValueOrSource {
+    match loaded {
+        LoadedSource::Nil => ValueOrSource::Nil,
+        LoadedSource::Bool(loaded) => ValueOrSource::Bool(*loaded),
+        LoadedSource::Int(loaded) => ValueOrSource::Int(*loaded),
+        LoadedSource::UInt(loaded) => ValueOrSource::UInt(*loaded),
+        LoadedSource::Float(loaded) => ValueOrSource::Float(*loaded),
+        LoadedSource::Symbol(loaded) => ValueOrSource::Symbol(code.symbols[*loaded].clone()),
+        LoadedSource::Register(loaded) => ValueOrSource::Register(*loaded),
+        LoadedSource::Dynamic(loaded) => {
+            let loaded = &code.dynamics[*loaded];
+            if let Some(string) = loaded.downcast_ref::<MuseString>() {
+                ValueOrSource::String(string.to_string())
+            } else if let Some(function) = loaded.downcast_ref::<Function>() {
+                ValueOrSource::Function(BitcodeFunction::from(function))
+            } else {
+                unreachable!("unknown dynamic type: {loaded:?}")
+            }
+        }
+        LoadedSource::Stack(loaded) => ValueOrSource::Stack(*loaded),
+        LoadedSource::Label(loaded) => ValueOrSource::Label(*loaded),
+        LoadedSource::Regex(loaded) => ValueOrSource::RegEx(code.regexes[*loaded].literal.clone()),
+    }
+}
+
 impl From<&'_ Code> for BitcodeBlock {
     fn from(code: &'_ Code) -> Self {
-        let mut ops = Vec::with_capacity(code.data.instructions.len());
+        let mut ops = Vec::with_capacity(code.data.instructions.len() + code.data.labels.len());
+        let mut label_addrs = code.data.labels.iter().copied().peekable();
         let mut labels = 0;
-        for instruction in &*code.data.instructions {
-            let op = instruction.as_op();
-            if let Op::Label(label) = &op {
-                labels = labels.max(label.0 + 1);
+
+        for (index, instruction) in code.data.instructions.iter().enumerate() {
+            if label_addrs.peek().map_or(false, |label| label == &index) {
+                label_addrs.next();
+                let label = Label(labels);
+                labels += 1;
+                ops.push(Op::Label(label));
             }
-            ops.push(op);
+            #[cfg(feature = "dispatched")]
+            ops.push(instruction.as_op());
+
+            #[cfg(not(feature = "dispatched"))]
+            ops.push(match instruction {
+                LoadedOp::Return => Op::Return,
+                LoadedOp::Declare { name, value, dest } => Op::Declare {
+                    name: code.data.symbols[*name].clone(),
+                    value: trusted_loaded_source_to_value(value, &code.data),
+                    dest: *dest,
+                },
+                LoadedOp::Truthy(loaded) => loaded.as_op(UnaryKind::Truthy, code),
+                LoadedOp::LogicalNot(loaded) => loaded.as_op(UnaryKind::LogicalNot, code),
+                LoadedOp::BitwiseNot(loaded) => loaded.as_op(UnaryKind::BitwiseNot, code),
+                LoadedOp::Negate(loaded) => loaded.as_op(UnaryKind::Negate, code),
+                LoadedOp::Copy(loaded) => loaded.as_op(UnaryKind::Copy, code),
+                LoadedOp::Resolve(loaded) => loaded.as_op(UnaryKind::Resolve, code),
+                LoadedOp::Jump(loaded) => loaded.as_op(UnaryKind::Jump, code),
+                LoadedOp::NewMap(loaded) => loaded.as_op(UnaryKind::NewMap, code),
+                LoadedOp::NewList(loaded) => loaded.as_op(UnaryKind::NewList, code),
+                LoadedOp::LogicalXor(loaded) => loaded.as_op(BinaryKind::LogicalXor, code),
+                LoadedOp::Add(loaded) => loaded.as_op(BinaryKind::Add, code),
+                LoadedOp::Subtract(loaded) => loaded.as_op(BinaryKind::Subtract, code),
+                LoadedOp::Multiply(loaded) => loaded.as_op(BinaryKind::Multiply, code),
+                LoadedOp::Divide(loaded) => loaded.as_op(BinaryKind::Divide, code),
+                LoadedOp::IntegerDivide(loaded) => loaded.as_op(BinaryKind::IntegerDivide, code),
+                LoadedOp::Remainder(loaded) => loaded.as_op(BinaryKind::Remainder, code),
+                LoadedOp::Power(loaded) => loaded.as_op(BinaryKind::Power, code),
+                LoadedOp::JumpIf(loaded) => loaded.as_op(BinaryKind::JumpIf, code),
+                LoadedOp::JumpIfNot(loaded) => loaded.as_op(BinaryKind::JumpIfNot, code),
+                LoadedOp::LessThanOrEqual(loaded) => {
+                    loaded.as_op(BinaryKind::Compare(CompareKind::LessThanOrEqual), code)
+                }
+                LoadedOp::LessThan(loaded) => {
+                    loaded.as_op(BinaryKind::Compare(CompareKind::LessThan), code)
+                }
+                LoadedOp::Equal(loaded) => {
+                    loaded.as_op(BinaryKind::Compare(CompareKind::Equal), code)
+                }
+                LoadedOp::GreaterThan(loaded) => {
+                    loaded.as_op(BinaryKind::Compare(CompareKind::GreaterThan), code)
+                }
+                LoadedOp::GreaterThanOrEqual(loaded) => {
+                    loaded.as_op(BinaryKind::Compare(CompareKind::GreaterThanOrEqual), code)
+                }
+                LoadedOp::Call { name, arity } => Op::Call {
+                    name: trusted_loaded_source_to_value(name, &code.data),
+                    arity: trusted_loaded_source_to_value(arity, &code.data),
+                },
+                LoadedOp::Invoke {
+                    target,
+                    name,
+                    arity,
+                } => Op::Invoke {
+                    target: trusted_loaded_source_to_value(target, &code.data),
+                    name: code.data.symbols[*name].clone(),
+                    arity: trusted_loaded_source_to_value(arity, &code.data),
+                },
+                LoadedOp::BitwiseAnd(loaded) => {
+                    loaded.as_op(BinaryKind::Bitwise(BitwiseKind::And), code)
+                }
+                LoadedOp::BitwiseOr(loaded) => {
+                    loaded.as_op(BinaryKind::Bitwise(BitwiseKind::Or), code)
+                }
+                LoadedOp::BitwiseXor(loaded) => {
+                    loaded.as_op(BinaryKind::Bitwise(BitwiseKind::Xor), code)
+                }
+                LoadedOp::BitwiseShiftLeft(loaded) => {
+                    loaded.as_op(BinaryKind::Bitwise(BitwiseKind::ShiftLeft), code)
+                }
+                LoadedOp::BitwiseShiftRight(loaded) => {
+                    loaded.as_op(BinaryKind::Bitwise(BitwiseKind::ShiftRight), code)
+                }
+            });
         }
 
         BitcodeBlock {
@@ -498,305 +546,6 @@ impl DerefMut for BitcodeBlock {
         &mut self.ops
     }
 }
-
-fn precompiled_regex(regex: &RegExLiteral) -> PrecompiledRegex {
-    PrecompiledRegex {
-        literal: regex.clone(),
-        result: MuseRegEx::new(regex)
-            .map(Value::dynamic)
-            .map_err(|err| Fault::Custom {
-                code: 0,
-                message: Cow::Owned(err.to_string()),
-            }),
-    }
-}
-
-#[derive(Debug)]
-struct PrecompiledRegex {
-    literal: RegExLiteral,
-    result: Result<Value, Fault>,
-}
-
-impl Source for PrecompiledRegex {
-    fn load(&self, _vm: &super::Vm) -> Result<Value, Fault> {
-        self.result.clone()
-    }
-
-    fn as_source(&self) -> ValueOrSource {
-        ValueOrSource::RegEx(self.literal.clone())
-    }
-}
-
-macro_rules! decode_source {
-    ($decode:expr, $source:expr, $code:ident, $next_fn:ident $(, $($arg:tt)*)?) => {{
-        match $decode {
-            ValueOrSource::Nil => $next_fn($source, $code $(, $($arg)*)?, ()),
-            ValueOrSource::Bool(source) => $next_fn($source, $code $(, $($arg)*)?, *source),
-            ValueOrSource::Int(source) => $next_fn($source, $code $(, $($arg)*)?, *source),
-            ValueOrSource::UInt(source) => $next_fn($source, $code $(, $($arg)*)?, *source),
-            ValueOrSource::Float(source) => $next_fn($source, $code $(, $($arg)*)?, *source),
-            ValueOrSource::RegEx(source) => $next_fn($source, $code $(, $($arg)*)?, precompiled_regex(source)),
-            ValueOrSource::String(source) => $next_fn($source, $code $(, $($arg)*)?, Value::dynamic(MuseString::from(source.clone()))),
-            ValueOrSource::Symbol(source) => $next_fn($source, $code $(, $($arg)*)?, source.clone()),
-            ValueOrSource::Register(source) => $next_fn($source, $code $(, $($arg)*)?, *source),
-            ValueOrSource::Stack(source) => $next_fn($source, $code $(, $($arg)*)?, *source),
-            ValueOrSource::Label(source) => $next_fn($source, $code $(, $($arg)*)?, *source),
-        }
-    }};
-}
-
-macro_rules! decode_dest {
-    ($decode:expr, $source:expr, $code:ident, $next_fn:ident $(, $($arg:tt)*)?) => {{
-        match $decode {
-            OpDestination::Void => $next_fn($source, $code $(, $($arg)*)?, ()),
-            OpDestination::Stack(stack) => $next_fn($source, $code $(, $($arg)*)?, *stack),
-            OpDestination::Register(register) => $next_fn($source, $code $(, $($arg)*)?, *register),
-            OpDestination::Label(label) => $next_fn($source, $code $(, $($arg)*)?, *label),
-        }
-    }};
-}
-
-macro_rules! decode_sd {
-    ($decode_name:ident, $compile_name:ident) => {
-        fn $decode_name(s: &ValueOrSource, d: &OpDestination, code: &mut Code) {
-            fn source<Lhs>(dest: &OpDestination, code: &mut Code, source1: Lhs)
-            where
-                Lhs: Source,
-            {
-                decode_dest!(dest, dest, code, $compile_name, source1)
-            }
-
-            decode_source!(s, d, code, source)
-        }
-    };
-}
-
-decode_sd!(match_copy, compile_copy);
-
-fn compile_copy<From, Dest>(_dest: &OpDestination, code: &mut Code, source: From, dest: Dest)
-where
-    From: Source,
-    Dest: Destination,
-{
-    code.push(Load { source, dest });
-}
-
-fn match_declare_function(f: &BitcodeFunction, d: &OpDestination, code: &mut Code) {
-    decode_dest!(d, d, code, compile_declare_function, f);
-}
-
-fn compile_declare_function<Dest>(
-    _dest: &OpDestination,
-    code: &mut Code,
-    f: &BitcodeFunction,
-    dest: Dest,
-) where
-    Dest: Destination,
-{
-    code.push(DeclareFunction {
-        function: Function::from(f),
-        dest,
-    });
-}
-
-decode_sd!(match_resolve, compile_resolve);
-
-fn compile_resolve<From, Dest>(_dest: &OpDestination, code: &mut Code, source: From, dest: Dest)
-where
-    From: Source,
-    Dest: Destination,
-{
-    code.push(Resolve { source, dest });
-}
-
-decode_sd!(match_jump, compile_jump);
-
-fn compile_jump<From, Dest>(_dest: &OpDestination, code: &mut Code, source: From, dest: Dest)
-where
-    From: Source,
-    Dest: Destination,
-{
-    code.push(Jump {
-        target: source,
-        previous_address: dest,
-    });
-}
-
-decode_sd!(match_new_map, compile_new_map);
-
-fn compile_new_map<Arity, Dest>(
-    _dest: &OpDestination,
-    code: &mut Code,
-    element_count: Arity,
-    dest: Dest,
-) where
-    Arity: Source,
-    Dest: Destination,
-{
-    code.push(NewMap {
-        element_count,
-        dest,
-    });
-}
-
-decode_sd!(match_new_list, compile_new_list);
-
-fn compile_new_list<Arity, Dest>(
-    _dest: &OpDestination,
-    code: &mut Code,
-    element_count: Arity,
-    dest: Dest,
-) where
-    Arity: Source,
-    Dest: Destination,
-{
-    code.push(NewList {
-        element_count,
-        dest,
-    });
-}
-
-macro_rules! decode_ssd {
-    ($decode_name:ident, $compile_name:ident $(, $($name:ident: $type:ty),+)?) => {
-        fn $decode_name(
-            s1: &ValueOrSource,
-            s2: &ValueOrSource,
-            d: &OpDestination,
-            code: &mut Code,
-            $($($name: $type),+,)?
-        ) {
-            fn source<Lhs>(source: (&ValueOrSource, &OpDestination), code: &mut Code,
-            $($($name: $type),+,)? source1: Lhs)
-            where
-                Lhs: Source,
-            {
-                decode_source!(source.0, source, code, source_source, source1 $(, $($name),+)?)
-            }
-
-            fn source_source<Lhs, Rhs>(
-                source: (&ValueOrSource, &OpDestination),
-                code: &mut Code,
-                source1: Lhs,
-                $($($name: $type),+,)?
-                source2: Rhs,
-            ) where
-                Lhs: Source,
-                Rhs: Source,
-            {
-                decode_dest!(source.1, source, code, $compile_name, source1, source2 $(, $($name),+)?)
-            }
-
-            decode_source!(s1, (s2, d), code, source $(, $($name),+)?)
-        }
-    };
-}
-
-macro_rules! decode_ss {
-    ($decode_name:ident, $compile_name:ident $(, $($name:ident: $type:ty),+)?) => {
-        fn $decode_name(
-            s1: &ValueOrSource,
-            s2: &ValueOrSource,
-            code: &mut Code,
-            $($($name: $type),+,)?
-        ) {
-            fn source<Lhs>(source: &ValueOrSource, code: &mut Code,
-            $($($name: $type),+,)? source1: Lhs)
-            where
-                Lhs: Source,
-            {
-                decode_source!(source, source, code, $compile_name, source1 $(, $($name),+)?)
-            }
-
-            decode_source!(s1, s2, code, source $(, $($name),+)?)
-        }
-    };
-}
-
-decode_ss!(match_call, compile_call);
-
-fn compile_call<Func, NumArgs>(
-    _source: &ValueOrSource,
-    code: &mut Code,
-    function: Func,
-    arity: NumArgs,
-) where
-    Func: Source,
-    NumArgs: Source,
-{
-    code.push(Call { function, arity });
-}
-
-decode_ss!(match_invoke, compile_invoke, name: &Symbol);
-
-fn compile_invoke<Func, NumArgs>(
-    _source: &ValueOrSource,
-    code: &mut Code,
-    function: Func,
-    name: &Symbol,
-    arity: NumArgs,
-) where
-    Func: Source,
-    NumArgs: Source,
-{
-    code.push(Invoke {
-        name: name.clone(),
-        target: function,
-        arity,
-    });
-}
-
-decode_ssd!(match_jump_if, compile_jump_if);
-
-fn compile_jump_if<Func, NumArgs, Dest>(
-    _source: (&ValueOrSource, &OpDestination),
-    code: &mut Code,
-    target: Func,
-    condition: NumArgs,
-    previous_address: Dest,
-) where
-    Func: Source,
-    NumArgs: Source,
-    Dest: Destination,
-{
-    code.push(JumpIf {
-        target,
-        condition,
-        previous_address,
-    });
-}
-
-macro_rules! define_match_binop {
-    ($match:ident, $compile:ident, $instruction:ident) => {
-        decode_ssd!($match, $compile);
-
-        fn $compile<Lhs, Rhs, Dest>(
-            _source: (&ValueOrSource, &OpDestination),
-            code: &mut Code,
-            lhs: Lhs,
-            rhs: Rhs,
-            dest: Dest,
-        ) where
-            Lhs: Source,
-            Rhs: Source,
-            Dest: Destination,
-        {
-            code.push($instruction { lhs, rhs, dest });
-        }
-    };
-}
-
-define_match_binop!(match_add, compile_add, Add);
-define_match_binop!(match_subtract, compile_subtract, Subtract);
-define_match_binop!(match_multiply, compile_multiply, Multiply);
-define_match_binop!(match_divide, compile_divide, Divide);
-define_match_binop!(match_integer_divide, compile_integer_divide, IntegerDivide);
-define_match_binop!(match_remainder, compile_remainder, Remainder);
-define_match_binop!(match_power, compile_power, Power);
-define_match_binop!(match_lte, compile_lte, LessThanOrEqual);
-define_match_binop!(match_lt, compile_lt, LessThan);
-define_match_binop!(match_equal, compile_equal, Equal);
-define_match_binop!(match_gt, compile_gt, GreaterThan);
-define_match_binop!(match_gte, compile_gte, GreaterThanOrEqual);
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BitcodeFunction {
@@ -864,4 +613,20 @@ impl From<&'_ Function> for BitcodeFunction {
                 .collect(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum BinaryKind {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    IntegerDivide,
+    Remainder,
+    Power,
+    JumpIf,
+    JumpIfNot,
+    LogicalXor,
+    Bitwise(BitwiseKind),
+    Compare(CompareKind),
 }

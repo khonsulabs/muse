@@ -210,7 +210,6 @@ pub struct BinaryExpression {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum BinaryKind {
-    Call,
     Add,
     Subtract,
     Multiply,
@@ -218,7 +217,6 @@ pub enum BinaryKind {
     IntegerDivide,
     Remainder,
     Power,
-    JumpIf,
     Bitwise(BitwiseKind),
     Logical(LogicalKind),
     Compare(CompareKind),
@@ -356,6 +354,8 @@ pub enum Error {
     Token(token::Error),
     UnexpectedToken(Token),
     ExpectedName,
+    ExpectedFunctionBody,
+    ExpectedFunctionParamters,
     ExpectedVariableInitialValue,
     ExpectedThenOrBrace,
     ExpectedColon,
@@ -636,6 +636,7 @@ macro_rules! impl_prefix_unary_parselet {
 
 impl_prefix_unary_parselet!(LogicalNot, Token::Identifier(Symbol::not_symbol().clone()));
 impl_prefix_unary_parselet!(BitwiseNot, Token::Char('!'));
+impl_prefix_unary_parselet!(Negate, Token::Char('-'));
 
 macro_rules! impl_prefix_standalone_parselet {
     ($name:ident, $token:expr, $binarykind:expr) => {
@@ -1192,7 +1193,7 @@ impl PrefixParselet for Fn {
         let body = match &body_indicator.0 {
             Token::Open(Paired::Brace) => Braces.parse(body_indicator, tokens, config)?,
             Token::FatArrow => config.parse_expression(tokens)?,
-            _ => todo!("expected body"),
+            _ => return Err(body_indicator.map(|_| Error::ExpectedFunctionBody)),
         };
 
         Ok(tokens.ranged(
@@ -1234,7 +1235,7 @@ impl InfixParselet for ArrowFn {
                     _ => Err(Ranged::new(expr.range(), Error::ExpectedName)),
                 })
                 .collect::<Result<_, _>>()?,
-            _ => todo!("not a parameter list"),
+            _ => return Err(lhs.map(|_| Error::ExpectedFunctionParamters)),
         };
 
         let body = config.parse_expression(tokens)?;
@@ -1405,6 +1406,7 @@ fn parselets() -> Parselets {
         Brackets,
         LogicalNot,
         BitwiseNot,
+        Negate,
         Let,
         Var,
         If,

@@ -31,8 +31,9 @@ fn main() {
     // Less than two
     fib.label(two_or_less);
     fib.copy(1, R(0));
+    let fib = Code::from(&fib);
 
-    vm.declare_function(dbg!(Function::new("fib").when(1, &fib)));
+    vm.declare_function(dbg!(Function::new("fib").when(1, fib)));
 
     let mut main = BitcodeBlock::default();
     main.copy(35, R(0));

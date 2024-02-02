@@ -1,0 +1,84 @@
+true_and_true: {
+    src: r#"true and true"#,
+    output: Bool(true),
+}
+
+true_and_false: {
+    src: r#"true and false"#,
+    output: Bool(false),
+}
+
+false_and_false: {
+    src: r#"false and false"#,
+    output: Bool(false),
+}
+
+false_and_nonsense: {
+    src: r#"false and nonsense"#,
+    output: Bool(false),
+}
+
+true_and_nonsense: {
+    src: r#"true and nonsense"#,
+    output: Fault(UnknownSymbol("nonsense")),
+}
+
+true_or_true: {
+    src: r#"true or true"#,
+    output: Bool(true),
+}
+
+true_or_false: {
+    src: r#"true or false"#,
+    output: Bool(true),
+}
+
+false_or_false: {
+    src: r#"false or false"#,
+    output: Bool(false),
+}
+
+false_or_true: {
+    src: r#"false or true"#,
+    output: Bool(true),
+}
+
+false_or_nonsense: {
+    src: r#"false or nonsense"#,
+    output: Fault(UnknownSymbol("nonsense")),
+}
+
+true_or_nonsense: {
+    src: r#"true or nonsense"#,
+    output: Bool(true),
+}
+
+true_xor_true: {
+    src: r#"true xor true"#,
+    output: Bool(false),
+}
+
+true_xor_false: {
+    src: r#"true xor false"#,
+    output: Bool(true),
+}
+
+false_xor_true: {
+    src: r#"false xor true"#,
+    output: Bool(true),
+}
+
+false_xor_false: {
+    src: r#"false xor false"#,
+    output: Bool(false),
+}
+
+false_xor_nonsense: {
+    src: r#"false xor nonsense"#,
+    output: Fault(UnknownSymbol("nonsense")),
+}
+
+true_xor_nonsense: {
+    src: r#"true xor nonsense"#,
+    output: Fault(UnknownSymbol("nonsense")),
+}

@@ -1,0 +1,14 @@
+not_int_true: {
+    src: r#"not 0"#,
+    output: Bool(true),
+}
+
+not_int_false: {
+    src: r#"not 1"#,
+    output: Bool(false),
+}
+
+bitwise_not_int: {
+    src: r#"!0"#,
+    output: Int(-1),
+}

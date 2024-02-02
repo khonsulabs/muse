@@ -175,8 +175,10 @@ impl Iterator for Tokens<'_> {
                 (start, '[') => Ok(self.chars.ranged(start.., Token::Open(Paired::Bracket))),
                 (start, ']') => Ok(self.chars.ranged(start.., Token::Close(Paired::Bracket))),
                 (start, ch) if ch.is_ascii_digit() => self.tokenize_number(start, ch),
-                (start, '.' | '-') if self.chars.peek().map_or(false, |ch| ch.is_ascii_digit()) => {
-                    self.tokenize_number(start, '.')
+                (start, ch @ ('.' | '-'))
+                    if self.chars.peek().map_or(false, |ch| ch.is_ascii_digit()) =>
+                {
+                    self.tokenize_number(start, ch)
                 }
                 (start, '.') if self.chars.peek() == Some('.') => {
                     self.chars.next();

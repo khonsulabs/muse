@@ -11,6 +11,10 @@ name = "muse"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+dispatched = []
+
 [dependencies]
 ahash = "0.8.7"
 alot = "0.3.1"
@@ -42,3 +46,4 @@ harness = false
 
 [profile.release]
 debug = true
+lto = true
