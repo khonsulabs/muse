@@ -48,7 +48,8 @@ impl Compiler {
 
         let expression = Chain::from_expressions(expressions);
 
-        Scope::root(self).compile_expression(&expression, OpDestination::Register(Register(0)));
+        Scope::module_root(self)
+            .compile_expression(&expression, OpDestination::Register(Register(0)));
 
         if self.errors.is_empty() {
             Ok(Code::from(&self.code))
@@ -77,15 +78,27 @@ struct LocalDeclaration {
 
 struct Scope<'a> {
     compiler: &'a mut Compiler,
+    module: bool,
     depth: usize,
     locals_count: usize,
     local_declarations: Vec<LocalDeclaration>,
 }
 
 impl<'a> Scope<'a> {
-    fn root(compiler: &'a mut Compiler) -> Self {
+    fn module_root(compiler: &'a mut Compiler) -> Self {
         Self {
             compiler,
+            module: true,
+            depth: 0,
+            locals_count: 0,
+            local_declarations: Vec::new(),
+        }
+    }
+
+    fn function_root(compiler: &'a mut Compiler) -> Self {
+        Self {
+            compiler,
+            module: false,
             depth: 0,
             locals_count: 0,
             local_declarations: Vec::new(),
@@ -95,6 +108,7 @@ impl<'a> Scope<'a> {
     fn enter_block(&mut self) -> Scope<'_> {
         Scope {
             compiler: self.compiler,
+            module: self.module,
             depth: self.depth + 1,
             locals_count: 0,
             local_declarations: Vec::new(),
@@ -277,7 +291,7 @@ impl<'a> Scope<'a> {
                     function_name: decl.name.as_ref().map(|name| name.0.clone()),
                     ..Compiler::default()
                 };
-                let mut fn_scope = Scope::root(&mut fn_compiler);
+                let mut fn_scope = Scope::function_root(&mut fn_compiler);
                 for (var, index) in decl.parameters.iter().zip(0..arity) {
                     let stack = fn_scope.new_temporary();
                     fn_scope.compiler.code.copy(Register(index), stack);
@@ -295,16 +309,44 @@ impl<'a> Scope<'a> {
                 self.compiler.errors.append(&mut fn_compiler.errors);
                 let fun = BitcodeFunction::new(decl.name.as_ref().map(|name| name.0.clone()))
                     .when(arity, fn_compiler.code);
-                self.compiler.code.declare_function(fun, dest);
+                match (&decl.name, decl.publish) {
+                    (Some(name), true) => {
+                        self.ensure_in_module(name.1);
+                        self.compiler.code.declare(name.0.clone(), fun, dest);
+                    }
+                    (Some(name), false) => {
+                        let stack = self.new_temporary();
+                        self.compiler.code.copy(fun, stack);
+                        self.declare_local(name.0.clone(), false, stack, dest);
+                    }
+                    (None, true) => {
+                        self.compiler
+                            .errors
+                            .push(Ranged::new(expr.range(), Error::InvalidDeclaration));
+                    }
+                    (None, false) => {
+                        self.compiler.code.copy(fun, dest);
+                    }
+                }
             }
         }
     }
 
     fn declare_variable(&mut self, decl: &Variable, dest: OpDestination) {
-        let stack = self.new_temporary();
-        self.compile_expression(&decl.value, OpDestination::Stack(stack));
+        if decl.publish {
+            let stack = self.new_temporary();
+            self.compile_expression(&decl.value, OpDestination::Stack(stack));
+            self.compiler.code.declare(decl.name.clone(), stack, dest);
+        } else {
+            let stack = self.new_temporary();
+            self.compile_expression(&decl.value, OpDestination::Stack(stack));
+            self.declare_local(decl.name.clone(), decl.mutable, stack, dest);
+        }
+    }
+
+    fn declare_local(&mut self, name: Symbol, mutable: bool, value: Stack, dest: OpDestination) {
         self.compiler.code.push(Op::Unary {
-            op: ValueOrSource::Stack(stack),
+            op: ValueOrSource::Stack(value),
             dest,
             kind: UnaryKind::Copy,
         });
@@ -312,31 +354,36 @@ impl<'a> Scope<'a> {
             .compiler
             .declarations
             .insert(
-                decl.name.clone(),
+                name.clone(),
                 BlockDeclaration {
-                    stack,
-                    mutable: decl.mutable,
+                    stack: value,
+                    mutable,
                 },
             )
             .map(|field| field.value);
         self.local_declarations.push(LocalDeclaration {
-            name: decl.name.clone(),
+            name,
             previous_declaration,
         });
     }
 
+    fn ensure_in_module(&mut self, range: SourceRange) {
+        if !self.module {
+            self.compiler
+                .errors
+                .push(Ranged::new(range, Error::PubOnlyInModules));
+        }
+    }
+
     fn compile_unary(&mut self, unary: &UnaryExpression, dest: OpDestination) {
         let op = self.compile_source(&unary.operand);
-        self.compiler.code.push(Op::Unary {
-            op,
-            dest,
-            kind: match unary.kind {
-                syntax::UnaryKind::LogicalNot => UnaryKind::LogicalNot,
-                syntax::UnaryKind::BitwiseNot => UnaryKind::BitwiseNot,
-                syntax::UnaryKind::Negate => UnaryKind::Negate,
-                syntax::UnaryKind::Copy => UnaryKind::Copy,
-            },
-        });
+        let kind = match unary.kind {
+            syntax::UnaryKind::LogicalNot => UnaryKind::LogicalNot,
+            syntax::UnaryKind::BitwiseNot => UnaryKind::BitwiseNot,
+            syntax::UnaryKind::Negate => UnaryKind::Negate,
+            syntax::UnaryKind::Copy => UnaryKind::Copy,
+        };
+        self.compiler.code.push(Op::Unary { op, dest, kind });
     }
 
     fn compile_binop(&mut self, binop: &BinaryExpression, dest: OpDestination) {
@@ -506,6 +553,8 @@ pub enum Error {
     VariableNotMutable,
     TooManyArguments,
     UsizeTooLarge,
+    InvalidDeclaration,
+    PubOnlyInModules,
     Syntax(syntax::Error),
 }
 

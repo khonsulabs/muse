@@ -1,0 +1,39 @@
+publish_from_block: {
+    src: r#"
+        {
+            pub let a = 42;
+        };
+        a
+    "#,
+    output: Int(42),
+}
+
+private_in_block: {
+    src: r#"
+        {
+            let a = 42;
+        };
+        a
+    "#,
+    output: Fault(UnknownSymbol("a")),
+}
+
+publish_fn_from_block: {
+    src: r#"
+        {
+            pub fn a => 42;
+        };
+        a()
+    "#,
+    output: Int(42),
+}
+
+private_fn_in_block: {
+    src: r#"
+        {
+            fn a => 42;
+        };
+        a()
+    "#,
+    output: Fault(UnknownSymbol("a")),
+}

@@ -26,6 +26,7 @@ macro_rules! static_symbols {
 static_symbols!(
     empty => "",
     not_symbol => "not",
+    pub_symbol => "pub",
     let_symbol => "let",
     var_symbol => "var",
     and_symbol => "and",

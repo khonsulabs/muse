@@ -62,6 +62,7 @@ impl_from!(ValueOrSource, Register, Register);
 impl_from!(ValueOrSource, Stack, Stack);
 impl_from!(ValueOrSource, Label, Label);
 impl_from!(ValueOrSource, bool, Bool);
+impl_from!(ValueOrSource, BitcodeFunction, Function);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum OpDestination {
@@ -139,25 +140,18 @@ impl BitcodeBlock {
         self.ops.push(op);
     }
 
-    pub fn declare_function(
+    pub fn declare(
         &mut self,
-        function: impl Into<BitcodeFunction>,
+        name: Symbol,
+        value: impl Into<ValueOrSource>,
         dest: impl Into<OpDestination>,
     ) {
-        let function = function.into();
-        if let Some(name) = function.name.clone() {
-            self.push(Op::Declare {
-                name,
-                value: ValueOrSource::Function(function),
-                dest: dest.into(),
-            });
-        } else {
-            self.push(Op::Unary {
-                op: ValueOrSource::Function(function),
-                dest: dest.into(),
-                kind: UnaryKind::Copy,
-            });
-        }
+        let value = value.into();
+        self.push(Op::Declare {
+            name,
+            value,
+            dest: dest.into(),
+        });
     }
 
     pub fn clear(&mut self) {

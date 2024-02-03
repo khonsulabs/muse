@@ -170,6 +170,7 @@ pub struct IfExpression {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDefinition {
+    pub publish: bool,
     pub name: Option<Ranged<Symbol>>,
     pub parameters: Vec<Ranged<Symbol>>,
     pub body: Ranged<Expression>,
@@ -249,6 +250,7 @@ pub enum LogicalKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Variable {
+    pub publish: bool,
     pub mutable: bool,
     pub name: Symbol,
     pub value: Ranged<Expression>,
@@ -353,6 +355,7 @@ pub enum Error {
     MissingEnd(Paired),
     Token(token::Error),
     UnexpectedToken(Token),
+    ExpectedDeclaration,
     ExpectedName,
     ExpectedFunctionBody,
     ExpectedFunctionParamters,
@@ -671,70 +674,6 @@ impl_prefix_standalone_parselet!(
     Token::Identifier(Symbol::false_symbol().clone()),
     Expression::Bool(false)
 );
-
-fn parse_variable(
-    mutable: bool,
-    start: usize,
-    tokens: &mut TokenReader<'_>,
-    config: &ParserConfig<'_>,
-) -> Result<Ranged<Expression>, Ranged<Error>> {
-    let name_token = tokens.next()?;
-    let Token::Identifier(name) = name_token.0 else {
-        return Err(name_token.map(|_| Error::ExpectedName));
-    };
-    let value = if tokens.peek_token() == Some(Token::Char('=')) {
-        tokens.next()?;
-        config.parse_expression(tokens)?
-    } else {
-        Ranged::new(name_token.1, Expression::Nil)
-    };
-    Ok(tokens.ranged(
-        start..,
-        Expression::Variable(Box::new(Variable {
-            mutable,
-            name,
-            value,
-        })),
-    ))
-}
-
-struct Let;
-
-impl Parselet for Let {
-    fn token(&self) -> Option<Token> {
-        Some(Token::Identifier(Symbol::let_symbol().clone()))
-    }
-}
-
-impl PrefixParselet for Let {
-    fn parse(
-        &self,
-        token: Ranged<Token>,
-        tokens: &mut TokenReader<'_>,
-        config: &ParserConfig<'_>,
-    ) -> Result<Ranged<Expression>, Ranged<Error>> {
-        parse_variable(false, token.range().start, tokens, config)
-    }
-}
-
-struct Var;
-
-impl Parselet for Var {
-    fn token(&self) -> Option<Token> {
-        Some(Token::Identifier(Symbol::var_symbol().clone()))
-    }
-}
-
-impl PrefixParselet for Var {
-    fn parse(
-        &self,
-        token: Ranged<Token>,
-        tokens: &mut TokenReader<'_>,
-        config: &ParserConfig<'_>,
-    ) -> Result<Ranged<Expression>, Ranged<Error>> {
-        parse_variable(true, token.range().start, tokens, config)
-    }
-}
 
 struct Braces;
 
@@ -1144,30 +1083,44 @@ impl PrefixParselet for If {
     }
 }
 
-struct Fn;
+struct Pub;
 
-impl Parselet for Fn {
+impl Parselet for Pub {
     fn token(&self) -> Option<Token> {
-        None
-    }
-
-    fn matches(&self, token: &Token, tokens: &mut TokenReader<'_>) -> bool {
-        matches!(token, Token::Identifier(ident) if ident == Symbol::fn_symbol())
-            && tokens.peek_token().map_or(false, |t| {
-                matches!(
-                    t,
-                    Token::Identifier(_)
-                        | Token::Open(Paired::Brace | Paired::Paren)
-                        | Token::FatArrow
-                )
-            })
+        Some(Token::Identifier(Symbol::pub_symbol().clone()))
     }
 }
 
-impl PrefixParselet for Fn {
+impl PrefixParselet for Pub {
     fn parse(
         &self,
         token: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        let keyword_token = tokens.next()?;
+        let Token::Identifier(keyword) = &keyword_token.0 else {
+            return Err(keyword_token.map(|_| Error::ExpectedDeclaration));
+        };
+
+        if keyword == Symbol::fn_symbol() {
+            Fn::parse_function(true, keyword_token.range().start, tokens, config)
+        } else if keyword == Symbol::let_symbol() {
+            parse_variable(false, true, token.range().start, tokens, config)
+        } else if keyword == Symbol::var_symbol() {
+            parse_variable(true, true, token.range().start, tokens, config)
+        } else {
+            return Err(keyword_token.map(|_| Error::ExpectedDeclaration));
+        }
+    }
+}
+
+struct Fn;
+
+impl Fn {
+    fn parse_function(
+        publish: bool,
+        start: usize,
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
@@ -1197,13 +1150,109 @@ impl PrefixParselet for Fn {
         };
 
         Ok(tokens.ranged(
-            token.range().start..,
+            start..,
             Expression::Function(Box::new(FunctionDefinition {
+                publish,
                 name,
                 parameters,
                 body,
             })),
         ))
+    }
+}
+
+impl Parselet for Fn {
+    fn token(&self) -> Option<Token> {
+        None
+    }
+
+    fn matches(&self, token: &Token, tokens: &mut TokenReader<'_>) -> bool {
+        matches!(token, Token::Identifier(ident) if ident == Symbol::fn_symbol())
+            && tokens.peek_token().map_or(false, |t| {
+                matches!(
+                    t,
+                    Token::Identifier(_)
+                        | Token::Open(Paired::Brace | Paired::Paren)
+                        | Token::FatArrow
+                )
+            })
+    }
+}
+
+impl PrefixParselet for Fn {
+    fn parse(
+        &self,
+        token: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        Self::parse_function(false, token.range().start, tokens, config)
+    }
+}
+
+fn parse_variable(
+    mutable: bool,
+    publish: bool,
+    start: usize,
+    tokens: &mut TokenReader<'_>,
+    config: &ParserConfig<'_>,
+) -> Result<Ranged<Expression>, Ranged<Error>> {
+    let name_token = tokens.next()?;
+    let Token::Identifier(name) = name_token.0 else {
+        return Err(name_token.map(|_| Error::ExpectedName));
+    };
+    let value = if tokens.peek_token() == Some(Token::Char('=')) {
+        tokens.next()?;
+        config.parse_expression(tokens)?
+    } else {
+        Ranged::new(name_token.1, Expression::Nil)
+    };
+    Ok(tokens.ranged(
+        start..,
+        Expression::Variable(Box::new(Variable {
+            publish,
+            mutable,
+            name,
+            value,
+        })),
+    ))
+}
+
+struct Let;
+
+impl Parselet for Let {
+    fn token(&self) -> Option<Token> {
+        Some(Token::Identifier(Symbol::let_symbol().clone()))
+    }
+}
+
+impl PrefixParselet for Let {
+    fn parse(
+        &self,
+        token: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        parse_variable(false, false, token.range().start, tokens, config)
+    }
+}
+
+struct Var;
+
+impl Parselet for Var {
+    fn token(&self) -> Option<Token> {
+        Some(Token::Identifier(Symbol::var_symbol().clone()))
+    }
+}
+
+impl PrefixParselet for Var {
+    fn parse(
+        &self,
+        token: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        parse_variable(true, false, token.range().start, tokens, config)
     }
 }
 
@@ -1242,6 +1291,7 @@ impl InfixParselet for ArrowFn {
         Ok(tokens.ranged(
             lhs.range().start..,
             Expression::Function(Box::new(FunctionDefinition {
+                publish: false,
                 name: None,
                 parameters,
                 body,
@@ -1374,7 +1424,7 @@ impl InfixParselet for Assign {
 }
 
 macro_rules! parselets {
-    ($($name:ident),+) => {
+    ($($name:ident),+ $(,)?) => {
         vec![$(Box::new($name)),+]
     }
 }
@@ -1407,12 +1457,13 @@ fn parselets() -> Parselets {
         LogicalNot,
         BitwiseNot,
         Negate,
+        Pub,
+        Fn,
         Let,
         Var,
         If,
         True,
         False,
-        Fn
     ]);
     parser.push_prefix(parselets![Term]);
     parser
