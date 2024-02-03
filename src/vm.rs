@@ -90,6 +90,30 @@ impl Default for Vm {
     }
 }
 
+impl Clone for Vm {
+    fn clone(&self) -> Self {
+        let parker = Parker::new();
+        let unparker = parker.unparker().clone();
+        Self {
+            registers: self.registers.clone(),
+            stack: self.stack.clone(),
+            max_stack: self.max_stack,
+            frames: self.frames.clone(),
+            current_frame: self.current_frame,
+            has_anonymous_frame: self.has_anonymous_frame,
+            max_depth: self.max_depth,
+            budget: self.budget,
+            execute_until: self.execute_until,
+            modules: self.modules.clone(),
+            waker: Waker::from(Arc::new(VmWaker(unparker))),
+            parker,
+            code: self.code.clone(),
+            code_map: self.code_map.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct RegisteredCode {
     code: Code,
     owner: Option<Dynamic>,
@@ -1171,7 +1195,7 @@ impl IndexMut<usize> for Vm {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 struct Frame {
     start: usize,
     end: usize,
