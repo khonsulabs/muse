@@ -5,7 +5,7 @@ use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::task::{Context, Poll};
 
 pub type ValueHasher = ahash::AHasher;
@@ -1022,6 +1022,11 @@ impl Dynamic {
     }
 
     #[must_use]
+    pub fn downgrade(&self) -> WeakDynamic {
+        WeakDynamic(Arc::downgrade(&self.0))
+    }
+
+    #[must_use]
     pub fn ptr_eq(a: &Dynamic, b: &Dynamic) -> bool {
         Arc::ptr_eq(&a.0, &b.0)
     }
@@ -1490,6 +1495,15 @@ where
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WeakDynamic(Weak<Box<dyn DynamicValue>>);
+
+impl WeakDynamic {
+    pub fn upgrade(&self) -> Option<Dynamic> {
+        self.0.upgrade().map(Dynamic)
     }
 }
 

@@ -98,17 +98,18 @@ pub enum Expression {
     RegEx(RegExLiteral),
     Lookup(Box<Lookup>),
     If(Box<IfExpression>),
-    Function(Box<FunctionDefinition>),
     Map(Box<MapExpression>),
     List(Vec<Ranged<Expression>>),
     Tuple(Vec<Ranged<Expression>>),
     Call(Box<FunctionCall>),
-    Variable(Box<Variable>),
     Assign(Box<Assignment>),
     Unary(Box<UnaryExpression>),
     Binary(Box<BinaryExpression>),
     Chain(Box<Chain>),
     Block(Box<Block>),
+    Module(Box<ModuleDefinition>),
+    Function(Box<FunctionDefinition>),
+    Variable(Box<Variable>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -166,6 +167,13 @@ pub struct IfExpression {
     pub condition: Ranged<Expression>,
     pub when_true: Ranged<Expression>,
     pub when_false: Option<Ranged<Expression>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModuleDefinition {
+    pub publish: bool,
+    pub name: Ranged<Symbol>,
+    pub contents: Ranged<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -357,6 +365,7 @@ pub enum Error {
     UnexpectedToken(Token),
     ExpectedDeclaration,
     ExpectedName,
+    ExpectedModuleBody,
     ExpectedFunctionBody,
     ExpectedFunctionParamters,
     ExpectedVariableInitialValue,
@@ -1083,6 +1092,51 @@ impl PrefixParselet for If {
     }
 }
 
+struct Mod;
+
+impl Parselet for Mod {
+    fn token(&self) -> Option<Token> {
+        None
+    }
+
+    fn matches(&self, token: &Token, tokens: &mut TokenReader<'_>) -> bool {
+        matches!(token, Token::Identifier(ident) if ident == Symbol::mod_symbol())
+            && tokens
+                .peek_token()
+                .map_or(false, |t| matches!(t, Token::Identifier(_)))
+    }
+}
+
+impl PrefixParselet for Mod {
+    fn parse(
+        &self,
+        token: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        let name_token = tokens.next()?;
+        let Token::Identifier(name) = name_token.0 else {
+            return Err(name_token.map(|_| Error::ExpectedName));
+        };
+
+        let brace = tokens.next()?;
+        let contents = if brace.0 == Token::Open(Paired::Brace) {
+            Braces.parse(brace, tokens, config)?
+        } else {
+            return Err(brace.map(|_| Error::ExpectedModuleBody));
+        };
+
+        Ok(tokens.ranged(
+            token.range().start..,
+            Expression::Module(Box::new(ModuleDefinition {
+                publish: false,
+                name: Ranged::new(name_token.1, name),
+                contents,
+            })),
+        ))
+    }
+}
+
 struct Pub;
 
 impl Parselet for Pub {
@@ -1134,10 +1188,10 @@ impl Fn {
             tokens.next()?;
             parse_paired(Paired::Paren, &Token::Char(','), tokens, |tokens| {
                 let name_token = tokens.next()?;
-                let Token::Identifier(name) = &name_token.0 else {
+                let Token::Identifier(name) = name_token.0 else {
                     return Err(name_token.map(|_| Error::ExpectedName));
                 };
-                parameters.push(Ranged::new(name_token.1, name.clone()));
+                parameters.push(Ranged::new(name_token.1, name));
                 Ok(())
             })?;
         }
@@ -1457,6 +1511,7 @@ fn parselets() -> Parselets {
         LogicalNot,
         BitwiseNot,
         Negate,
+        Mod,
         Pub,
         Fn,
         Let,

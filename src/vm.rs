@@ -6,7 +6,7 @@ use std::hash::Hash;
 use std::num::NonZeroUsize;
 use std::ops::{Deref, Index, IndexMut};
 use std::pin::{pin, Pin};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::task::{Poll, Wake, Waker};
 use std::time::{Duration, Instant};
 use std::{array, task};
@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(not(feature = "dispatched"))]
 use self::bitcode::trusted_loaded_source_to_value;
-use self::bitcode::{BinaryKind, Label, Op, OpDestination, ValueOrSource};
-use crate::compiler::UnaryKind;
+use self::bitcode::{BinaryKind, BitcodeFunction, Label, Op, OpDestination, ValueOrSource};
+use crate::compiler::{BitcodeModule, UnaryKind};
 #[cfg(not(feature = "dispatched"))]
 use crate::list::List;
 #[cfg(not(feature = "dispatched"))]
@@ -28,7 +28,7 @@ use crate::string::MuseString;
 use crate::symbol::{IntoOptionSymbol, Symbol};
 use crate::syntax::token::RegExLiteral;
 use crate::syntax::{BitwiseKind, CompareKind};
-use crate::value::{CustomType, Dynamic, Value};
+use crate::value::{CustomType, Dynamic, StaticRustFunctionTable, Value, WeakDynamic};
 
 pub mod bitcode;
 
@@ -60,7 +60,7 @@ pub struct Vm {
     max_depth: usize,
     budget: Budget,
     execute_until: Option<Instant>,
-    module: Module,
+    modules: Vec<Dynamic>,
     waker: Waker,
     parker: Parker,
     code: Vec<RegisteredCode>,
@@ -81,7 +81,7 @@ impl Default for Vm {
             max_depth: usize::MAX,
             budget: Budget::default(),
             execute_until: None,
-            module: Module::default(),
+            modules: vec![Dynamic::new(Module::default())],
             waker: Waker::from(Arc::new(VmWaker(unparker))),
             parker,
             code: Vec::new(),
@@ -275,9 +275,15 @@ impl Vm {
         }
     }
 
-    fn execute_function(&mut self, body: &Code, function: &Dynamic) -> Result<Value, Fault> {
+    fn execute_function(
+        &mut self,
+        body: &Code,
+        function: &Dynamic,
+        module: usize,
+    ) -> Result<Value, Fault> {
         let body_index = self.push_code(body, Some(function));
         self.enter_frame(Some(body_index))?;
+        self.frames[self.current_frame].module = module;
 
         self.allocate(body.data.stack_requirement)?;
 
@@ -309,18 +315,41 @@ impl Vm {
     }
 
     pub fn declare(&mut self, name: impl Into<Symbol>, value: Value) -> Option<Value> {
-        self.module
-            .declarations
-            .insert(name.into(), value)
-            .map(|f| f.value)
+        self.declare_inner(name, value, false)
+    }
+
+    pub fn declare_mut(&mut self, name: impl Into<Symbol>, value: Value) -> Option<Value> {
+        self.declare_inner(name, value, true)
+    }
+
+    fn declare_inner(
+        &mut self,
+        name: impl Into<Symbol>,
+        value: Value,
+        mutable: bool,
+    ) -> Option<Value> {
+        self.modules[self.frames[self.current_frame].module]
+            .downcast_ref::<Module>()
+            .expect("always a module")
+            .declarations()
+            .insert(name.into(), ModuleDeclaration { mutable, value })
+            .map(|f| f.value.value)
     }
 
     pub fn declare_function(&mut self, function: Function) -> Option<Value> {
         let name = function.name().as_ref()?.clone();
-        self.module
-            .declarations
-            .insert(name, Value::dynamic(function))
-            .map(|f| f.value)
+        self.modules[self.frames[self.current_frame].module]
+            .downcast_ref::<Module>()
+            .expect("always a module")
+            .declarations()
+            .insert(
+                name,
+                ModuleDeclaration {
+                    mutable: false,
+                    value: Value::dynamic(function),
+                },
+            )
+            .map(|f| f.value.value)
     }
 
     pub fn resolve(&self, name: &Symbol) -> Result<Value, Fault> {
@@ -330,22 +359,39 @@ impl Vm {
                 .get(stack.0)
                 .cloned()
                 .ok_or(Fault::OutOfBounds)
-        } else if let Some(value) = self.module.declarations.get(name) {
-            Ok(value.clone())
         } else {
-            Err(Fault::UnknownSymbol(name.clone()))
+            let module = self.modules[self.frames[self.current_frame].module]
+                .downcast_ref::<Module>()
+                .expect("always a module");
+            if let Some(value) = module
+                .declarations()
+                .get(name)
+                .map(|decl| decl.value.clone())
+            {
+                Ok(value)
+            } else if name == Symbol::super_symbol() {
+                Ok(module
+                    .parent
+                    .as_ref()
+                    .and_then(|parent| parent.upgrade().map(Value::Dynamic))
+                    .unwrap_or_default())
+            } else {
+                Err(Fault::UnknownSymbol(name.clone()))
+            }
         }
     }
 
     fn enter_frame(&mut self, code: Option<CodeIndex>) -> Result<(), Fault> {
         if self.current_frame < self.max_depth {
             let current_frame_end = self.frames[self.current_frame].end;
+            let current_frame_module = self.frames[self.current_frame].module;
 
             self.current_frame += 1;
             if self.current_frame < self.frames.len() {
                 self.frames[self.current_frame].clear();
                 self.frames[self.current_frame].start = current_frame_end;
                 self.frames[self.current_frame].end = current_frame_end;
+                self.frames[self.current_frame].module = current_frame_module;
                 self.frames[self.current_frame].code = code;
                 self.frames[self.current_frame].instruction = 0;
             } else {
@@ -355,6 +401,8 @@ impl Vm {
                     code,
                     instruction: 0,
                     variables: Map::new(),
+                    module: current_frame_module,
+                    loading_module: None,
                 });
             }
             Ok(())
@@ -484,12 +532,16 @@ impl Vm {
             Ordering::Equal => return Ok(StepResult::Complete),
             Ordering::Greater => return Err(Fault::InvalidInstructionAddress),
         };
+        println!("Executing {instruction:?}");
         let next_instruction = StepResult::from(address.checked_add(1));
         let result = match instruction {
             LoadedOp::Return => return Ok(StepResult::Complete),
-            LoadedOp::Declare { name, value, dest } => {
-                self.op_declare(code_index, *name, *value, *dest)
-            }
+            LoadedOp::Declare {
+                name,
+                mutable,
+                value,
+                dest,
+            } => self.op_declare(code_index, *name, *mutable, *value, *dest),
             LoadedOp::Call { name, arity } => self.op_call(code_index, *name, *arity),
             LoadedOp::Invoke {
                 target,
@@ -627,6 +679,9 @@ impl Vm {
                 loaded.dest,
                 |vm, lhs, rhs| lhs.shift_right(vm, &rhs),
             ),
+            LoadedOp::LoadModule { module, dest } => {
+                self.op_load_module(code_index, *module, *dest)
+            }
         };
 
         match result {
@@ -635,10 +690,48 @@ impl Vm {
         }
     }
 
+    fn op_load_module(
+        &mut self,
+        code_index: usize,
+        module: usize,
+        dest: OpDestination,
+    ) -> Result<(), Fault> {
+        let loading_module = if let Some(index) =
+            self.frames[self.current_frame].loading_module.take()
+        {
+            index
+        } else {
+            // Replace the current module and stage the initializer
+            let executing_frame = self.current_frame;
+            let initializer =
+                Code::from(&self.code[code_index].code.data.modules[module].initializer);
+            let code = self.push_code(&initializer, None);
+            self.enter_frame(Some(code))?;
+            self.allocate(initializer.data.stack_requirement)?;
+            let module_index = NonZeroUsize::new(self.modules.len()).expect("always at least one");
+            self.modules.push(Dynamic::new(Module {
+                parent: Some(self.modules[self.frames[executing_frame].module].downgrade()),
+                ..Module::default()
+            }));
+            self.frames[self.current_frame].module = module_index.get();
+            self.frames[executing_frame].loading_module = Some(module_index);
+            let _init_result = self.resume_async_inner()?;
+            module_index
+        };
+
+        self.op_store(
+            code_index,
+            Value::Dynamic(self.modules[loading_module.get()].clone()),
+            dest,
+        )?;
+        Ok(())
+    }
+
     fn op_declare(
         &mut self,
         code_index: usize,
         name: usize,
+        mutable: bool,
         value: LoadedSource,
         dest: OpDestination,
     ) -> Result<(), Fault> {
@@ -652,7 +745,7 @@ impl Vm {
             .ok_or(Fault::InvalidOpcode)?;
 
         self.op_store(code_index, &value, dest)?;
-        self.declare(name, value);
+        self.declare_inner(name, value, mutable);
         Ok(())
     }
 
@@ -934,6 +1027,17 @@ impl Vm {
                 .get(v)
                 .ok_or(Fault::InvalidOpcode)
                 .and_then(|regex| regex.result.clone()),
+            LoadedSource::Function(v) => self.code[code_index]
+                .code
+                .data
+                .functions
+                .get(v)
+                .map(|function| {
+                    Value::dynamic(
+                        Function::from(function).in_module(self.frames[self.current_frame].module),
+                    )
+                })
+                .ok_or(Fault::InvalidOpcode),
         }
     }
 
@@ -1067,13 +1171,15 @@ impl IndexMut<usize> for Vm {
     }
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug)]
 struct Frame {
     start: usize,
     end: usize,
     instruction: usize,
     code: Option<CodeIndex>,
     variables: Map<Symbol, Stack>,
+    module: usize,
+    loading_module: Option<NonZeroUsize>,
 }
 
 impl Frame {
@@ -1081,6 +1187,8 @@ impl Frame {
         self.variables.clear();
         self.instruction = usize::MAX;
         self.code = None;
+        self.module = 0;
+        self.loading_module = None;
     }
 }
 
@@ -1089,6 +1197,7 @@ pub enum Fault {
     UnknownSymbol(Symbol),
     IncorrectNumberOfArguments,
     OperationOnNil,
+    MissingModule,
     NotAFunction,
     StackOverflow,
     StackUnderflow,
@@ -1096,6 +1205,7 @@ pub enum Fault {
     UnsupportedOperation,
     OutOfMemory,
     OutOfBounds,
+    NotMutable,
     DivideByZero,
     InvalidInstructionAddress,
     ExpectedSymbol,
@@ -1117,6 +1227,7 @@ pub enum Fault {
 
 #[derive(Debug, Clone)]
 pub struct Function {
+    module: Option<usize>,
     name: Option<Symbol>,
     bodies: Map<Arity, Code>,
     varg_bodies: Map<Arity, Code>,
@@ -1126,10 +1237,16 @@ impl Function {
     #[must_use]
     pub fn new(name: impl IntoOptionSymbol) -> Self {
         Self {
+            module: None,
             name: name.into_symbol(),
             bodies: Map::new(),
             varg_bodies: Map::new(),
         }
+    }
+
+    fn in_module(mut self, module: usize) -> Self {
+        self.module = Some(module);
+        self
     }
 
     pub fn insert_arity(&mut self, arity: impl Into<Arity>, body: Code) {
@@ -1156,7 +1273,8 @@ impl CustomType for Function {
                 .rev()
                 .find_map(|va| (va.key() <= &arity).then_some(&va.value))
         }) {
-            vm.execute_function(body, this)
+            let module = self.module.ok_or(Fault::MissingModule)?;
+            vm.execute_function(body, this, module)
         } else {
             Err(Fault::IncorrectNumberOfArguments)
         }
@@ -1220,9 +1338,12 @@ struct CodeData {
     stack_requirement: usize,
     symbols: Vec<Symbol>,
     dynamics: Vec<Dynamic>,
+    functions: Vec<BitcodeFunction>,
+    modules: Vec<BitcodeModule>,
 }
 
 impl CodeData {
+    #[allow(clippy::too_many_lines)]
     pub fn push(&mut self, op: &Op) {
         match op {
             Op::Return => self.push_loaded(LoadedOp::Return),
@@ -1232,11 +1353,21 @@ impl CodeData {
                 }
                 self.labels[label.0] = self.instructions.len();
             }
-            Op::Declare { name, value, dest } => {
+            Op::Declare {
+                name,
+                mutable,
+                value,
+                dest,
+            } => {
                 let name = self.push_symbol(name.clone());
                 let value = self.load_source(value);
                 let dest = self.load_dest(dest);
-                self.push_loaded(LoadedOp::Declare { name, value, dest });
+                self.push_loaded(LoadedOp::Declare {
+                    name,
+                    mutable: *mutable,
+                    value,
+                    dest,
+                });
             }
             Op::Unary {
                 dest: OpDestination::Void,
@@ -1315,12 +1446,25 @@ impl CodeData {
                     arity,
                 });
             }
+            Op::LoadModule { module, dest } => {
+                let module = self.push_module(module);
+                self.push_loaded(LoadedOp::LoadModule {
+                    module,
+                    dest: *dest,
+                });
+            }
         }
     }
 
     #[cfg(not(feature = "dispatched"))]
     fn push_loaded(&mut self, loaded: LoadedOp) {
         self.instructions.push(loaded);
+    }
+
+    fn push_function(&mut self, function: BitcodeFunction) -> usize {
+        let index = self.functions.len();
+        self.functions.push(function);
+        index
     }
 
     fn push_dynamic(&mut self, dynamic: Dynamic) -> usize {
@@ -1332,6 +1476,12 @@ impl CodeData {
     fn push_symbol(&mut self, symbol: Symbol) -> usize {
         let index = self.symbols.len();
         self.symbols.push(symbol);
+        index
+    }
+
+    fn push_module(&mut self, module: &BitcodeModule) -> usize {
+        let index = self.modules.len();
+        self.modules.push(module.clone());
         index
     }
 
@@ -1361,8 +1511,8 @@ impl CodeData {
             }
             ValueOrSource::Label(label) => LoadedSource::Label(*label),
             ValueOrSource::Function(function) => {
-                let function = self.push_dynamic(Dynamic::new(Function::from(function)));
-                LoadedSource::Dynamic(function)
+                let function = self.push_function(function.clone());
+                LoadedSource::Function(function)
             }
         }
     }
@@ -1407,7 +1557,57 @@ impl From<Option<usize>> for StepResult {
 
 #[derive(Default, Debug)]
 pub struct Module {
-    declarations: Map<Symbol, Value>,
+    parent: Option<WeakDynamic>,
+    declarations: Mutex<Map<Symbol, ModuleDeclaration>>,
+}
+
+impl Module {
+    fn declarations(&self) -> MutexGuard<'_, Map<Symbol, ModuleDeclaration>> {
+        self.declarations.lock().expect("poisoned")
+    }
+}
+
+impl CustomType for Module {
+    fn invoke(&self, vm: &mut Vm, name: &Symbol, arity: Arity) -> Result<Value, Fault> {
+        static FUNCTIONS: StaticRustFunctionTable<Module> = StaticRustFunctionTable::new(|table| {
+            table
+                .with_fn(Symbol::set_symbol(), 2, |vm, this| {
+                    let field = vm[Register(0)].take();
+                    let sym = field.as_symbol().ok_or(Fault::ExpectedSymbol)?;
+                    let value = vm[Register(1)].take();
+
+                    match this.declarations().get_mut(sym) {
+                        Some(decl) if decl.mutable => Ok(std::mem::replace(&mut decl.value, value)),
+                        Some(_) => Err(Fault::NotMutable),
+                        None => Err(Fault::UnknownSymbol(sym.clone())),
+                    }
+                })
+                .with_fn(Symbol::get_symbol(), 1, |vm, this| {
+                    let field = vm[Register(0)].take();
+                    let sym = field.as_symbol().ok_or(Fault::ExpectedSymbol)?;
+
+                    this.declarations()
+                        .get(sym)
+                        .map(|decl| decl.value.clone())
+                        .ok_or_else(|| Fault::UnknownSymbol(sym.clone()))
+                })
+        });
+        let declarations = self.declarations();
+        if let Some(decl) = declarations.get(name) {
+            let possible_invoke = decl.value.clone();
+            drop(declarations);
+            possible_invoke.call(vm, arity)
+        } else {
+            drop(declarations);
+            FUNCTIONS.invoke(vm, name, arity, self)
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ModuleDeclaration {
+    mutable: bool,
+    value: Value,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1460,6 +1660,7 @@ enum LoadedOp {
     Return,
     Declare {
         name: usize,
+        mutable: bool,
         value: LoadedSource,
         dest: OpDestination,
     },
@@ -1501,6 +1702,10 @@ enum LoadedOp {
     BitwiseXor(LoadedBinary),
     BitwiseShiftLeft(LoadedBinary),
     BitwiseShiftRight(LoadedBinary),
+    LoadModule {
+        module: usize,
+        dest: OpDestination,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1549,6 +1754,7 @@ enum LoadedSource {
     Symbol(usize),
     Register(Register),
     Dynamic(usize),
+    Function(usize),
     Stack(Stack),
     Label(Label),
     Regex(usize),

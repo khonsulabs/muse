@@ -1,0 +1,72 @@
+publish_from_module: {
+    src: r#"
+        mod foo {
+            pub let a = 42;
+        };
+        foo.a
+    "#,
+    output: Int(42),
+}
+
+private_in_module: {
+    src: r#"
+        mod foo {
+            let a = 42;
+        };
+        foo.a
+    "#,
+    output: Fault(UnknownSymbol("a")),
+}
+
+publish_fn_from_module: {
+    src: r#"
+        mod foo {
+            pub fn a => 42;
+        };
+        foo.a()
+    "#,
+    output: Int(42),
+}
+
+private_fn_in_module: {
+    src: r#"
+        mod foo {
+            fn a => 42;
+        };
+        foo.a()
+    "#,
+    output: Fault(UnknownSymbol("a")),
+}
+
+super_private: {
+    src: r#"
+        let a = 42;
+        mod foo {
+            pub fn a => super.a;
+        };
+        foo.a()
+    "#,
+    output: Fault(UnknownSymbol("a")),
+}
+
+super_public: {
+    src: r#"
+        pub let a = 42;
+        mod foo {
+            pub fn a => super.a;
+        };
+        foo.a()
+    "#,
+    output: Int(42),
+}
+
+mutate_module_var: {
+    src: r#"
+        mod foo {
+            pub var a = 1;
+        };
+        foo.a = 42;
+        foo.a
+    "#,
+    output: Int(42),
+}

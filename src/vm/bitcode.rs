@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(not(feature = "dispatched"))]
 use super::LoadedOp;
 use super::{Arity, Code, CodeData, Function, LoadedSource, Register};
-use crate::compiler::UnaryKind;
+use crate::compiler::{BitcodeModule, UnaryKind};
 use crate::string::MuseString;
 use crate::symbol::Symbol;
 use crate::syntax::token::RegExLiteral;
@@ -86,8 +86,13 @@ impl_from!(OpDestination, Label, Label);
 pub enum Op {
     Return,
     Label(Label),
+    LoadModule {
+        module: BitcodeModule,
+        dest: OpDestination,
+    },
     Declare {
         name: Symbol,
+        mutable: bool,
         value: ValueOrSource,
         dest: OpDestination,
     },
@@ -143,12 +148,14 @@ impl BitcodeBlock {
     pub fn declare(
         &mut self,
         name: Symbol,
+        mutable: bool,
         value: impl Into<ValueOrSource>,
         dest: impl Into<OpDestination>,
     ) {
         let value = value.into();
         self.push(Op::Declare {
             name,
+            mutable,
             value,
             dest: dest.into(),
         });
@@ -418,8 +425,6 @@ pub(super) fn trusted_loaded_source_to_value(
             let loaded = &code.dynamics[*loaded];
             if let Some(string) = loaded.downcast_ref::<MuseString>() {
                 ValueOrSource::String(string.to_string())
-            } else if let Some(function) = loaded.downcast_ref::<Function>() {
-                ValueOrSource::Function(BitcodeFunction::from(function))
             } else {
                 unreachable!("unknown dynamic type: {loaded:?}")
             }
@@ -427,10 +432,12 @@ pub(super) fn trusted_loaded_source_to_value(
         LoadedSource::Stack(loaded) => ValueOrSource::Stack(*loaded),
         LoadedSource::Label(loaded) => ValueOrSource::Label(*loaded),
         LoadedSource::Regex(loaded) => ValueOrSource::RegEx(code.regexes[*loaded].literal.clone()),
+        LoadedSource::Function(loaded) => ValueOrSource::Function(code.functions[*loaded].clone()),
     }
 }
 
 impl From<&'_ Code> for BitcodeBlock {
+    #[allow(clippy::too_many_lines)]
     fn from(code: &'_ Code) -> Self {
         let mut ops = Vec::with_capacity(code.data.instructions.len() + code.data.labels.len());
         let mut label_addrs = code.data.labels.iter().copied().peekable();
@@ -449,8 +456,14 @@ impl From<&'_ Code> for BitcodeBlock {
             #[cfg(not(feature = "dispatched"))]
             ops.push(match instruction {
                 LoadedOp::Return => Op::Return,
-                LoadedOp::Declare { name, value, dest } => Op::Declare {
+                LoadedOp::Declare {
+                    name,
+                    mutable,
+                    value,
+                    dest,
+                } => Op::Declare {
                     name: code.data.symbols[*name].clone(),
+                    mutable: *mutable,
                     value: trusted_loaded_source_to_value(value, &code.data),
                     dest: *dest,
                 },
@@ -516,6 +529,13 @@ impl From<&'_ Code> for BitcodeBlock {
                 LoadedOp::BitwiseShiftRight(loaded) => {
                     loaded.as_op(BinaryKind::Bitwise(BitwiseKind::ShiftRight), code)
                 }
+                LoadedOp::LoadModule {
+                    module: initializer,
+                    dest,
+                } => Op::LoadModule {
+                    module: code.data.modules[*initializer].clone(),
+                    dest: *dest,
+                },
             });
         }
 
@@ -576,6 +596,7 @@ impl BitcodeFunction {
 impl From<&'_ BitcodeFunction> for Function {
     fn from(bit: &'_ BitcodeFunction) -> Self {
         Self {
+            module: None,
             name: bit.name.clone(),
             bodies: bit
                 .bodies

@@ -312,7 +312,7 @@ impl<'a> Scope<'a> {
                 match (&decl.name, decl.publish) {
                     (Some(name), true) => {
                         self.ensure_in_module(name.1);
-                        self.compiler.code.declare(name.0.clone(), fun, dest);
+                        self.compiler.code.declare(name.0.clone(), false, fun, dest);
                     }
                     (Some(name), false) => {
                         let stack = self.new_temporary();
@@ -329,6 +329,38 @@ impl<'a> Scope<'a> {
                     }
                 }
             }
+            Expression::Module(module) => {
+                let Expression::Block(block) = &module.contents.0 else {
+                    self.compiler
+                        .errors
+                        .push(Ranged::new(module.contents.1, Error::InvalidDeclaration));
+                    return;
+                };
+                let mut mod_compiler = Compiler::default();
+                let mut mod_scope = Scope::module_root(&mut mod_compiler);
+
+                mod_scope.compile_expression(&block.body, OpDestination::Void);
+                drop(mod_scope);
+                let name = &module.name.0;
+                let instance = BitcodeModule {
+                    name: name.clone(),
+                    initializer: mod_compiler.code,
+                };
+                let stack = self.new_temporary();
+                self.compiler.code.push(Op::LoadModule {
+                    module: instance,
+                    dest: OpDestination::Stack(stack),
+                });
+                if module.publish {
+                    self.ensure_in_module(module.name.1);
+
+                    self.compiler.code.declare(name.clone(), false, stack, dest);
+                } else {
+                    self.declare_local(name.clone(), false, stack, dest);
+                }
+
+                self.compiler.errors.append(&mut mod_compiler.errors);
+            }
         }
     }
 
@@ -336,7 +368,9 @@ impl<'a> Scope<'a> {
         if decl.publish {
             let stack = self.new_temporary();
             self.compile_expression(&decl.value, OpDestination::Stack(stack));
-            self.compiler.code.declare(decl.name.clone(), stack, dest);
+            self.compiler
+                .code
+                .declare(decl.name.clone(), decl.mutable, stack, dest);
         } else {
             let stack = self.new_temporary();
             self.compile_expression(&decl.value, OpDestination::Stack(stack));
@@ -453,6 +487,7 @@ impl<'a> Scope<'a> {
             | Expression::Tuple(_)
             | Expression::If(_)
             | Expression::Function(_)
+            | Expression::Module(_)
             | Expression::Call(_)
             | Expression::Variable(_)
             | Expression::Assign(_)
@@ -575,4 +610,10 @@ pub enum UnaryKind {
     Jump,
     NewMap,
     NewList,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BitcodeModule {
+    pub name: Symbol,
+    pub initializer: BitcodeBlock,
 }

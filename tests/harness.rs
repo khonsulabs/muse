@@ -15,10 +15,12 @@ use serde::de::Visitor;
 use serde::Deserialize;
 
 fn main() {
+    let filter = std::env::args().nth(1).unwrap_or_default();
+    // let filter = String::from("super_private");
     for entry in std::fs::read_dir("tests/cases").unwrap() {
         let entry = entry.unwrap().path();
         if entry.extension().map_or(false, |ext| ext == "rsn") {
-            run_test_cases(&entry);
+            run_test_cases(&entry, filter.trim());
         }
     }
 }
@@ -91,7 +93,7 @@ impl From<Value> for TestOutput {
     }
 }
 
-fn run_test_cases(path: &Path) {
+fn run_test_cases(path: &Path, filter: &str) {
     let contents = std::fs::read_to_string(path).unwrap();
 
     let cases: BTreeMap<String, Case> = match rsn::parser::Config::default()
@@ -102,6 +104,10 @@ fn run_test_cases(path: &Path) {
         Err(err) => unreachable!("error parsing {}: {err}", path.display()),
     };
     for (name, case) in cases {
+        if !filter.is_empty() && filter != name {
+            println!("Skipping {name}");
+            continue;
+        }
         println!("Running {name}");
         let (code, output) = case.run();
         assert_eq!(
