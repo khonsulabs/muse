@@ -14,6 +14,18 @@ impl Map {
         Self(Mutex::new(Vec::new()))
     }
 
+    pub fn from_iterator(vm: &mut Vm, iter: impl IntoIterator<Item = (Value, Value)>) -> Self {
+        let mut fields: Vec<_> = iter
+            .into_iter()
+            .map(|(key, value)| Field {
+                key: MapKey::new(vm, key),
+                value,
+            })
+            .collect();
+        fields.sort_unstable_by(|a, b| a.key.hash.cmp(&b.key.hash));
+        Self(Mutex::new(fields))
+    }
+
     pub fn get(&self, vm: &mut Vm, key: &Value) -> Result<Option<Value>, Fault> {
         let hash = key.hash(vm);
         let contents = self.0.lock().expect("poisoned");

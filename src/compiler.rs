@@ -3,11 +3,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::symbol::Symbol;
 use crate::syntax::{
-    self, BinaryExpression, Chain, Expression, FunctionCall, LogicalKind, Ranged, SourceRange,
-    UnaryExpression, Variable,
+    self, BinaryExpression, BreakExpression, Chain, ContinueExpression, Expression, FunctionCall,
+    LogicalKind, LoopExpression, LoopKind, Ranged, SourceRange, UnaryExpression, Variable,
 };
 use crate::vm::bitcode::{
-    BinaryKind, BitcodeBlock, BitcodeFunction, Op, OpDestination, ValueOrSource,
+    BinaryKind, BitcodeBlock, BitcodeFunction, Label, Op, OpDestination, ValueOrSource,
 };
 use crate::vm::{Code, Register, Stack};
 
@@ -18,6 +18,7 @@ pub struct Compiler {
     errors: Vec<Ranged<Error>>,
     code: BitcodeBlock,
     declarations: Map<Symbol, BlockDeclaration>,
+    scopes: Vec<ScopeInfo>,
 }
 
 impl Compiler {
@@ -76,6 +77,22 @@ struct LocalDeclaration {
     previous_declaration: Option<BlockDeclaration>,
 }
 
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+enum ScopeKind {
+    Module,
+    Function,
+    Block,
+    Loop,
+}
+
+#[derive(Debug)]
+struct ScopeInfo {
+    kind: ScopeKind,
+    name: Option<Symbol>,
+    break_info: Option<(Label, OpDestination)>,
+    continue_label: Option<Label>,
+}
+
 struct Scope<'a> {
     compiler: &'a mut Compiler,
     module: bool,
@@ -86,6 +103,12 @@ struct Scope<'a> {
 
 impl<'a> Scope<'a> {
     fn module_root(compiler: &'a mut Compiler) -> Self {
+        compiler.scopes.push(ScopeInfo {
+            kind: ScopeKind::Module,
+            name: None,
+            continue_label: None,
+            break_info: None,
+        });
         Self {
             compiler,
             module: true,
@@ -96,6 +119,12 @@ impl<'a> Scope<'a> {
     }
 
     fn function_root(compiler: &'a mut Compiler) -> Self {
+        compiler.scopes.push(ScopeInfo {
+            kind: ScopeKind::Function,
+            name: None,
+            continue_label: None,
+            break_info: None,
+        });
         Self {
             compiler,
             module: false,
@@ -105,7 +134,40 @@ impl<'a> Scope<'a> {
         }
     }
 
-    fn enter_block(&mut self) -> Scope<'_> {
+    fn enter_block(
+        &mut self,
+        name: Option<Symbol>,
+        break_label: Label,
+        dest: OpDestination,
+    ) -> Scope<'_> {
+        self.compiler.scopes.push(ScopeInfo {
+            kind: ScopeKind::Block,
+            break_info: name.is_some().then_some((break_label, dest)),
+            name,
+            continue_label: None,
+        });
+        Scope {
+            compiler: self.compiler,
+            module: self.module,
+            depth: self.depth + 1,
+            locals_count: 0,
+            local_declarations: Vec::new(),
+        }
+    }
+
+    fn enter_loop(
+        &mut self,
+        name: Option<Symbol>,
+        continue_label: Label,
+        break_label: Label,
+        dest: OpDestination,
+    ) -> Scope<'_> {
+        self.compiler.scopes.push(ScopeInfo {
+            kind: ScopeKind::Loop,
+            break_info: Some((break_label, dest)),
+            name,
+            continue_label: Some(continue_label),
+        });
         Scope {
             compiler: self.compiler,
             module: self.module,
@@ -229,13 +291,26 @@ impl<'a> Scope<'a> {
                 self.compile_expression(&if_expr.when_true, dest);
                 self.compiler.code.label(after_true);
             }
+            Expression::Loop(loop_expr) => {
+                self.compile_loop(loop_expr, dest);
+            }
+            Expression::Break(break_expr) => {
+                self.compile_break(break_expr, expr.1);
+            }
+            Expression::Continue(continue_expr) => {
+                self.compile_continue(continue_expr, expr.1);
+            }
+            Expression::Return(result) => {
+                self.compile_expression(result, OpDestination::Register(Register(0)));
+                self.compiler.code.return_early();
+            }
             Expression::Assign(assign) => {
                 if let Some(base) = &assign.target.base {
+                    let target = self.compile_source(base);
                     self.compile_expression(&assign.value, OpDestination::Register(Register(1)));
                     self.compiler
                         .code
                         .copy(assign.target.name.clone(), Register(0));
-                    let target = self.compile_source(base);
                     self.compiler.code.push(Op::Invoke {
                         target,
                         name: Symbol::set_symbol().clone(),
@@ -257,10 +332,10 @@ impl<'a> Scope<'a> {
                             .push(Ranged::new(expr.range(), Error::VariableNotMutable));
                     }
                 } else {
-                    self.compile_expression(&assign.value, OpDestination::Register(Register(1)));
+                    let value = self.compile_source(&assign.value);
                     self.compiler.code.push(Op::BinOp {
                         op1: ValueOrSource::Symbol(assign.target.name.clone()),
-                        op2: ValueOrSource::Register(Register(1)),
+                        op2: value,
                         dest,
                         kind: BinaryKind::Assign,
                     });
@@ -275,8 +350,10 @@ impl<'a> Scope<'a> {
                 self.compile_expression(&chain.1, dest);
             }
             Expression::Block(block) => {
-                let mut scope = self.enter_block();
+                let break_label = self.compiler.code.new_label();
+                let mut scope = self.enter_block(block.name.clone(), break_label, dest);
                 scope.compile_expression(&block.body, dest);
+                scope.compiler.code.label(break_label);
             }
             Expression::Call(call) => self.compile_function_call(call, expr.range(), dest),
             Expression::Variable(decl) => {
@@ -366,6 +443,106 @@ impl<'a> Scope<'a> {
                 self.compiler.errors.append(&mut mod_compiler.errors);
             }
         }
+    }
+
+    fn compile_break(&mut self, break_expr: &BreakExpression, from: SourceRange) {
+        let mut break_info = None;
+        for scope in self.compiler.scopes.iter().rev() {
+            match (break_expr.name.as_ref(), &scope.name) {
+                (Some(query), Some(scope_name)) if &query.0 == scope_name => {
+                    if !matches!(scope.kind, ScopeKind::Block | ScopeKind::Loop) {
+                        self.compiler
+                            .errors
+                            .push(Ranged::new(query.1, Error::InvalidLabel));
+                    }
+                    break_info = scope.break_info;
+                    break;
+                }
+                (None, _) if scope.kind == ScopeKind::Loop => {
+                    break_info = scope.break_info;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        if let Some((label, dest)) = break_info {
+            self.compile_expression(&break_expr.value, dest);
+            self.compiler.code.jump(label, ());
+        } else {
+            self.compiler
+                .errors
+                .push(Ranged::new(from, Error::InvalidLabel));
+        }
+    }
+
+    fn compile_continue(&mut self, continue_expr: &ContinueExpression, from: SourceRange) {
+        let mut label = None;
+        for scope in self.compiler.scopes.iter().rev() {
+            match (continue_expr.name.as_ref(), &scope.name) {
+                (Some(query), Some(scope_name)) if &query.0 == scope_name => {
+                    if !matches!(scope.kind, ScopeKind::Loop) {
+                        self.compiler
+                            .errors
+                            .push(Ranged::new(query.1, Error::InvalidLabel));
+                    }
+                    label = scope.continue_label;
+                    break;
+                }
+                (None, _) if scope.kind == ScopeKind::Loop => {
+                    label = scope.continue_label;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(label) = label {
+            self.compiler.code.jump(label, ());
+        } else {
+            self.compiler
+                .errors
+                .push(Ranged::new(from, Error::InvalidLabel));
+        }
+    }
+
+    fn compile_loop(&mut self, expr: &LoopExpression, dest: OpDestination) {
+        let continue_label = self.compiler.code.new_label();
+        let mut loop_start = continue_label;
+        let break_label = self.compiler.code.new_label();
+
+        match &expr.kind {
+            LoopKind::Infinite => {
+                self.compiler.code.label(continue_label);
+            }
+            LoopKind::While(condition) => {
+                self.compiler.code.label(continue_label);
+                let condition = self.compile_source(condition);
+                self.compiler.code.jump_if_not(break_label, condition, ());
+            }
+            LoopKind::TailWhile(_) => {
+                loop_start = self.compiler.code.new_label();
+                self.compiler.code.label(loop_start);
+            }
+        }
+
+        let mut block_scope =
+            self.enter_loop(expr.block.name.clone(), continue_label, break_label, dest);
+
+        block_scope.compile_expression(&expr.block.body, dest);
+        drop(block_scope);
+
+        match &expr.kind {
+            LoopKind::Infinite | LoopKind::While(_) => {}
+            LoopKind::TailWhile(condition) => {
+                self.compiler.code.label(continue_label);
+                let condition = self.compile_source(condition);
+                self.compiler.code.jump_if_not(break_label, condition, ());
+            }
+        }
+
+        self.compiler.code.jump(loop_start, ());
+        self.compiler.code.label(break_label);
     }
 
     fn declare_variable(&mut self, decl: &Variable, dest: OpDestination) {
@@ -496,7 +673,11 @@ impl<'a> Scope<'a> {
             | Expression::Unary(_)
             | Expression::Binary(_)
             | Expression::Block(_)
-            | Expression::Chain(_) => self.compile_expression_into_temporary(source),
+            | Expression::Loop(_)
+            | Expression::Chain(_)
+            | Expression::Break(_)
+            | Expression::Continue(_)
+            | Expression::Return(_) => self.compile_expression_into_temporary(source),
         }
     }
 
@@ -564,6 +745,7 @@ impl<'a> Scope<'a> {
 
 impl Drop for Scope<'_> {
     fn drop(&mut self) {
+        self.compiler.scopes.pop();
         // The root scope preserves its declarations.
         if self.depth > 0 {
             while let Some(LocalDeclaration {
@@ -591,7 +773,9 @@ pub enum Error {
     TooManyArguments,
     UsizeTooLarge,
     InvalidDeclaration,
+    InvalidLabel,
     PubOnlyInModules,
+    ExpectedBlock,
     Syntax(syntax::Error),
 }
 

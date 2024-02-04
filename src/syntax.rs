@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::fmt::Debug;
-use std::ops::{Bound, Deref, Range, RangeBounds, RangeInclusive};
+use std::ops::{Bound, Deref, DerefMut, Range, RangeBounds, RangeInclusive};
 
 use ahash::AHashMap;
 use serde::{Deserialize, Serialize};
@@ -56,6 +56,12 @@ impl<T> Deref for Ranged<T> {
     }
 }
 
+impl<T> DerefMut for Ranged<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 #[derive(Default, Clone, Copy, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct SourceRange {
     pub start: usize,
@@ -107,6 +113,10 @@ pub enum Expression {
     Binary(Box<BinaryExpression>),
     Chain(Box<Chain>),
     Block(Box<Block>),
+    Loop(Box<LoopExpression>),
+    Break(Box<BreakExpression>),
+    Continue(Box<ContinueExpression>),
+    Return(Box<Ranged<Expression>>),
     Module(Box<ModuleDefinition>),
     Function(Box<FunctionDefinition>),
     Variable(Box<Variable>),
@@ -167,6 +177,30 @@ pub struct IfExpression {
     pub condition: Ranged<Expression>,
     pub when_true: Ranged<Expression>,
     pub when_false: Option<Ranged<Expression>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoopExpression {
+    pub kind: LoopKind,
+    pub block: Ranged<Block>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BreakExpression {
+    pub name: Option<Ranged<Symbol>>,
+    pub value: Ranged<Expression>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContinueExpression {
+    pub name: Option<Ranged<Symbol>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LoopKind {
+    Infinite,
+    While(Ranged<Expression>),
+    TailWhile(Ranged<Expression>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -365,13 +399,15 @@ pub enum Error {
     UnexpectedToken(Token),
     ExpectedDeclaration,
     ExpectedName,
+    ExpectedBlock,
     ExpectedModuleBody,
-    ExpectedFunctionBody,
+    ExpectedBody,
     ExpectedFunctionParamters,
     ExpectedVariableInitialValue,
     ExpectedThenOrBrace,
     ExpectedColon,
     InvalidAssignmentTarget,
+    InvalidLabelTarget,
 }
 
 impl From<Ranged<token::Error>> for Ranged<Error> {
@@ -449,6 +485,112 @@ impl<'a> ParserConfig<'a> {
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
         self.with_precedence(self.parselets.markers.expression)
             .parse(tokens)
+    }
+}
+
+struct Break;
+
+impl Parselet for Break {
+    fn token(&self) -> Option<Token> {
+        Some(Token::Identifier(Symbol::break_symbol().clone()))
+    }
+}
+
+impl PrefixParselet for Break {
+    fn parse(
+        &self,
+        token: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        let name = if tokens
+            .peek_token()
+            .map_or(false, |token| matches!(token, Token::Label(_)))
+        {
+            let label_token = tokens.next()?;
+            let Token::Label(label) = label_token.0 else {
+                unreachable!("just matched")
+            };
+            Some(Ranged::new(label_token.1, label))
+        } else {
+            None
+        };
+        let value = if tokens
+            .peek_token()
+            .map_or(false, |token| !token.is_likely_end())
+        {
+            config.parse_expression(tokens)?
+        } else {
+            tokens.ranged(tokens.last_index.., Expression::Nil)
+        };
+
+        Ok(tokens.ranged(
+            token.range().start..,
+            Expression::Break(Box::new(BreakExpression { name, value })),
+        ))
+    }
+}
+
+struct Continue;
+
+impl Parselet for Continue {
+    fn token(&self) -> Option<Token> {
+        Some(Token::Identifier(Symbol::continue_symbol().clone()))
+    }
+}
+
+impl PrefixParselet for Continue {
+    fn parse(
+        &self,
+        token: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        _config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        let name = if tokens
+            .peek_token()
+            .map_or(false, |token| matches!(token, Token::Label(_)))
+        {
+            let label_token = tokens.next()?;
+            let Token::Label(label) = label_token.0 else {
+                unreachable!("just matched")
+            };
+            Some(Ranged::new(label_token.1, label))
+        } else {
+            None
+        };
+
+        Ok(tokens.ranged(
+            token.range().start..,
+            Expression::Continue(Box::new(ContinueExpression { name })),
+        ))
+    }
+}
+
+struct Return;
+
+impl Parselet for Return {
+    fn token(&self) -> Option<Token> {
+        Some(Token::Identifier(Symbol::return_symbol().clone()))
+    }
+}
+
+impl PrefixParselet for Return {
+    fn parse(
+        &self,
+        token: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        let value = if tokens
+            .peek_token()
+            .map_or(false, |token| !token.is_likely_end())
+        {
+            config.parse_expression(tokens)?
+        } else {
+            tokens.ranged(tokens.last_index.., Expression::Nil)
+        };
+
+        Ok(tokens.ranged(token.range().start.., Expression::Return(Box::new(value))))
     }
 }
 
@@ -686,13 +828,59 @@ impl_prefix_standalone_parselet!(
 
 struct Braces;
 
+fn parse_block(
+    tokens: &mut TokenReader<'_>,
+    config: &ParserConfig<'_>,
+) -> Result<Ranged<Block>, Ranged<Error>> {
+    let open_brace = tokens.next()?;
+    if matches!(open_brace.0, Token::Open(Paired::Brace)) {
+        if tokens.peek_token() == Some(Token::Close(Paired::Brace)) {
+            let close_brace = tokens.next()?;
+            return Ok(tokens.ranged(
+                open_brace.range().start..,
+                Block {
+                    name: None,
+                    body: Ranged::new(
+                        open_brace.range().end()..close_brace.range().start,
+                        Expression::Nil,
+                    ),
+                },
+            ));
+        }
+        let expr = config.parse_expression(tokens)?;
+
+        match tokens.peek() {
+            Some(Ranged(Token::Char(';'), _)) => {
+                tokens.next()?;
+                Braces::parse_block(open_brace.range().start, expr, tokens, config)
+            }
+            Some(Ranged(Token::Close(Paired::Brace), _)) => {
+                tokens.next()?;
+                Ok(tokens.ranged(
+                    open_brace.range().start..,
+                    Block {
+                        name: None,
+                        body: expr,
+                    },
+                ))
+            }
+            other => Err(tokens.ranged(
+                other.map_or(tokens.last_index, |t| t.range().start)..,
+                Error::MissingEnd(Paired::Brace),
+            )),
+        }
+    } else {
+        Err(open_brace.map(|_| Error::ExpectedBlock))
+    }
+}
+
 impl Braces {
     fn parse_block(
         start: usize,
         expr: Ranged<Expression>,
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
-    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+    ) -> Result<Ranged<Block>, Ranged<Error>> {
         let mut expressions = vec![expr];
 
         let mut ended_in_semicolon = true;
@@ -719,10 +907,10 @@ impl Braces {
         match tokens.next() {
             Ok(Ranged(Token::Close(Paired::Brace), _)) => Ok(tokens.ranged(
                 start..,
-                Expression::Block(Box::new(Block {
+                Block {
                     name: None,
                     body: Chain::from_expressions(expressions),
-                })),
+                },
             )),
             Ok(Ranged(_, range)) | Err(Ranged(_, range)) => {
                 Err(Ranged::new(range, Error::MissingEnd(Paired::Brace)))
@@ -842,6 +1030,7 @@ impl PrefixParselet for Braces {
             Some(Ranged(Token::Char(';'), _)) => {
                 tokens.next()?;
                 Self::parse_block(token.range().start, expr, tokens, config)
+                    .map(|ranged| ranged.map(|block| Expression::Block(Box::new(block))))
             }
             Some(Ranged(Token::Close(Paired::Brace), _)) => {
                 tokens.next()?;
@@ -1092,6 +1281,113 @@ impl PrefixParselet for If {
     }
 }
 
+struct Loop;
+
+impl Parselet for Loop {
+    fn token(&self) -> Option<Token> {
+        None
+    }
+
+    fn matches(&self, token: &Token, tokens: &mut TokenReader<'_>) -> bool {
+        matches!(token, Token::Identifier(ident) if ident == Symbol::loop_symbol())
+            && tokens
+                .peek_token()
+                .map_or(false, |t| matches!(t, Token::Open(Paired::Brace)))
+    }
+}
+
+impl PrefixParselet for Loop {
+    fn parse(
+        &self,
+        token: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        let block = parse_block(tokens, config)?;
+        let kind = if tokens.peek_token().map_or(
+            false,
+            |token| matches!(token, Token::Identifier(ident) if &ident == Symbol::while_symbol()),
+        ) {
+            let _while = tokens.next()?;
+            LoopKind::TailWhile(config.parse_expression(tokens)?)
+        } else {
+            LoopKind::Infinite
+        };
+
+        Ok(tokens.ranged(
+            token.range().start..,
+            Expression::Loop(Box::new(LoopExpression { kind, block })),
+        ))
+    }
+}
+
+struct Labeled;
+
+impl Parselet for Labeled {
+    fn token(&self) -> Option<Token> {
+        None
+    }
+
+    fn matches(&self, token: &Token, tokens: &mut TokenReader<'_>) -> bool {
+        matches!(token, Token::Label(_))
+            && tokens
+                .peek_token()
+                .map_or(false, |token| matches!(token, Token::Char(':')))
+    }
+}
+
+impl PrefixParselet for Labeled {
+    fn parse(
+        &self,
+        label: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        let Token::Label(label) = label.0 else {
+            unreachable!("matches filters")
+        };
+        let _colon = tokens.next()?;
+        let mut subject = config.parse_expression(tokens)?;
+        match &mut subject.0 {
+            Expression::Block(block) => block.name = Some(label),
+            Expression::Loop(loop_expr) => {
+                loop_expr.block.name = Some(label);
+            }
+            _ => return Err(subject.map(|_| Error::InvalidLabelTarget)),
+        }
+
+        Ok(subject)
+    }
+}
+
+struct While;
+
+impl Parselet for While {
+    fn token(&self) -> Option<Token> {
+        Some(Token::Identifier(Symbol::while_symbol().clone()))
+    }
+}
+
+impl PrefixParselet for While {
+    fn parse(
+        &self,
+        token: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        let condition = config.parse_expression(tokens)?;
+
+        let block = parse_block(tokens, config)?;
+        Ok(tokens.ranged(
+            token.range().start..,
+            Expression::Loop(Box::new(LoopExpression {
+                kind: LoopKind::While(condition),
+                block,
+            })),
+        ))
+    }
+}
+
 struct Mod;
 
 impl Parselet for Mod {
@@ -1213,7 +1509,7 @@ impl Fn {
         let body = match &body_indicator.0 {
             Token::Open(Paired::Brace) => Braces.parse(body_indicator, tokens, config)?,
             Token::FatArrow => config.parse_expression(tokens)?,
-            _ => return Err(body_indicator.map(|_| Error::ExpectedFunctionBody)),
+            _ => return Err(body_indicator.map(|_| Error::ExpectedBody)),
         };
 
         Ok(tokens.ranged(
@@ -1501,6 +1797,9 @@ fn parselets() -> Parselets {
     parser.markers.expression = parser.precedence;
     parser.push_infix(parselets![Assign]);
     parser.push_infix(parselets![ArrowFn]);
+    parser.push_infix(parselets![Or]);
+    parser.push_infix(parselets![Xor]);
+    parser.push_infix(parselets![And]);
     parser.push_infix(parselets![
         LessThanOrEqual,
         LessThan,
@@ -1508,9 +1807,6 @@ fn parselets() -> Parselets {
         GreaterThan,
         GreaterThanOrEqual
     ]);
-    parser.push_infix(parselets![Or]);
-    parser.push_infix(parselets![Xor]);
-    parser.push_infix(parselets![And]);
     parser.push_infix(parselets![BitwiseOr]);
     parser.push_infix(parselets![BitwiseXor]);
     parser.push_infix(parselets![BitwiseAnd]);
@@ -1532,6 +1828,12 @@ fn parselets() -> Parselets {
         If,
         True,
         False,
+        Loop,
+        While,
+        Labeled,
+        Continue,
+        Break,
+        Return,
     ]);
     parser.push_prefix(parselets![Term]);
     parser

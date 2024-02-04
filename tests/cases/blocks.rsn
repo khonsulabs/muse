@@ -1,0 +1,9 @@
+block: {
+    src: r#"{ 1; 2 }"#,
+    output: Int(2),
+}
+
+labeled_block: {
+    src: r#"@label: { break @label 42; 2 }"#,
+    output: Int(42),
+}

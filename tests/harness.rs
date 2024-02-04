@@ -16,7 +16,7 @@ use serde::Deserialize;
 
 fn main() {
     let filter = std::env::args().nth(1).unwrap_or_default();
-    // let filter = String::from("child_mod_private");
+    // let filter = String::from("map_obj");
     for entry in std::fs::read_dir("tests/cases").unwrap() {
         let entry = entry.unwrap().path();
         if entry.extension().map_or(false, |ext| ext == "rsn") {
@@ -45,6 +45,8 @@ enum TestOutput {
 struct Case {
     pub src: String,
     pub output: TestOutput,
+    #[serde(default)]
+    pub ignore: bool,
 }
 
 impl Case {
@@ -104,7 +106,7 @@ fn run_test_cases(path: &Path, filter: &str) {
         Err(err) => unreachable!("error parsing {}: {err}", path.display()),
     };
     for (name, case) in cases {
-        if !filter.is_empty() && filter != name {
+        if (!filter.is_empty() && filter != name) || case.ignore {
             println!("Skipping {name}");
             continue;
         }

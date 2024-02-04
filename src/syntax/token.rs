@@ -14,6 +14,7 @@ pub enum Token {
     Whitespace,
     Comment,
     Identifier(Symbol),
+    Label(Symbol),
     Int(i64),
     Float(f64),
     Char(char),
@@ -43,6 +44,13 @@ pub enum Token {
     Close(Paired),
 }
 
+impl Token {
+    #[must_use]
+    pub fn is_likely_end(&self) -> bool {
+        matches!(self, Token::Close(_) | Token::Char(';'))
+    }
+}
+
 impl Eq for Token {}
 
 impl PartialEq for Token {
@@ -62,7 +70,7 @@ impl Hash for Token {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         core::mem::discriminant(self).hash(state);
         match self {
-            Token::Identifier(t) => t.hash(state),
+            Token::Identifier(t) | Token::Label(t) => t.hash(state),
             Token::Int(t) => t.hash(state),
             Token::Float(t) => t.to_bits().hash(state),
             Token::Char(t) => t.hash(state),
@@ -155,14 +163,19 @@ impl Iterator for Tokens<'_> {
                     }
                 }
                 (start, '#') => {
+                    let comment = self.tokenize_oneline_comment(start);
                     if self.include_comments {
-                        Ok(self.tokenize_oneline_comment(start))
+                        Ok(comment)
                     } else {
                         continue;
                     }
                 }
 
                 (start, '"') => self.tokenize_string(start),
+                (start, '@') if self.chars.peek().map_or(false, unicode_ident::is_xid_start) => {
+                    let ch = self.chars.next().expect("just peekend").1;
+                    Ok(self.tokenize_label(start, ch))
+                }
                 (start, '\\') => self.tokenize_regex(start, false),
                 (start, 'w') if self.chars.peek().map_or(false, |ch| ch == '\\') => {
                     self.chars.next()?;
@@ -302,7 +315,7 @@ impl<'a> Tokens<'a> {
         }
     }
 
-    fn tokenize_identifier(&mut self, start: usize, start_char: char) -> Ranged<Token> {
+    fn tokenize_identifier_symbol(&mut self, start: usize, start_char: char) -> Ranged<Symbol> {
         self.scratch.clear();
         self.scratch.push(start_char);
 
@@ -315,14 +328,18 @@ impl<'a> Tokens<'a> {
             self.chars.next();
         }
 
-        // Allow a trailing exclamation of question mark.
-        if let Some(ch) = self.chars.peek().filter(|ch| matches!(ch, '!' | '?')) {
-            self.scratch.push(ch);
-            self.chars.next();
-        }
-
         let symbol = Symbol::from(&self.scratch);
-        self.chars.ranged(start.., Token::Identifier(symbol))
+        self.chars.ranged(start.., symbol)
+    }
+
+    fn tokenize_identifier(&mut self, start: usize, start_char: char) -> Ranged<Token> {
+        self.tokenize_identifier_symbol(start, start_char)
+            .map(Token::Identifier)
+    }
+
+    fn tokenize_label(&mut self, start: usize, start_char: char) -> Ranged<Token> {
+        self.tokenize_identifier_symbol(start, start_char)
+            .map(Token::Label)
     }
 
     fn tokenize_whitespace(&mut self, start: usize) -> Ranged<Token> {
@@ -340,7 +357,7 @@ impl<'a> Tokens<'a> {
         while self
             .chars
             .peek()
-            .map_or(false, |ch| matches!(ch, '\r' | '\n'))
+            .map_or(false, |ch| !matches!(ch, '\r' | '\n'))
         {
             self.chars.next();
         }
@@ -525,13 +542,13 @@ pub struct RegExLiteral {
 
 #[test]
 fn basics() {
-    let tokens = Tokens::new("a_09? + 1 - .2")
+    let tokens = Tokens::new("a_09_ + 1 - .2")
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(
         tokens,
         &[
-            Ranged::new(0..5, Token::Identifier(Symbol::from("a_09?"))),
+            Ranged::new(0..5, Token::Identifier(Symbol::from("a_09_"))),
             Ranged::new(5..6, Token::Whitespace),
             Ranged::new(6..7, Token::Char('+')),
             Ranged::new(7..8, Token::Whitespace),
@@ -542,14 +559,14 @@ fn basics() {
             Ranged::new(12..14, Token::Float(0.2)),
         ]
     );
-    let tokens = Tokens::new("a_09? + 1 - .2")
+    let tokens = Tokens::new("a_09_ + 1 - .2")
         .excluding_whitespace()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(
         tokens,
         &[
-            Ranged::new(0..5, Token::Identifier(Symbol::from("a_09?"))),
+            Ranged::new(0..5, Token::Identifier(Symbol::from("a_09_"))),
             Ranged::new(6..7, Token::Char('+')),
             Ranged::new(8..9, Token::Int(1)),
             Ranged::new(10..11, Token::Char('-')),

@@ -1,0 +1,121 @@
+
+while: {
+    src: r#"
+        var i = 0;
+        while i < 5 {
+            i = i + 1;
+        };
+        i
+    "#,
+    output: Int(5),
+}
+
+
+loop: {
+    src: r#"
+        var i = 0;
+        loop {
+            if i == 5 {
+                break;
+            };
+            i = i + 1;
+        };
+        i
+    "#,
+    output: Int(5),
+}
+
+loop_while: {
+    src: r#"
+        var i = 0;
+        loop {
+            i = i + 1;
+        } while i < 5;
+        i
+    "#,
+    output: Int(5),
+}
+
+loop_continue: {
+    src: r#"
+        var i = 0;
+        loop {
+            if i < 5 {
+                i = i + 1;
+                continue;
+            };
+            break;
+        };
+        i
+    "#,
+    output: Int(5),
+}
+
+loop_result: {
+    src: r#"
+        var i = 0;
+        loop {
+            if i < 5 {
+                i = i + 1;
+                continue;
+            };
+            break i;
+        }
+
+    "#,
+    output: Int(5),
+}
+
+loop_result_nil: {
+    src: r#"
+        var i = 0;
+        loop {
+            if i < 5 {
+                i = i + 1;
+                continue;
+            };
+            break;
+        }
+
+    "#,
+    output: Nil,
+}
+
+labeled_break: {
+    src: r#"
+        var x = 0;
+        var y = 0;
+        @outer: while y < 5 {
+            x = 0;
+            while x < 5 {
+                x = x + 1;
+                if x == 3 and y == 3 {
+                    break @outer true;
+                }
+            };
+            y = y + 1;
+        }
+
+    "#,
+    output: Bool(true),
+}
+
+labeled_continue: {
+    src: r#"
+        var y = 0;
+        var steps = 0;
+        @outer: while y < 3 {
+            var x = 0;
+            y = y + 1;
+            while x < 3 {
+                steps = steps + 1;
+                x = x + 1;
+                if x == 1 and y == 1 {
+                    continue @outer;
+                }
+            };
+        };
+        steps
+    "#,
+    output: Int(7),
+}

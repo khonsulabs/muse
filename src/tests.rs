@@ -26,7 +26,7 @@ fn budgeting() {
 
 #[test]
 fn module_budgeting() {
-    const MAX_OPS: usize = 100;
+    const MAX_OPS: usize = 22;
     let code = Compiler::compile(
         r"
             mod foo {
@@ -58,6 +58,7 @@ fn module_budgeting() {
             Err(err) => assert_eq!(err, Fault::NoBudget),
         }
     }
+    println!("Executed in {ops} steps");
     assert!(ops > 6);
     assert!(ops < MAX_OPS);
 }
