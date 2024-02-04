@@ -42,9 +42,9 @@ super_private: {
     src: r#"
         let a = 42;
         mod foo {
-            pub fn a => super.a;
+            pub fn test => super.a;
         };
-        foo.a()
+        foo.test()
     "#,
     output: Fault(UnknownSymbol("a")),
 }
@@ -69,4 +69,28 @@ mutate_module_var: {
         foo.a
     "#,
     output: Int(42),
+}
+
+pub_mod: {
+    src: r#"
+        mod foo {
+            pub mod bar {
+                pub let a = 42;
+            }
+        };
+        foo.bar.a
+    "#,
+    output: Int(42),
+}
+
+child_mod_private: {
+    src: r#"
+        mod foo {
+            mod bar {
+                pub let a = 42;
+            }
+        };
+        foo.bar.a
+    "#,
+    output: Fault(UnknownSymbol("bar")),
 }

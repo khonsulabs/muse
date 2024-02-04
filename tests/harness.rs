@@ -16,7 +16,7 @@ use serde::Deserialize;
 
 fn main() {
     let filter = std::env::args().nth(1).unwrap_or_default();
-    // let filter = String::from("super_private");
+    // let filter = String::from("child_mod_private");
     for entry in std::fs::read_dir("tests/cases").unwrap() {
         let entry = entry.unwrap().path();
         if entry.extension().map_or(false, |ext| ext == "rsn") {

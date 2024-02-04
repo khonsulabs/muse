@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(not(feature = "dispatched"))]
 use self::bitcode::trusted_loaded_source_to_value;
 use self::bitcode::{BinaryKind, BitcodeFunction, Label, Op, OpDestination, ValueOrSource};
-use crate::compiler::{BitcodeModule, UnaryKind};
+use crate::compiler::{BitcodeModule, BlockDeclaration, UnaryKind};
 #[cfg(not(feature = "dispatched"))]
 use crate::list::List;
 #[cfg(not(feature = "dispatched"))]
@@ -202,7 +202,7 @@ impl Vm {
 
     pub fn resume(&mut self) -> Result<Value, Fault> {
         loop {
-            match self.resume_async_inner() {
+            match self.resume_async_inner(0) {
                 Err(Fault::Waiting) => {
                     self.check_timeout()?;
 
@@ -214,13 +214,12 @@ impl Vm {
     }
 
     #[cfg(feature = "dispatched")]
-    fn resume_async_inner(&mut self) -> Result<Value, Fault> {
+    fn resume_async_inner(&mut self, base_frame: usize) -> Result<Value, Fault> {
         if self.has_anonymous_frame {
             self.current_frame -= 1;
         }
-        let base_frame = self.current_frame;
-        let mut code_frame = base_frame;
-        let mut code = self.code[self.frames[base_frame].code.expect("missing frame code").0]
+        let mut code_frame = self.current_frame;
+        let mut code = self.code[self.frames[code_frame].code.expect("missing frame code").0]
             .code
             .clone();
         loop {
@@ -255,7 +254,7 @@ impl Vm {
             }
         }
 
-        if self.current_frame == 0 {
+        if base_frame == 0 {
             self.execute_until = None;
         }
         Ok(self.registers[0].take())
@@ -325,14 +324,21 @@ impl Vm {
         current_function.call(self, arity)
     }
 
-    pub fn declare_variable(&mut self, name: Symbol) -> Result<Stack, Fault> {
+    pub fn declare_variable(&mut self, name: Symbol, mutable: bool) -> Result<Stack, Fault> {
         let current_frame = &mut self.frames[self.current_frame];
         if current_frame.end < self.max_stack {
-            Ok(*current_frame.variables.entry(name).or_insert_with(|| {
-                let index = Stack(current_frame.end - current_frame.start);
-                current_frame.end += 1;
-                index
-            }))
+            Ok(current_frame
+                .variables
+                .entry(name)
+                .or_insert_with(|| {
+                    let index = Stack(current_frame.end - current_frame.start);
+                    current_frame.end += 1;
+                    BlockDeclaration {
+                        stack: index,
+                        mutable,
+                    }
+                })
+                .stack)
         } else {
             Err(Fault::StackOverflow)
         }
@@ -378,9 +384,9 @@ impl Vm {
 
     pub fn resolve(&self, name: &Symbol) -> Result<Value, Fault> {
         let current_frame = &self.frames[self.current_frame];
-        if let Some(stack) = current_frame.variables.get(name) {
+        if let Some(decl) = current_frame.variables.get(name) {
             self.current_frame()
-                .get(stack.0)
+                .get(decl.stack.0)
                 .cloned()
                 .ok_or(Fault::OutOfBounds)
         } else {
@@ -399,6 +405,36 @@ impl Vm {
                     .as_ref()
                     .and_then(|parent| parent.upgrade().map(Value::Dynamic))
                     .unwrap_or_default())
+            } else {
+                Err(Fault::UnknownSymbol(name.clone()))
+            }
+        }
+    }
+
+    pub fn assign(&mut self, name: &Symbol, value: Value) -> Result<(), Fault> {
+        let current_frame = &mut self.frames[self.current_frame];
+        if let Some(decl) = current_frame.variables.get_mut(name) {
+            if decl.mutable {
+                let stack = decl.stack;
+                *self
+                    .current_frame_mut()
+                    .get_mut(stack.0)
+                    .ok_or(Fault::OutOfBounds)? = value;
+                Ok(())
+            } else {
+                Err(Fault::NotMutable)
+            }
+        } else {
+            let module = self.modules[self.frames[self.current_frame].module]
+                .downcast_ref::<Module>()
+                .expect("always a module");
+            if let Some(decl) = module.declarations().get_mut(name) {
+                if decl.mutable {
+                    decl.value = value;
+                    Ok(())
+                } else {
+                    Err(Fault::NotMutable)
+                }
             } else {
                 Err(Fault::UnknownSymbol(name.clone()))
             }
@@ -505,13 +541,12 @@ impl Vm {
 
 #[cfg(not(feature = "dispatched"))]
 impl Vm {
-    fn resume_async_inner(&mut self) -> Result<Value, Fault> {
+    fn resume_async_inner(&mut self, base_frame: usize) -> Result<Value, Fault> {
         if self.has_anonymous_frame {
             self.current_frame -= 1;
         }
-        let base_frame = self.current_frame;
-        let mut code_frame = base_frame;
-        let mut code = self.frames[base_frame].code.expect("missing frame code");
+        let mut code_frame = self.current_frame;
+        let mut code = self.frames[code_frame].code.expect("missing frame code");
         loop {
             self.budget.charge()?;
             let instruction = self.frames[code_frame].instruction;
@@ -556,7 +591,7 @@ impl Vm {
             Ordering::Equal => return Ok(StepResult::Complete),
             Ordering::Greater => return Err(Fault::InvalidInstructionAddress),
         };
-        println!("Executing {instruction:?}");
+        // println!("Executing {instruction:?}");
         let next_instruction = StepResult::from(address.checked_add(1));
         let result = match instruction {
             LoadedOp::Return => return Ok(StepResult::Complete),
@@ -588,6 +623,9 @@ impl Vm {
                 loaded.dest,
                 |vm, lhs, rhs| Ok(Value::Bool(lhs.truthy(vm) ^ rhs.truthy(vm))),
             ),
+            LoadedOp::Assign(loaded) => {
+                self.op_assign(code_index, loaded.op1, loaded.op2, loaded.dest)
+            }
             LoadedOp::Add(loaded) => self.op_binop(
                 code_index,
                 loaded.op1,
@@ -739,7 +777,7 @@ impl Vm {
             }));
             self.frames[self.current_frame].module = module_index.get();
             self.frames[executing_frame].loading_module = Some(module_index);
-            let _init_result = self.resume_async_inner()?;
+            let _init_result = self.resume_async_inner(self.current_frame)?;
             module_index
         };
 
@@ -909,6 +947,25 @@ impl Vm {
         let result = op(self, s1, s2)?;
 
         self.op_store(code_index, result, dest)
+    }
+
+    fn op_assign(
+        &mut self,
+        code_index: usize,
+        target: LoadedSource,
+        value: LoadedSource,
+        dest: OpDestination,
+    ) -> Result<(), Fault> {
+        let (target, value) = try_all!(
+            self.op_load(code_index, target),
+            self.op_load(code_index, value)
+        );
+        let Some(target) = target.as_symbol() else {
+            return Err(Fault::ExpectedSymbol);
+        };
+
+        self.op_store(code_index, &value, dest)?;
+        self.assign(target, value)
     }
 
     fn op_jump(
@@ -1201,7 +1258,7 @@ struct Frame {
     end: usize,
     instruction: usize,
     code: Option<CodeIndex>,
-    variables: Map<Symbol, Stack>,
+    variables: Map<Symbol, BlockDeclaration>,
     module: usize,
     loading_module: Option<NonZeroUsize>,
 }
@@ -1435,6 +1492,7 @@ impl CodeData {
                     BinaryKind::JumpIf => LoadedOp::JumpIf(binary),
                     BinaryKind::JumpIfNot => LoadedOp::JumpIfNot(binary),
                     BinaryKind::LogicalXor => LoadedOp::LogicalXor(binary),
+                    BinaryKind::Assign => LoadedOp::Assign(binary),
                     BinaryKind::Bitwise(kind) => match kind {
                         BitwiseKind::And => LoadedOp::BitwiseAnd(binary),
                         BitwiseKind::Or => LoadedOp::BitwiseOr(binary),
@@ -1472,10 +1530,8 @@ impl CodeData {
             }
             Op::LoadModule { module, dest } => {
                 let module = self.push_module(module);
-                self.push_loaded(LoadedOp::LoadModule {
-                    module,
-                    dest: *dest,
-                });
+                let dest = self.load_dest(dest);
+                self.push_loaded(LoadedOp::LoadModule { module, dest });
             }
         }
     }
@@ -1661,7 +1717,7 @@ impl Future for ExecuteAsync<'_> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         // Temporarily replace the VM's waker with this context's waker.
         let previous_waker = std::mem::replace(&mut self.0.waker, cx.waker().clone());
-        let result = match self.0.resume_async_inner() {
+        let result = match self.0.resume_async_inner(0) {
             Err(Fault::Waiting) => Poll::Pending,
             other => Poll::Ready(other),
         };
@@ -1698,6 +1754,7 @@ enum LoadedOp {
     NewMap(LoadedUnary),
     NewList(LoadedUnary),
     LogicalXor(LoadedBinary),
+    Assign(LoadedBinary),
     Add(LoadedBinary),
     Subtract(LoadedBinary),
     Multiply(LoadedBinary),

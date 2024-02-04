@@ -1114,6 +1114,17 @@ impl PrefixParselet for Mod {
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        Self::parse_mod(false, &token, tokens, config)
+    }
+}
+
+impl Mod {
+    fn parse_mod(
+        publish: bool,
+        token: &Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
         let name_token = tokens.next()?;
         let Token::Identifier(name) = name_token.0 else {
             return Err(name_token.map(|_| Error::ExpectedName));
@@ -1129,7 +1140,7 @@ impl PrefixParselet for Mod {
         Ok(tokens.ranged(
             token.range().start..,
             Expression::Module(Box::new(ModuleDefinition {
-                publish: false,
+                publish,
                 name: Ranged::new(name_token.1, name),
                 contents,
             })),
@@ -1163,6 +1174,8 @@ impl PrefixParselet for Pub {
             parse_variable(false, true, token.range().start, tokens, config)
         } else if keyword == Symbol::var_symbol() {
             parse_variable(true, true, token.range().start, tokens, config)
+        } else if keyword == Symbol::mod_symbol() {
+            Mod::parse_mod(true, &token, tokens, config)
         } else {
             return Err(keyword_token.map(|_| Error::ExpectedDeclaration));
         }

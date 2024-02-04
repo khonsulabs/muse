@@ -477,6 +477,7 @@ impl From<&'_ Code> for BitcodeBlock {
                 LoadedOp::NewMap(loaded) => loaded.as_op(UnaryKind::NewMap, code),
                 LoadedOp::NewList(loaded) => loaded.as_op(UnaryKind::NewList, code),
                 LoadedOp::LogicalXor(loaded) => loaded.as_op(BinaryKind::LogicalXor, code),
+                LoadedOp::Assign(loaded) => loaded.as_op(BinaryKind::Assign, code),
                 LoadedOp::Add(loaded) => loaded.as_op(BinaryKind::Add, code),
                 LoadedOp::Subtract(loaded) => loaded.as_op(BinaryKind::Subtract, code),
                 LoadedOp::Multiply(loaded) => loaded.as_op(BinaryKind::Multiply, code),
@@ -642,6 +643,7 @@ pub enum BinaryKind {
     JumpIf,
     JumpIfNot,
     LogicalXor,
+    Assign,
     Bitwise(BitwiseKind),
     Compare(CompareKind),
 }

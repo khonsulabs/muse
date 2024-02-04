@@ -1,3 +1,4 @@
+use crate::compiler::Compiler;
 use crate::vm::bitcode::BitcodeBlock;
 use crate::vm::{Code, Fault, Register, Vm};
 
@@ -21,4 +22,42 @@ fn budgeting() {
     }
     vm.increase_budget(1);
     assert_eq!(vm.resume().unwrap().as_i64(), Some(COUNT_TO));
+}
+
+#[test]
+fn module_budgeting() {
+    const MAX_OPS: usize = 100;
+    let code = Compiler::compile(
+        r"
+            mod foo {
+                pub var a = 1;
+                a = a + 1;
+                a = a + 1;
+                a = a + 1;
+                a = a + 1;
+            };
+
+            foo.a
+        ",
+    )
+    .unwrap();
+    let mut vm = Vm::default();
+    // Turn on budgeting, but don't give any budget.
+    vm.increase_budget(0);
+    assert_eq!(vm.execute(&code).unwrap_err(), Fault::NoBudget);
+    let mut ops = 0;
+    for _ in 0..MAX_OPS {
+        ops += 1;
+        // Step through by allowing one op at a time.
+        vm.increase_budget(1);
+        match vm.resume() {
+            Ok(value) => {
+                assert_eq!(value.as_i64(), Some(5));
+                break;
+            }
+            Err(err) => assert_eq!(err, Fault::NoBudget),
+        }
+    }
+    assert!(ops > 6);
+    assert!(ops < MAX_OPS);
 }

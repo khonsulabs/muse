@@ -65,10 +65,10 @@ impl Compiler {
     }
 }
 
-#[derive(Debug)]
-struct BlockDeclaration {
-    stack: Stack,
-    mutable: bool,
+#[derive(Debug, Clone, Copy)]
+pub struct BlockDeclaration {
+    pub stack: Stack,
+    pub mutable: bool,
 }
 
 struct LocalDeclaration {
@@ -257,9 +257,13 @@ impl<'a> Scope<'a> {
                             .push(Ranged::new(expr.range(), Error::VariableNotMutable));
                     }
                 } else {
-                    self.compiler
-                        .errors
-                        .push(Ranged::new(expr.range(), Error::UnknownVariable));
+                    self.compile_expression(&assign.value, OpDestination::Register(Register(1)));
+                    self.compiler.code.push(Op::BinOp {
+                        op1: ValueOrSource::Symbol(assign.target.name.clone()),
+                        op2: ValueOrSource::Register(Register(1)),
+                        dest,
+                        kind: BinaryKind::Assign,
+                    });
                 }
             }
             Expression::Unary(unary) => self.compile_unary(unary, dest),
@@ -365,15 +369,13 @@ impl<'a> Scope<'a> {
     }
 
     fn declare_variable(&mut self, decl: &Variable, dest: OpDestination) {
+        let stack = self.new_temporary();
+        self.compile_expression(&decl.value, OpDestination::Stack(stack));
         if decl.publish {
-            let stack = self.new_temporary();
-            self.compile_expression(&decl.value, OpDestination::Stack(stack));
             self.compiler
                 .code
                 .declare(decl.name.clone(), decl.mutable, stack, dest);
         } else {
-            let stack = self.new_temporary();
-            self.compile_expression(&decl.value, OpDestination::Stack(stack));
             self.declare_local(decl.name.clone(), decl.mutable, stack, dest);
         }
     }

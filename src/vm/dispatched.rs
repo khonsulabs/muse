@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::fmt::Debug;
+use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
@@ -7,14 +8,17 @@ use super::bitcode::{
     trusted_loaded_source_to_value, BinaryKind, BitcodeFunction, Label, Op, OpDestination,
     ValueOrSource,
 };
-use super::{precompiled_regex, CodeData, Function, LoadedOp, PrecompiledRegex, Register, Stack};
-use crate::compiler::UnaryKind;
+use super::{
+    precompiled_regex, Code, CodeData, Function, LoadedOp, Module, PrecompiledRegex, Register,
+    Stack,
+};
+use crate::compiler::{BitcodeModule, UnaryKind};
 use crate::list::List;
 use crate::map::Map;
 use crate::string::MuseString;
 use crate::symbol::Symbol;
 use crate::syntax::{BitwiseKind, CompareKind};
-use crate::value::Value;
+use crate::value::{Dynamic, Value};
 use crate::vm::{Fault, Vm};
 
 impl CodeData {
@@ -24,13 +28,19 @@ impl CodeData {
             LoadedOp::Return => {
                 self.push_dispatched(Return);
             }
-            LoadedOp::Declare { name, value, dest } => {
+            LoadedOp::Declare {
+                name,
+                mutable,
+                value,
+                dest,
+            } => {
                 let name = self.symbols[name].clone();
                 match_declare_function(
                     &trusted_loaded_source_to_value(&value, self),
                     &dest,
                     self,
                     &name,
+                    mutable,
                 );
             }
             LoadedOp::Truthy(loaded) => match_truthy(
@@ -79,6 +89,12 @@ impl CodeData {
                 self,
             ),
             LoadedOp::LogicalXor(loaded) => match_logical_xor(
+                &trusted_loaded_source_to_value(&loaded.op1, self),
+                &trusted_loaded_source_to_value(&loaded.op2, self),
+                &loaded.dest,
+                self,
+            ),
+            LoadedOp::Assign(loaded) => match_assign(
                 &trusted_loaded_source_to_value(&loaded.op1, self),
                 &trusted_loaded_source_to_value(&loaded.op2, self),
                 &loaded.dest,
@@ -216,6 +232,9 @@ impl CodeData {
                 &loaded.dest,
                 self,
             ),
+            LoadedOp::LoadModule { module, dest } => {
+                match_load_module(&self.modules[module].clone(), &dest, self);
+            }
         }
     }
 
@@ -754,6 +773,40 @@ where
     }
 }
 
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
+pub struct Assign<Lhs, Rhs, Dest> {
+    pub lhs: Lhs,
+    pub rhs: Rhs,
+    pub dest: Dest,
+}
+
+impl<Lhs, Rhs, Dest> Instruction for Assign<Lhs, Rhs, Dest>
+where
+    Lhs: Source,
+    Rhs: Source,
+    Dest: Destination,
+{
+    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+        let name = self.lhs.load(vm)?;
+        let name = name.as_symbol().ok_or(Fault::ExpectedSymbol)?;
+        let value = self.rhs.load(vm)?;
+        vm.assign(name, value.clone())?;
+
+        self.dest.store(vm, value)?;
+
+        Ok(ControlFlow::Continue(()))
+    }
+
+    fn as_op(&self) -> Op {
+        Op::BinOp {
+            op1: self.lhs.as_source(),
+            op2: self.rhs.as_source(),
+            dest: self.dest.as_dest(),
+            kind: BinaryKind::LogicalXor,
+        }
+    }
+}
+
 declare_binop_instruction!(Add, add, BinaryKind::Add);
 declare_binop_instruction!(Subtract, sub, BinaryKind::Subtract);
 declare_binop_instruction!(Multiply, mul, BinaryKind::Multiply);
@@ -871,6 +924,18 @@ impl Source for Symbol {
 
     fn as_source(&self) -> ValueOrSource {
         ValueOrSource::Symbol(self.clone())
+    }
+}
+
+impl Source for Function {
+    fn load(&self, vm: &Vm) -> Result<Value, Fault> {
+        Ok(Value::dynamic(
+            self.clone().in_module(vm.frames[vm.current_frame].module),
+        ))
+    }
+
+    fn as_source(&self) -> ValueOrSource {
+        ValueOrSource::Function(BitcodeFunction::from(self))
     }
 }
 
@@ -994,7 +1059,7 @@ macro_rules! decode_source {
             ValueOrSource::RegEx(source) => $next_fn($source, $code $(, $($arg)*)?, precompiled_regex(source)),
             ValueOrSource::String(source) => $next_fn($source, $code $(, $($arg)*)?, Value::dynamic(MuseString::from(source.clone()))),
             ValueOrSource::Symbol(source) => $next_fn($source, $code $(, $($arg)*)?, source.clone()),
-            ValueOrSource::Function(source) => $next_fn($source, $code $(, $($arg)*)?, Value::dynamic(Function::from(source))),
+            ValueOrSource::Function(source) => $next_fn($source, $code $(, $($arg)*)?, Function::from(source)),
             ValueOrSource::Register(source) => $next_fn($source, $code $(, $($arg)*)?, *source),
             ValueOrSource::Stack(source) => $next_fn($source, $code $(, $($arg)*)?, *source),
             ValueOrSource::Label(source) => $next_fn($source, $code $(, $($arg)*)?, *source),
@@ -1052,13 +1117,14 @@ decode_sd_simple!(match_logical_not, compile_logical_not, LogicalNot);
 decode_sd_simple!(match_bitwise_not, compile_bitwise_not, BitwiseNot);
 decode_sd_simple!(match_negate, compile_negate, Negate);
 
-decode_sd!(match_declare_function, compile_declare_function, name: &Symbol);
+decode_sd!(match_declare_function, compile_declare_function, name: &Symbol, mutable: bool);
 
 fn compile_declare_function<Value, Dest>(
     _dest: &OpDestination,
     code: &mut CodeData,
     f: Value,
     name: &Symbol,
+    mutable: bool,
     dest: Dest,
 ) where
     Value: Source,
@@ -1066,6 +1132,7 @@ fn compile_declare_function<Value, Dest>(
 {
     code.push_dispatched(Declare {
         name: name.clone(),
+        mutable,
         declaration: f,
         dest,
     });
@@ -1278,6 +1345,7 @@ macro_rules! define_match_binop {
 }
 
 define_match_binop!(match_logical_xor, compile_logical_xor, LogicalXor);
+define_match_binop!(match_assign, compile_assign, Assign);
 define_match_binop!(match_add, compile_add, Add);
 define_match_binop!(match_subtract, compile_subtract, Subtract);
 define_match_binop!(match_multiply, compile_multiply, Multiply);
@@ -1296,9 +1364,69 @@ define_match_binop!(match_bitwise_xor, compile_bitwise_xor, BitwiseXor);
 define_match_binop!(match_bitwise_shl, compile_bitwise_shl, ShiftLeft);
 define_match_binop!(match_bitwise_shr, compile_bitwise_shr, ShiftRight);
 
+fn match_load_module(module: &BitcodeModule, dest: &OpDestination, code: &mut CodeData) {
+    decode_dest!(dest, module, code, compile_load_module);
+}
+
+fn compile_load_module<Dest>(module: &BitcodeModule, code: &mut CodeData, dest: Dest)
+where
+    Dest: Destination,
+{
+    code.push_dispatched(LoadModule {
+        bitcode: module.clone(),
+        dest,
+    });
+}
+
+#[derive(Debug)]
+struct LoadModule<Dest> {
+    bitcode: BitcodeModule,
+    dest: Dest,
+}
+
+impl<Dest> Instruction for LoadModule<Dest>
+where
+    Dest: Destination,
+{
+    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+        let loading_module = if let Some(index) = vm.frames[vm.current_frame].loading_module.take()
+        {
+            index
+        } else {
+            // Replace the current module and stage the initializer
+            let executing_frame = vm.current_frame;
+            let initializer = Code::from(&self.bitcode.initializer);
+            let code = vm.push_code(&initializer, None);
+            vm.enter_frame(Some(code))?;
+            vm.allocate(initializer.data.stack_requirement)?;
+            let module_index = NonZeroUsize::new(vm.modules.len()).expect("always at least one");
+            vm.modules.push(Dynamic::new(Module {
+                parent: Some(vm.modules[vm.frames[executing_frame].module].downgrade()),
+                ..Module::default()
+            }));
+            vm.frames[vm.current_frame].module = module_index.get();
+            vm.frames[executing_frame].loading_module = Some(module_index);
+            let _init_result = vm.resume_async_inner(vm.current_frame)?;
+            module_index
+        };
+
+        self.dest
+            .store(vm, Value::Dynamic(vm.modules[loading_module.get()].clone()))?;
+        Ok(ControlFlow::Continue(()))
+    }
+
+    fn as_op(&self) -> Op {
+        Op::LoadModule {
+            module: self.bitcode.clone(),
+            dest: self.dest.as_dest(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Declare<Value, Dest> {
     name: Symbol,
+    mutable: bool,
     declaration: Value,
     dest: Dest,
 }
@@ -1310,7 +1438,7 @@ where
 {
     fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
         let value = self.declaration.load(vm)?;
-        vm.declare(self.name.clone(), value.clone());
+        vm.declare_inner(self.name.clone(), value.clone(), self.mutable);
 
         self.dest.store(vm, value)?;
 
@@ -1320,6 +1448,7 @@ where
     fn as_op(&self) -> Op {
         Op::Declare {
             name: self.name.clone(),
+            mutable: self.mutable,
             value: self.declaration.as_source(),
             dest: self.dest.as_dest(),
         }
