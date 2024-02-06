@@ -88,6 +88,11 @@ impl CodeData {
                 &loaded.dest,
                 self,
             ),
+            LoadedOp::SetExceptionHandler(loaded) => match_set_exception_handler(
+                &trusted_loaded_source_to_value(&loaded.op, self),
+                &loaded.dest,
+                self,
+            ),
             LoadedOp::LogicalXor(loaded) => match_logical_xor(
                 &trusted_loaded_source_to_value(&loaded.op1, self),
                 &trusted_loaded_source_to_value(&loaded.op2, self),
@@ -167,6 +172,12 @@ impl CodeData {
                 self,
             ),
             LoadedOp::Equal(loaded) => match_equal(
+                &trusted_loaded_source_to_value(&loaded.op1, self),
+                &trusted_loaded_source_to_value(&loaded.op2, self),
+                &loaded.dest,
+                self,
+            ),
+            LoadedOp::NotEqual(loaded) => match_not_equal(
                 &trusted_loaded_source_to_value(&loaded.op1, self),
                 &trusted_loaded_source_to_value(&loaded.op2, self),
                 &loaded.dest,
@@ -572,6 +583,42 @@ where
 }
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
+pub struct SetExceptionHandler<Handler, Dest> {
+    pub handler: Handler,
+    pub previous_handler: Dest,
+}
+
+impl<Handler, Dest> Instruction for SetExceptionHandler<Handler, Dest>
+where
+    Handler: Source,
+    Dest: Destination,
+{
+    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+        let handler = self.handler.load(vm)?;
+        let handler = handler.as_usize().and_then(NonZeroUsize::new);
+
+        let previous_handler_address =
+            std::mem::replace(&mut vm.frames[vm.current_frame].exception_handler, handler);
+        self.previous_handler
+            .store(
+                vm,
+                previous_handler_address
+                    .and_then(|addr| Value::try_from(addr.get()).ok())
+                    .unwrap_or_default(),
+            )
+            .map(|()| ControlFlow::Continue(()))
+    }
+
+    fn as_op(&self) -> Op {
+        Op::Unary {
+            op: self.handler.as_source(),
+            dest: self.previous_handler.as_dest(),
+            kind: UnaryKind::SetExceptionHandler,
+        }
+    }
+}
+
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
 pub struct Resolve<From, Dest> {
     pub source: From,
     pub dest: Dest,
@@ -703,7 +750,6 @@ macro_rules! declare_comparison_instruction {
 
 declare_comparison_instruction!(LessThanOrEqual, Ordering::Less | Ordering::Equal);
 declare_comparison_instruction!(LessThan, Ordering::Less);
-declare_comparison_instruction!(Equal, Ordering::Equal);
 declare_comparison_instruction!(GreaterThan, Ordering::Greater);
 declare_comparison_instruction!(GreaterThanOrEqual, Ordering::Greater | Ordering::Equal);
 
@@ -772,6 +818,46 @@ where
         }
     }
 }
+
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
+pub struct Eq<Lhs, Rhs, Dest, const NOT: bool = false> {
+    pub lhs: Lhs,
+    pub rhs: Rhs,
+    pub dest: Dest,
+}
+
+impl<Lhs, Rhs, Dest, const NOT: bool> Instruction for Eq<Lhs, Rhs, Dest, NOT>
+where
+    Lhs: Source,
+    Rhs: Source,
+    Dest: Destination,
+{
+    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+        let (lhs, rhs) = try_all!(self.lhs.load(vm), self.rhs.load(vm));
+
+        let equals = lhs.equals(Some(vm), &rhs)?;
+
+        if NOT {
+            self.dest.store(vm, Value::Bool(!equals))?;
+        } else {
+            self.dest.store(vm, Value::Bool(equals))?;
+        }
+
+        Ok(ControlFlow::Continue(()))
+    }
+
+    fn as_op(&self) -> Op {
+        Op::BinOp {
+            op1: self.lhs.as_source(),
+            op2: self.rhs.as_source(),
+            dest: self.dest.as_dest(),
+            kind: BinaryKind::LogicalXor,
+        }
+    }
+}
+
+pub type Equal<Lhs, Rhs, Dest> = Eq<Lhs, Rhs, Dest, false>;
+pub type NotEqual<Lhs, Rhs, Dest> = Eq<Lhs, Rhs, Dest, true>;
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
 pub struct Assign<Lhs, Rhs, Dest> {
@@ -1195,6 +1281,23 @@ fn compile_new_list<Arity, Dest>(
     });
 }
 
+decode_sd!(match_set_exception_handler, compile_set_exception_handler);
+
+fn compile_set_exception_handler<Handler, Dest>(
+    _dest: &OpDestination,
+    code: &mut CodeData,
+    handler: Handler,
+    previous_handler: Dest,
+) where
+    Handler: Source,
+    Dest: Destination,
+{
+    code.push_dispatched(SetExceptionHandler {
+        handler,
+        previous_handler,
+    });
+}
+
 macro_rules! decode_ssd {
     ($decode_name:ident, $compile_name:ident $(, $($name:ident: $type:ty),+)?) => {
         fn $decode_name(
@@ -1356,6 +1459,7 @@ define_match_binop!(match_power, compile_power, Power);
 define_match_binop!(match_lte, compile_lte, LessThanOrEqual);
 define_match_binop!(match_lt, compile_lt, LessThan);
 define_match_binop!(match_equal, compile_equal, Equal);
+define_match_binop!(match_not_equal, compile_not_equal, NotEqual);
 define_match_binop!(match_gt, compile_gt, GreaterThan);
 define_match_binop!(match_gte, compile_gte, GreaterThanOrEqual);
 define_match_binop!(match_bitwise_and, compile_bitwise_and, BitwiseAnd);

@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use self::bitcode::trusted_loaded_source_to_value;
 use self::bitcode::{BinaryKind, BitcodeFunction, Label, Op, OpDestination, ValueOrSource};
 use crate::compiler::{BitcodeModule, BlockDeclaration, UnaryKind};
-#[cfg(not(feature = "dispatched"))]
 use crate::list::List;
 #[cfg(not(feature = "dispatched"))]
 use crate::map;
@@ -225,19 +224,27 @@ impl Vm {
         loop {
             self.budget.charge()?;
             let instruction = self.frames[code_frame].instruction;
-            match self.step(&code, instruction)? {
-                StepResult::Complete if code_frame >= base_frame && code_frame > 0 => {
+            match self.step(&code, instruction) {
+                Ok(StepResult::Complete) if code_frame >= base_frame && code_frame > 0 => {
                     self.exit_frame()?;
                     if self.current_frame < base_frame {
                         break;
                     }
                 }
-                StepResult::Complete => break,
-                StepResult::NextAddress(addr) => {
+                Ok(StepResult::Complete) => break,
+                Ok(StepResult::NextAddress(addr)) => {
                     // Only step to the next address if the frame's instruction
                     // wasn't altered by a jump.
                     if self.frames[code_frame].instruction == instruction {
                         self.frames[code_frame].instruction = addr;
+                    }
+                }
+                Err(err) => {
+                    if let Some(exception_target) = self.frames[code_frame].exception_handler {
+                        self[Register(0)] = err.as_value();
+                        self.frames[code_frame].instruction = exception_target.get();
+                    } else {
+                        return Err(err);
                     }
                 }
             }
