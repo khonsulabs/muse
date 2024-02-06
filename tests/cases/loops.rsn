@@ -135,7 +135,7 @@ for_in_map: {
     src: r#"
         var total = 0;
         for (k, v) in {:a: 1, :b: 2, :c: 3} {
-            if !(k == :b) {
+            if k != :b {
                 total = total + v;
             }
         };

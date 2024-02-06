@@ -288,6 +288,7 @@ pub enum CompareKind {
     LessThanOrEqual,
     LessThan,
     Equal,
+    NotEqual,
     GreaterThan,
     GreaterThanOrEqual,
 }
@@ -1840,6 +1841,11 @@ impl_infix_parselet!(
     Token::GreaterThanOrEqual,
     BinaryKind::Compare(CompareKind::GreaterThanOrEqual)
 );
+impl_infix_parselet!(
+    NotEqual,
+    Token::NotEqual,
+    BinaryKind::Compare(CompareKind::NotEqual)
+);
 
 struct Assign;
 
@@ -1900,6 +1906,7 @@ fn parselets() -> Parselets {
         LessThanOrEqual,
         LessThan,
         Equal,
+        NotEqual,
         GreaterThan,
         GreaterThanOrEqual
     ]);

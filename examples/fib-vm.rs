@@ -1,3 +1,4 @@
+use muse::symbol::Symbol;
 use muse::syntax::CompareKind::LessThanOrEqual;
 use muse::vm::bitcode::BitcodeBlock;
 use muse::vm::{Code, Function, Register as R, Vm};
@@ -37,7 +38,7 @@ fn main() {
 
     let mut main = BitcodeBlock::default();
     main.copy(35, R(0));
-    main.resolve("fib", R(1));
+    main.resolve(Symbol::from("fib"), R(1));
     main.call(R(1), 1);
     let code = Code::from(&main);
     dbg!(vm.execute(&code).unwrap());

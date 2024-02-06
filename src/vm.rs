@@ -703,11 +703,23 @@ impl Vm {
                     matches!(ord, Ordering::Less)
                 })
             }
-            LoadedOp::Equal(loaded) => {
-                self.op_compare(code_index, loaded.op1, loaded.op2, loaded.dest, |ord| {
-                    matches!(ord, Ordering::Equal)
-                })
-            }
+            LoadedOp::Equal(loaded) => self.op_binop(
+                code_index,
+                loaded.op1,
+                loaded.op2,
+                loaded.dest,
+                |vm, lhs, rhs| lhs.equals(Some(vm), &rhs).map(Value::Bool),
+            ),
+            LoadedOp::NotEqual(loaded) => self.op_binop(
+                code_index,
+                loaded.op1,
+                loaded.op2,
+                loaded.dest,
+                |vm, lhs, rhs| {
+                    lhs.equals(Some(vm), &rhs)
+                        .map(|result| Value::Bool(!result))
+                },
+            ),
             LoadedOp::GreaterThan(loaded) => {
                 self.op_compare(code_index, loaded.op1, loaded.op2, loaded.dest, |ord| {
                     matches!(ord, Ordering::Greater)
@@ -1574,6 +1586,7 @@ impl CodeData {
                         CompareKind::LessThanOrEqual => LoadedOp::LessThanOrEqual(binary),
                         CompareKind::LessThan => LoadedOp::LessThan(binary),
                         CompareKind::Equal => LoadedOp::Equal(binary),
+                        CompareKind::NotEqual => LoadedOp::NotEqual(binary),
                         CompareKind::GreaterThan => LoadedOp::GreaterThan(binary),
                         CompareKind::GreaterThanOrEqual => LoadedOp::GreaterThanOrEqual(binary),
                     },
@@ -1840,6 +1853,7 @@ enum LoadedOp {
     LessThanOrEqual(LoadedBinary),
     LessThan(LoadedBinary),
     Equal(LoadedBinary),
+    NotEqual(LoadedBinary),
     GreaterThan(LoadedBinary),
     GreaterThanOrEqual(LoadedBinary),
     Call {

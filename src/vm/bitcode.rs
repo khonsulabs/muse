@@ -57,12 +57,13 @@ impl_from!(ValueOrSource, u32, UInt);
 impl_from!(ValueOrSource, u64, UInt);
 impl_from!(ValueOrSource, f64, Float);
 impl_from!(ValueOrSource, Symbol, Symbol);
-impl_from!(ValueOrSource, &'_ str, Symbol);
+// impl_from!(ValueOrSource, &'_ str, Symbol);
 impl_from!(ValueOrSource, Register, Register);
 impl_from!(ValueOrSource, Stack, Stack);
 impl_from!(ValueOrSource, Label, Label);
 impl_from!(ValueOrSource, bool, Bool);
 impl_from!(ValueOrSource, BitcodeFunction, Function);
+impl_from!(ValueOrSource, RegExLiteral, RegEx);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum OpDestination {
@@ -299,6 +300,13 @@ impl BitcodeBlock {
         });
     }
 
+    pub fn load_module(&mut self, module: BitcodeModule, dest: impl Into<OpDestination>) {
+        self.push(Op::LoadModule {
+            module,
+            dest: dest.into(),
+        });
+    }
+
     pub fn copy(&mut self, source: impl Into<ValueOrSource>, dest: impl Into<OpDestination>) {
         self.push(Op::Unary {
             op: source.into(),
@@ -369,6 +377,20 @@ impl BitcodeBlock {
 
     pub fn label(&mut self, label: Label) {
         self.push(Op::Label(label));
+    }
+
+    pub fn assign(
+        &mut self,
+        target: impl Into<ValueOrSource>,
+        value: impl Into<ValueOrSource>,
+        dest: impl Into<OpDestination>,
+    ) {
+        self.push(Op::BinOp {
+            op1: target.into(),
+            op2: value.into(),
+            dest: dest.into(),
+            kind: BinaryKind::Assign,
+        });
     }
 
     pub fn jump_if(
@@ -523,6 +545,9 @@ impl From<&'_ Code> for BitcodeBlock {
                 }
                 LoadedOp::Equal(loaded) => {
                     loaded.as_op(BinaryKind::Compare(CompareKind::Equal), code)
+                }
+                LoadedOp::NotEqual(loaded) => {
+                    loaded.as_op(BinaryKind::Compare(CompareKind::NotEqual), code)
                 }
                 LoadedOp::GreaterThan(loaded) => {
                     loaded.as_op(BinaryKind::Compare(CompareKind::GreaterThan), code)

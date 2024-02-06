@@ -186,53 +186,26 @@ impl<'a> Scope<'a> {
         match &**expr {
             Expression::Nil => self.compiler.code.copy((), dest),
             Expression::Bool(bool) => self.compiler.code.copy(*bool, dest),
-            Expression::Int(int) => self.compiler.code.push(Op::Unary {
-                op: ValueOrSource::Int(*int),
-                dest,
-                kind: UnaryKind::Copy,
-            }),
-            Expression::Float(float) => self.compiler.code.push(Op::Unary {
-                op: ValueOrSource::Float(*float),
-                dest,
-                kind: UnaryKind::Copy,
-            }),
-            Expression::String(string) => self.compiler.code.push(Op::Unary {
-                op: ValueOrSource::String(string.clone()),
-                dest,
-                kind: UnaryKind::Copy,
-            }),
-            Expression::Symbol(symbol) => self.compiler.code.push(Op::Unary {
-                op: ValueOrSource::Symbol(symbol.clone()),
-                dest,
-                kind: UnaryKind::Copy,
-            }),
-            Expression::RegEx(regex) => self.compiler.code.push(Op::Unary {
-                op: ValueOrSource::RegEx(regex.clone()),
-                dest,
-                kind: UnaryKind::Copy,
-            }),
+            Expression::Int(int) => self.compiler.code.copy(*int, dest),
+            Expression::Float(float) => self.compiler.code.copy(*float, dest),
+            Expression::String(string) => self
+                .compiler
+                .code
+                .copy(ValueOrSource::String(string.clone()), dest),
+            Expression::Symbol(symbol) => self.compiler.code.copy(symbol.clone(), dest),
+            Expression::RegEx(regex) => self.compiler.code.copy(regex.clone(), dest),
             Expression::Lookup(lookup) => {
                 if let Some(base) = &lookup.base {
                     let target = self.compile_source(base);
                     self.compiler.code.copy(lookup.name.clone(), Register(0));
-                    self.compiler.code.push(Op::Invoke {
-                        target,
-                        name: Symbol::get_symbol().clone(),
-                        arity: ValueOrSource::Int(1),
-                    });
+                    self.compiler
+                        .code
+                        .invoke(target, Symbol::get_symbol().clone(), 1);
                     self.compiler.code.copy(Register(0), dest);
                 } else if let Some(var) = self.compiler.declarations.get(&lookup.name) {
-                    self.compiler.code.push(Op::Unary {
-                        op: ValueOrSource::Stack(var.stack),
-                        dest,
-                        kind: UnaryKind::Copy,
-                    });
+                    self.compiler.code.copy(var.stack, dest);
                 } else {
-                    self.compiler.code.push(Op::Unary {
-                        op: ValueOrSource::Symbol(lookup.name.clone()),
-                        dest,
-                        kind: UnaryKind::Resolve,
-                    });
+                    self.compiler.code.resolve(lookup.name.clone(), dest);
                 }
             }
             Expression::Map(map) => {
@@ -309,20 +282,14 @@ impl<'a> Scope<'a> {
                             OpDestination::Register(Register(1)),
                         );
                         self.compiler.code.copy(target.name.clone(), Register(0));
-                        self.compiler.code.push(Op::Invoke {
-                            target: target_source,
-                            name: Symbol::set_symbol().clone(),
-                            arity: ValueOrSource::Int(2),
-                        });
+                        self.compiler
+                            .code
+                            .invoke(target_source, Symbol::set_symbol().clone(), 2);
                     } else if let Some(var) = self.compiler.declarations.get(&target.name) {
                         if var.mutable {
                             let var = var.stack;
                             self.compile_expression(&assign.value, OpDestination::Stack(var));
-                            self.compiler.code.push(Op::Unary {
-                                op: ValueOrSource::Stack(var),
-                                dest,
-                                kind: UnaryKind::Copy,
-                            });
+                            self.compiler.code.copy(var, dest);
                         } else {
                             self.compiler
                                 .errors
@@ -330,12 +297,7 @@ impl<'a> Scope<'a> {
                         }
                     } else {
                         let value = self.compile_source(&assign.value);
-                        self.compiler.code.push(Op::BinOp {
-                            op1: ValueOrSource::Symbol(target.name.clone()),
-                            op2: value,
-                            dest,
-                            kind: BinaryKind::Assign,
-                        });
+                        self.compiler.code.assign(target.name.clone(), value, dest);
                     }
                     self.compiler.code.copy(Register(0), dest);
                 }
@@ -457,10 +419,9 @@ impl<'a> Scope<'a> {
                     initializer: mod_compiler.code,
                 };
                 let stack = self.new_temporary();
-                self.compiler.code.push(Op::LoadModule {
-                    module: instance,
-                    dest: OpDestination::Stack(stack),
-                });
+                self.compiler
+                    .code
+                    .load_module(instance, OpDestination::Stack(stack));
                 if module.publish {
                     self.ensure_in_module(module.name.1);
 
@@ -739,11 +700,7 @@ impl<'a> Scope<'a> {
     }
 
     fn declare_local(&mut self, name: Symbol, mutable: bool, value: Stack, dest: OpDestination) {
-        self.compiler.code.push(Op::Unary {
-            op: ValueOrSource::Stack(value),
-            dest,
-            kind: UnaryKind::Copy,
-        });
+        self.compiler.code.copy(value, dest);
         let previous_declaration = self
             .compiler
             .declarations
@@ -901,11 +858,7 @@ impl<'a> Scope<'a> {
                 let base = self.compile_source(base);
 
                 self.compile_function_args(&call.parameters, arity);
-                self.compiler.code.push(Op::Invoke {
-                    target: base,
-                    name: lookup.name.clone(),
-                    arity: arity.into(),
-                });
+                self.compiler.code.invoke(base, lookup.name.clone(), arity);
                 self.compiler.code.copy(Register(0), dest);
                 return;
             }
