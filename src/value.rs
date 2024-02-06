@@ -12,7 +12,7 @@ pub type ValueHasher = ahash::AHasher;
 
 use kempt::Map;
 
-use crate::symbol::Symbol;
+use crate::symbol::{Symbol, SymbolList};
 use crate::vm::{Arity, Fault, Vm};
 
 #[derive(Default, Clone, Debug)]
@@ -969,6 +969,8 @@ impl_from!(Value, u16, UInt);
 impl_from!(Value, u32, UInt);
 impl_from!(Value, u64, UInt);
 impl_from!(Value, bool, Bool);
+impl_from!(Value, Symbol, Symbol);
+impl_from!(Value, &'_ Symbol, Symbol);
 
 macro_rules! impl_try_from {
     ($on:ty, $from:ty, $variant:ident) => {
@@ -1317,14 +1319,18 @@ where
     }
 
     #[must_use]
-    pub fn with_fn<F>(mut self, name: impl Into<Symbol>, arity: impl Into<Arity>, func: F) -> Self
+    pub fn with_fn<F>(mut self, name: impl SymbolList, arity: impl Into<Arity>, func: F) -> Self
     where
         F: Fn(&mut Vm, &T) -> Result<Value, Fault> + Send + Sync + 'static,
     {
-        self.functions
-            .entry(name.into())
-            .or_default()
-            .insert(arity.into(), Arc::new(func));
+        let func = Arc::new(func);
+        let arity = arity.into();
+        for symbol in name.into_symbols() {
+            self.functions
+                .entry(symbol)
+                .or_default()
+                .insert(arity, func.clone());
+        }
         self
     }
 

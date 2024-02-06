@@ -1,6 +1,7 @@
 use std::fmt::{Debug, Display};
 use std::ops::{Add, Deref};
 use std::sync::OnceLock;
+use std::{array, iter};
 
 use ahash::RandomState;
 use interner::global::{GlobalString, StringPool};
@@ -30,13 +31,19 @@ static_symbols!(
     continue_symbol => "continue",
     else_symbol => "else",
     false_symbol => "false",
+    for_symbol => "for",
     fn_symbol => "fn",
     get_symbol => "get",
     if_symbol => "if",
+    in_symbol => "in",
+    iterate_symbol => "iterate",
     let_symbol => "let",
     loop_symbol => "loop",
     mod_symbol => "mod",
+    next_symbol => "next",
     not_symbol => "not",
+    none_symbol => "none",
+    nth_symbol => "nth",
     or_symbol => "or",
     pub_symbol => "pub",
     return_symbol => "return",
@@ -210,5 +217,50 @@ impl Deref for StaticSymbol {
 
     fn deref(&self) -> &Self::Target {
         self.0.get_or_init(|| Symbol::from(self.1))
+    }
+}
+
+pub trait SymbolList {
+    type Iterator: Iterator<Item = Symbol>;
+    fn into_symbols(self) -> Self::Iterator;
+}
+
+impl<const N: usize> SymbolList for [Symbol; N] {
+    type Iterator = array::IntoIter<Symbol, N>;
+
+    fn into_symbols(self) -> Self::Iterator {
+        self.into_iter()
+    }
+}
+
+impl<'a, const N: usize> SymbolList for [&'a Symbol; N] {
+    type Iterator = iter::Cloned<array::IntoIter<&'a Symbol, N>>;
+
+    fn into_symbols(self) -> Self::Iterator {
+        self.into_iter().cloned()
+    }
+}
+
+impl SymbolList for Symbol {
+    type Iterator = iter::Once<Symbol>;
+
+    fn into_symbols(self) -> Self::Iterator {
+        iter::once(self)
+    }
+}
+
+impl SymbolList for &'_ Symbol {
+    type Iterator = iter::Once<Symbol>;
+
+    fn into_symbols(self) -> Self::Iterator {
+        self.clone().into_symbols()
+    }
+}
+
+impl SymbolList for &'_ str {
+    type Iterator = iter::Once<Symbol>;
+
+    fn into_symbols(self) -> Self::Iterator {
+        Symbol::from(self).into_symbols()
     }
 }

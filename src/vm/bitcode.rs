@@ -188,6 +188,19 @@ impl BitcodeBlock {
         });
     }
 
+    pub fn invoke(
+        &mut self,
+        target: impl Into<ValueOrSource>,
+        name: impl Into<Symbol>,
+        arity: impl Into<ValueOrSource>,
+    ) {
+        self.push(Op::Invoke {
+            target: target.into(),
+            name: name.into(),
+            arity: arity.into(),
+        });
+    }
+
     pub fn add(
         &mut self,
         lhs: impl Into<ValueOrSource>,
@@ -291,6 +304,18 @@ impl BitcodeBlock {
             op: source.into(),
             dest: dest.into(),
             kind: UnaryKind::Copy,
+        });
+    }
+
+    pub fn set_exception_handler(
+        &mut self,
+        target: impl Into<ValueOrSource>,
+        previous_handler: impl Into<OpDestination>,
+    ) {
+        self.push(Op::Unary {
+            op: target.into(),
+            dest: previous_handler.into(),
+            kind: UnaryKind::SetExceptionHandler,
         });
     }
 
@@ -476,6 +501,9 @@ impl From<&'_ Code> for BitcodeBlock {
                 LoadedOp::Jump(loaded) => loaded.as_op(UnaryKind::Jump, code),
                 LoadedOp::NewMap(loaded) => loaded.as_op(UnaryKind::NewMap, code),
                 LoadedOp::NewList(loaded) => loaded.as_op(UnaryKind::NewList, code),
+                LoadedOp::SetExceptionHandler(loaded) => {
+                    loaded.as_op(UnaryKind::SetExceptionHandler, code)
+                }
                 LoadedOp::LogicalXor(loaded) => loaded.as_op(BinaryKind::LogicalXor, code),
                 LoadedOp::Assign(loaded) => loaded.as_op(BinaryKind::Assign, code),
                 LoadedOp::Add(loaded) => loaded.as_op(BinaryKind::Add, code),

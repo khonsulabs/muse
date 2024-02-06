@@ -3,8 +3,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::symbol::Symbol;
 use crate::syntax::{
-    self, BinaryExpression, BreakExpression, Chain, ContinueExpression, Expression, FunctionCall,
-    LogicalKind, LoopExpression, LoopKind, Ranged, SourceRange, UnaryExpression, Variable,
+    self, AssignTarget, BinaryExpression, BreakExpression, Chain, ContinueExpression, Expression,
+    FunctionCall, Index, LogicalKind, LoopExpression, LoopKind, Ranged, SourceRange,
+    UnaryExpression, Variable,
 };
 use crate::vm::bitcode::{
     BinaryKind, BitcodeBlock, BitcodeFunction, Label, Op, OpDestination, ValueOrSource,
@@ -134,16 +135,14 @@ impl<'a> Scope<'a> {
         }
     }
 
-    fn enter_block(
-        &mut self,
-        name: Option<Symbol>,
-        break_label: Label,
-        dest: OpDestination,
-    ) -> Scope<'_> {
+    fn enter_block(&mut self, name: Option<(Symbol, Label, OpDestination)>) -> Scope<'_> {
+        let (name, break_info) = name
+            .map(|(name, break_label, dest)| (Some(name), Some((break_label, dest))))
+            .unwrap_or_default();
         self.compiler.scopes.push(ScopeInfo {
             kind: ScopeKind::Block,
-            break_info: name.is_some().then_some((break_label, dest)),
             name,
+            break_info,
             continue_label: None,
         });
         Scope {
@@ -185,16 +184,8 @@ impl<'a> Scope<'a> {
     #[allow(clippy::too_many_lines)]
     fn compile_expression(&mut self, expr: &Ranged<Expression>, dest: OpDestination) {
         match &**expr {
-            Expression::Nil => self.compiler.code.push(Op::Unary {
-                op: ValueOrSource::Nil,
-                dest,
-                kind: UnaryKind::Copy,
-            }),
-            Expression::Bool(bool) => self.compiler.code.push(Op::Unary {
-                op: ValueOrSource::Bool(*bool),
-                dest,
-                kind: UnaryKind::Copy,
-            }),
+            Expression::Nil => self.compiler.code.copy((), dest),
+            Expression::Bool(bool) => self.compiler.code.copy(*bool, dest),
             Expression::Int(int) => self.compiler.code.push(Op::Unary {
                 op: ValueOrSource::Int(*int),
                 dest,
@@ -207,6 +198,11 @@ impl<'a> Scope<'a> {
             }),
             Expression::String(string) => self.compiler.code.push(Op::Unary {
                 op: ValueOrSource::String(string.clone()),
+                dest,
+                kind: UnaryKind::Copy,
+            }),
+            Expression::Symbol(symbol) => self.compiler.code.push(Op::Unary {
+                op: ValueOrSource::Symbol(symbol.clone()),
                 dest,
                 kind: UnaryKind::Copy,
             }),
@@ -304,43 +300,70 @@ impl<'a> Scope<'a> {
                 self.compile_expression(result, OpDestination::Register(Register(0)));
                 self.compiler.code.return_early();
             }
-            Expression::Assign(assign) => {
-                if let Some(base) = &assign.target.base {
-                    let target = self.compile_source(base);
-                    self.compile_expression(&assign.value, OpDestination::Register(Register(1)));
-                    self.compiler
-                        .code
-                        .copy(assign.target.name.clone(), Register(0));
-                    self.compiler.code.push(Op::Invoke {
-                        target,
-                        name: Symbol::set_symbol().clone(),
-                        arity: ValueOrSource::Int(2),
-                    });
-                    self.compiler.code.copy(Register(0), dest);
-                } else if let Some(var) = self.compiler.declarations.get(&assign.target.name) {
-                    if var.mutable {
-                        let var = var.stack;
-                        self.compile_expression(&assign.value, OpDestination::Stack(var));
-                        self.compiler.code.push(Op::Unary {
-                            op: ValueOrSource::Stack(var),
-                            dest,
-                            kind: UnaryKind::Copy,
+            Expression::Assign(assign) => match &assign.target.0 {
+                AssignTarget::Lookup(target) => {
+                    if let Some(base) = &target.base {
+                        let target_source = self.compile_source(base);
+                        self.compile_expression(
+                            &assign.value,
+                            OpDestination::Register(Register(1)),
+                        );
+                        self.compiler.code.copy(target.name.clone(), Register(0));
+                        self.compiler.code.push(Op::Invoke {
+                            target: target_source,
+                            name: Symbol::set_symbol().clone(),
+                            arity: ValueOrSource::Int(2),
                         });
+                    } else if let Some(var) = self.compiler.declarations.get(&target.name) {
+                        if var.mutable {
+                            let var = var.stack;
+                            self.compile_expression(&assign.value, OpDestination::Stack(var));
+                            self.compiler.code.push(Op::Unary {
+                                op: ValueOrSource::Stack(var),
+                                dest,
+                                kind: UnaryKind::Copy,
+                            });
+                        } else {
+                            self.compiler
+                                .errors
+                                .push(Ranged::new(expr.range(), Error::VariableNotMutable));
+                        }
+                    } else {
+                        let value = self.compile_source(&assign.value);
+                        self.compiler.code.push(Op::BinOp {
+                            op1: ValueOrSource::Symbol(target.name.clone()),
+                            op2: value,
+                            dest,
+                            kind: BinaryKind::Assign,
+                        });
+                    }
+                    self.compiler.code.copy(Register(0), dest);
+                }
+                AssignTarget::Index(index) => {
+                    let target_source = self.compile_source(&index.target);
+                    let value = self.compile_source(&assign.value);
+                    let arity = if let Some(arity) = index
+                        .parameters
+                        .len()
+                        .checked_add(1)
+                        .and_then(|arity| u8::try_from(arity).ok())
+                    {
+                        arity
                     } else {
                         self.compiler
                             .errors
-                            .push(Ranged::new(expr.range(), Error::VariableNotMutable));
-                    }
-                } else {
-                    let value = self.compile_source(&assign.value);
-                    self.compiler.code.push(Op::BinOp {
-                        op1: ValueOrSource::Symbol(assign.target.name.clone()),
-                        op2: value,
-                        dest,
-                        kind: BinaryKind::Assign,
-                    });
+                            .push(Ranged::new(expr.range(), Error::TooManyArguments));
+                        u8::MAX
+                    };
+                    self.compile_function_args(&index.parameters, arity - 1);
+                    self.compiler
+                        .code
+                        .copy(value, OpDestination::Register(Register(arity - 1)));
+                    self.compiler
+                        .code
+                        .invoke(target_source, Symbol::set_symbol().clone(), arity);
                 }
-            }
+            },
             Expression::Unary(unary) => self.compile_unary(unary, dest),
             Expression::Binary(binop) => {
                 self.compile_binop(binop, dest);
@@ -351,11 +374,17 @@ impl<'a> Scope<'a> {
             }
             Expression::Block(block) => {
                 let break_label = self.compiler.code.new_label();
-                let mut scope = self.enter_block(block.name.clone(), break_label, dest);
+                let mut scope = self.enter_block(
+                    block
+                        .name
+                        .as_ref()
+                        .map(|name| (name.clone(), break_label, dest)),
+                );
                 scope.compile_expression(&block.body, dest);
                 scope.compiler.code.label(break_label);
             }
             Expression::Call(call) => self.compile_function_call(call, expr.range(), dest),
+            Expression::Index(index) => self.compile_index(index, expr.range(), dest),
             Expression::Variable(decl) => {
                 self.declare_variable(decl, dest);
             }
@@ -506,43 +535,195 @@ impl<'a> Scope<'a> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn compile_loop(&mut self, expr: &LoopExpression, dest: OpDestination) {
         let continue_label = self.compiler.code.new_label();
-        let mut loop_start = continue_label;
         let break_label = self.compiler.code.new_label();
 
-        match &expr.kind {
+        let mut outer_scope = self.enter_block(None);
+        let (loop_start, previous_handler) = match &expr.kind {
             LoopKind::Infinite => {
-                self.compiler.code.label(continue_label);
+                outer_scope.compiler.code.label(continue_label);
+                (ValueOrSource::Label(continue_label), None)
             }
             LoopKind::While(condition) => {
-                self.compiler.code.label(continue_label);
-                let condition = self.compile_source(condition);
-                self.compiler.code.jump_if_not(break_label, condition, ());
+                outer_scope.compiler.code.label(continue_label);
+                let condition = outer_scope.compile_source(condition);
+                outer_scope
+                    .compiler
+                    .code
+                    .jump_if_not(break_label, condition, ());
+                (ValueOrSource::Label(continue_label), None)
             }
             LoopKind::TailWhile(_) => {
-                loop_start = self.compiler.code.new_label();
-                self.compiler.code.label(loop_start);
+                let tail_condition = outer_scope.compiler.code.new_label();
+                outer_scope.compiler.code.label(tail_condition);
+                (ValueOrSource::Label(tail_condition), None)
             }
-        }
+            LoopKind::For { bindings, source } => {
+                let mut variables = Vec::new();
+                let mut splat = false;
+                match &bindings.0 {
+                    Expression::Lookup(lookup) if lookup.base.is_none() => {
+                        let stack = outer_scope.new_temporary();
+                        outer_scope.declare_local(lookup.name.clone(), true, stack, OpDestination::Void);
+                        variables.push(stack);
+                    }
+                    Expression::Tuple(names) if names.iter().all(|name| matches!(&name.0, Expression::Lookup(lookup) if lookup.base.is_none())) => {
+                        splat = true;
+                        for name in names {
+                            let Expression::Lookup(lookup) = &name.0 else { unreachable!("just matched")};
+                            let stack = outer_scope.new_temporary();
+                            outer_scope.declare_local(lookup.name.clone(), true, stack, OpDestination::Void);
+                            variables.push(stack);
+                        }
+                    }
+                    _ => todo!("invalid binding"),
+                }
 
-        let mut block_scope =
-            self.enter_loop(expr.block.name.clone(), continue_label, break_label, dest);
+                let source = outer_scope.compile_expression_into_temporary(source);
 
-        block_scope.compile_expression(&expr.block.body, dest);
-        drop(block_scope);
+                // We try to call :iterate on source. If this throws an
+                // exception, we switch to trying to iterate by calling `nth()`
+                // and counting.
+                let iter_using_nth = outer_scope.compiler.code.new_label();
+                let loop_body = outer_scope.compiler.code.new_label();
+                let next_iteration = outer_scope.new_temporary();
+                let previous_handler = outer_scope.new_temporary();
+                let i = outer_scope.new_temporary();
+                // The continue_label is going to be used for iterating over the
+                // result of `source.iterate()`. We load this into the
+                // `next_iteration` stack location, as we are going to use
+                // `next_iteration` as the jump target. This allows us to jump
+                // directly to the correct iteration code when continuing the
+                // loop.
+                let iterate_start = continue_label;
+                outer_scope
+                    .compiler
+                    .code
+                    .copy(iterate_start, next_iteration);
+                // Install our exception handling, storing the previous handler.
+                outer_scope
+                    .compiler
+                    .code
+                    .set_exception_handler(iter_using_nth, previous_handler);
+                // Invoke iterate(). If this isn't supported, we jump to `iter_using_nth`
+                outer_scope
+                    .compiler
+                    .code
+                    .invoke(source, Symbol::iterate_symbol(), 0);
+
+                // Store the iterator in `i`.
+                outer_scope.compiler.code.copy(Register(0), i);
+                // Update exception handling to jump to break. This ultimately
+                // should point to a separate set of instructions that checks
+                // the error.
+                let exception_handler = break_label;
+                outer_scope
+                    .compiler
+                    .code
+                    .set_exception_handler(exception_handler, ());
+                // Begin the iteration.
+                outer_scope.compiler.code.label(iterate_start);
+                // Invoke next(), store the result in the first variable slot.
+                outer_scope
+                    .compiler
+                    .code
+                    .invoke(i, Symbol::next_symbol(), 0);
+                outer_scope
+                    .compiler
+                    .code
+                    .copy(Register(0), variables[variables.len() - 1]);
+
+                // Jump to the common loop body code.
+                outer_scope.compiler.code.jump(loop_body, ());
+
+                // This code is for when source.iterate() faults.
+                outer_scope.compiler.code.label(iter_using_nth);
+                // Set the next_iteration to the correct address for nth-based
+                // iteration, and update the exception handler to the break
+                // label.
+                outer_scope
+                    .compiler
+                    .code
+                    .set_exception_handler(exception_handler, ());
+                let nth_next_iteration = outer_scope.compiler.code.new_label();
+
+                // Initialize the counter to 0. We then jump past the increment
+                // code that will normally happen each loop.
+                outer_scope
+                    .compiler
+                    .code
+                    .copy(nth_next_iteration, next_iteration);
+                outer_scope.compiler.code.copy(0, i);
+                let after_first_increment = outer_scope.compiler.code.new_label();
+                outer_scope.compiler.code.jump(after_first_increment, ());
+
+                // Each iteration of the nth-based iteration will return here.
+                // The first step is to increment i.
+                outer_scope.compiler.code.label(nth_next_iteration);
+                outer_scope.compiler.code.add(i, 1, i);
+                outer_scope.compiler.code.label(after_first_increment);
+
+                // Next, invoke nth(i)
+                outer_scope.compiler.code.copy(i, Register(0));
+                outer_scope
+                    .compiler
+                    .code
+                    .invoke(source, Symbol::nth_symbol(), 1);
+                // Copy the result into the first variable -- just like the
+                // iterator() code.
+                outer_scope
+                    .compiler
+                    .code
+                    .copy(Register(0), variables[variables.len() - 1]);
+
+                // Finally, the shared loop body.
+                outer_scope.compiler.code.label(loop_body);
+                if splat {
+                    for (var, index) in variables.iter().zip(0_u8..) {
+                        outer_scope.compiler.code.copy(index, Register(0));
+                        outer_scope.compiler.code.invoke(
+                            variables[variables.len() - 1],
+                            Symbol::nth_symbol(),
+                            1,
+                        );
+                        outer_scope.compiler.code.copy(Register(0), *var);
+                    }
+                }
+
+                (ValueOrSource::Stack(next_iteration), Some(previous_handler))
+            }
+        };
+
+        let mut loop_scope =
+            outer_scope.enter_loop(expr.block.name.clone(), continue_label, break_label, dest);
+
+        loop_scope.compile_expression(&expr.block.body, dest);
+        drop(loop_scope);
 
         match &expr.kind {
-            LoopKind::Infinite | LoopKind::While(_) => {}
+            LoopKind::Infinite | LoopKind::While(_) | LoopKind::For { .. } => {}
             LoopKind::TailWhile(condition) => {
-                self.compiler.code.label(continue_label);
-                let condition = self.compile_source(condition);
-                self.compiler.code.jump_if_not(break_label, condition, ());
+                outer_scope.compiler.code.label(continue_label);
+                let condition = outer_scope.compile_source(condition);
+                outer_scope
+                    .compiler
+                    .code
+                    .jump_if_not(break_label, condition, ());
             }
         }
 
-        self.compiler.code.jump(loop_start, ());
-        self.compiler.code.label(break_label);
+        outer_scope.compiler.code.jump(loop_start, ());
+        outer_scope.compiler.code.label(break_label);
+
+        if let Some(previous_handler) = previous_handler {
+            outer_scope
+                .compiler
+                .code
+                .set_exception_handler(previous_handler, ());
+        }
+        drop(outer_scope);
     }
 
     fn declare_variable(&mut self, decl: &Variable, dest: OpDestination) {
@@ -654,11 +835,12 @@ impl<'a> Scope<'a> {
             Expression::Float(float) => ValueOrSource::Float(*float),
             Expression::RegEx(regex) => ValueOrSource::RegEx(regex.clone()),
             Expression::String(string) => ValueOrSource::String(string.clone()),
+            Expression::Symbol(symbol) => ValueOrSource::Symbol(symbol.clone()),
             Expression::Lookup(lookup) => {
                 if let Some(decl) = self.compiler.declarations.get(&lookup.name) {
                     ValueOrSource::Stack(decl.stack)
                 } else {
-                    self.compile_expression_into_temporary(source)
+                    ValueOrSource::Stack(self.compile_expression_into_temporary(source))
                 }
             }
             Expression::Map(_)
@@ -668,6 +850,7 @@ impl<'a> Scope<'a> {
             | Expression::Function(_)
             | Expression::Module(_)
             | Expression::Call(_)
+            | Expression::Index(_)
             | Expression::Variable(_)
             | Expression::Assign(_)
             | Expression::Unary(_)
@@ -677,14 +860,16 @@ impl<'a> Scope<'a> {
             | Expression::Chain(_)
             | Expression::Break(_)
             | Expression::Continue(_)
-            | Expression::Return(_) => self.compile_expression_into_temporary(source),
+            | Expression::Return(_) => {
+                ValueOrSource::Stack(self.compile_expression_into_temporary(source))
+            }
         }
     }
 
-    fn compile_expression_into_temporary(&mut self, source: &Ranged<Expression>) -> ValueOrSource {
+    fn compile_expression_into_temporary(&mut self, source: &Ranged<Expression>) -> Stack {
         let var = self.new_temporary();
         self.compile_expression(source, OpDestination::Stack(var));
-        ValueOrSource::Stack(var)
+        var
     }
 
     fn compile_function_call(
@@ -729,6 +914,24 @@ impl<'a> Scope<'a> {
 
         self.compile_function_args(&call.parameters, arity);
         self.compiler.code.call(function, arity);
+        self.compiler.code.copy(Register(0), dest);
+    }
+
+    fn compile_index(&mut self, index: &Index, range: SourceRange, dest: OpDestination) {
+        let arity = if let Ok(arity) = u8::try_from(index.parameters.len()) {
+            arity
+        } else {
+            self.compiler
+                .errors
+                .push(Ranged::new(range, Error::TooManyArguments));
+            255
+        };
+
+        let target = self.compile_source(&index.target);
+        self.compile_function_args(&index.parameters, arity);
+        self.compiler
+            .code
+            .invoke(target, Symbol::get_symbol().clone(), arity);
         self.compiler.code.copy(Register(0), dest);
     }
 
@@ -796,6 +999,7 @@ pub enum UnaryKind {
     Jump,
     NewMap,
     NewList,
+    SetExceptionHandler,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

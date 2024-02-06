@@ -13,18 +13,18 @@ impl List {
         Self(Mutex::new(Vec::new()))
     }
 
-    pub fn get(&self, index: &Value) -> Result<Option<Value>, Fault> {
+    pub fn get(&self, index: &Value) -> Result<Value, Fault> {
         let Some(index) = index.as_usize() else {
-            return Err(Fault::InvalidIndex);
+            return Err(Fault::OutOfBounds);
         };
         let contents = self.0.lock().expect("poisoned");
 
-        Ok(contents.get(index).cloned())
+        contents.get(index).cloned().ok_or(Fault::OutOfBounds)
     }
 
     pub fn insert(&self, index: &Value, value: Value) -> Result<(), Fault> {
         let Some(index) = index.as_usize() else {
-            return Err(Fault::InvalidIndex);
+            return Err(Fault::OutOfBounds);
         };
         let mut contents = self.0.lock().expect("poisoned");
         contents.insert(index, value);
@@ -39,7 +39,7 @@ impl List {
 
     pub fn set(&self, index: &Value, value: Value) -> Result<Option<Value>, Fault> {
         let Some(index) = index.as_usize() else {
-            return Err(Fault::InvalidIndex);
+            return Err(Fault::OutOfBounds);
         };
         let mut contents = self.0.lock().expect("poisoned");
 
@@ -77,10 +77,14 @@ impl CustomType for List {
                     this.set(&index, value.clone())?;
                     Ok(value)
                 })
-                .with_fn(Symbol::get_symbol(), 1, |vm, this| {
-                    let key = vm[Register(0)].take();
-                    Ok(this.get(&key)?.unwrap_or_default())
-                })
+                .with_fn(
+                    [Symbol::nth_symbol(), Symbol::get_symbol()],
+                    1,
+                    |vm, this| {
+                        let key = vm[Register(0)].take();
+                        this.get(&key)
+                    },
+                )
         });
         FUNCTIONS.invoke(vm, name, arity, self)
     }

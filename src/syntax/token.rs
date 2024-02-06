@@ -14,6 +14,7 @@ pub enum Token {
     Whitespace,
     Comment,
     Identifier(Symbol),
+    Symbol(Symbol),
     Label(Symbol),
     Int(i64),
     Float(f64),
@@ -70,7 +71,7 @@ impl Hash for Token {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         core::mem::discriminant(self).hash(state);
         match self {
-            Token::Identifier(t) | Token::Label(t) => t.hash(state),
+            Token::Identifier(t) | Token::Label(t) | Token::Symbol(t) => t.hash(state),
             Token::Int(t) => t.hash(state),
             Token::Float(t) => t.to_bits().hash(state),
             Token::Char(t) => t.hash(state),
@@ -175,6 +176,10 @@ impl Iterator for Tokens<'_> {
                 (start, '@') if self.chars.peek().map_or(false, unicode_ident::is_xid_start) => {
                     let ch = self.chars.next().expect("just peekend").1;
                     Ok(self.tokenize_label(start, ch))
+                }
+                (start, ':') if self.chars.peek().map_or(false, unicode_ident::is_xid_start) => {
+                    let ch = self.chars.next().expect("just peekend").1;
+                    Ok(self.tokenize_symbol(start, ch))
                 }
                 (start, '\\') => self.tokenize_regex(start, false),
                 (start, 'w') if self.chars.peek().map_or(false, |ch| ch == '\\') => {
@@ -340,6 +345,11 @@ impl<'a> Tokens<'a> {
     fn tokenize_label(&mut self, start: usize, start_char: char) -> Ranged<Token> {
         self.tokenize_identifier_symbol(start, start_char)
             .map(Token::Label)
+    }
+
+    fn tokenize_symbol(&mut self, start: usize, start_char: char) -> Ranged<Token> {
+        self.tokenize_identifier_symbol(start, start_char)
+            .map(Token::Symbol)
     }
 
     fn tokenize_whitespace(&mut self, start: usize) -> Ranged<Token> {

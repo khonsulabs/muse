@@ -119,3 +119,27 @@ labeled_continue: {
     "#,
     output: Int(7),
 }
+
+for_in_list: {
+    src: r#"
+        var total = 0;
+        for n in [1, 2, 3] {
+            total = total + n;
+        };
+        total
+    "#,
+    output: Int(6),
+}
+
+for_in_map: {
+    src: r#"
+        var total = 0;
+        for (k, v) in {:a: 1, :b: 2, :c: 3} {
+            if !(k == :b) {
+                total = total + v;
+            }
+        };
+        total
+    "#,
+    output: Int(4),
+}

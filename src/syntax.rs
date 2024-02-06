@@ -101,6 +101,7 @@ pub enum Expression {
     Int(i64),
     Float(f64),
     String(String),
+    Symbol(Symbol),
     RegEx(RegExLiteral),
     Lookup(Box<Lookup>),
     If(Box<IfExpression>),
@@ -108,6 +109,7 @@ pub enum Expression {
     List(Vec<Ranged<Expression>>),
     Tuple(Vec<Ranged<Expression>>),
     Call(Box<FunctionCall>),
+    Index(Box<Index>),
     Assign(Box<Assignment>),
     Unary(Box<UnaryExpression>),
     Binary(Box<BinaryExpression>),
@@ -201,6 +203,10 @@ pub enum LoopKind {
     Infinite,
     While(Ranged<Expression>),
     TailWhile(Ranged<Expression>),
+    For {
+        bindings: Ranged<Expression>,
+        source: Ranged<Expression>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -225,9 +231,21 @@ pub struct FunctionCall {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Index {
+    pub target: Ranged<Expression>,
+    pub parameters: Vec<Ranged<Expression>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Assignment {
-    pub target: Ranged<Lookup>,
+    pub target: Ranged<AssignTarget>,
     pub value: Ranged<Expression>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AssignTarget {
+    Lookup(Lookup),
+    Index(Index),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -402,6 +420,7 @@ pub enum Error {
     ExpectedBlock,
     ExpectedModuleBody,
     ExpectedBody,
+    ExpectedIn,
     ExpectedFunctionParamters,
     ExpectedVariableInitialValue,
     ExpectedThenOrBrace,
@@ -730,6 +749,7 @@ impl Parselet for Term {
                 | Token::Identifier(_)
                 | Token::RegEx(_)
                 | Token::String(_)
+                | Token::Symbol(_)
         )
     }
 }
@@ -750,6 +770,7 @@ impl PrefixParselet for Term {
                 token.1,
                 Expression::Lookup(Box::new(Lookup::from(value))),
             )),
+            Token::Symbol(sym) => Ok(Ranged::new(token.1, Expression::Symbol(sym))),
             _ => unreachable!("parse called with invalid token"),
         }
     }
@@ -1163,6 +1184,28 @@ impl PrefixParselet for Brackets {
     }
 }
 
+impl InfixParselet for Brackets {
+    fn parse(
+        &self,
+        target: Ranged<Expression>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        let mut parameters = Vec::new();
+
+        parse_paired(Paired::Bracket, &Token::Char(','), tokens, |tokens| {
+            config
+                .parse_expression(tokens)
+                .map(|expr| parameters.push(expr))
+        })?;
+
+        Ok(tokens.ranged(
+            target.range().start..,
+            Expression::Index(Box::new(Index { target, parameters })),
+        ))
+    }
+}
+
 // impl InfixParselet for Parentheses {
 //     fn parse(
 //         &self,
@@ -1281,6 +1324,45 @@ impl PrefixParselet for If {
     }
 }
 
+struct Labeled;
+
+impl Parselet for Labeled {
+    fn token(&self) -> Option<Token> {
+        None
+    }
+
+    fn matches(&self, token: &Token, tokens: &mut TokenReader<'_>) -> bool {
+        matches!(token, Token::Label(_))
+            && tokens
+                .peek_token()
+                .map_or(false, |token| matches!(token, Token::Char(':')))
+    }
+}
+
+impl PrefixParselet for Labeled {
+    fn parse(
+        &self,
+        label: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        let Token::Label(label) = label.0 else {
+            unreachable!("matches filters")
+        };
+        let _colon = tokens.next()?;
+        let mut subject = config.parse_expression(tokens)?;
+        match &mut subject.0 {
+            Expression::Block(block) => block.name = Some(label),
+            Expression::Loop(loop_expr) => {
+                loop_expr.block.name = Some(label);
+            }
+            _ => return Err(subject.map(|_| Error::InvalidLabelTarget)),
+        }
+
+        Ok(subject)
+    }
+}
+
 struct Loop;
 
 impl Parselet for Loop {
@@ -1321,42 +1403,46 @@ impl PrefixParselet for Loop {
     }
 }
 
-struct Labeled;
+struct For;
 
-impl Parselet for Labeled {
+impl Parselet for For {
     fn token(&self) -> Option<Token> {
         None
     }
 
     fn matches(&self, token: &Token, tokens: &mut TokenReader<'_>) -> bool {
-        matches!(token, Token::Label(_))
-            && tokens
-                .peek_token()
-                .map_or(false, |token| matches!(token, Token::Char(':')))
+        matches!(token, Token::Identifier(ident) if ident == Symbol::for_symbol())
+            && tokens.peek_token().map_or(false, |t| {
+                matches!(t, Token::Open(_) | Token::Identifier(_))
+            })
     }
 }
 
-impl PrefixParselet for Labeled {
+impl PrefixParselet for For {
     fn parse(
         &self,
-        label: Ranged<Token>,
+        for_token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
-        let Token::Label(label) = label.0 else {
-            unreachable!("matches filters")
-        };
-        let _colon = tokens.next()?;
-        let mut subject = config.parse_expression(tokens)?;
-        match &mut subject.0 {
-            Expression::Block(block) => block.name = Some(label),
-            Expression::Loop(loop_expr) => {
-                loop_expr.block.name = Some(label);
-            }
-            _ => return Err(subject.map(|_| Error::InvalidLabelTarget)),
+        let bindings = config.parse_expression(tokens)?;
+
+        let in_token = tokens.next()?;
+        if !matches!(&in_token.0, Token::Identifier(ident) if ident == Symbol::in_symbol()) {
+            return Err(in_token.map(|_| Error::ExpectedIn));
         }
 
-        Ok(subject)
+        let source = config.parse_expression(tokens)?;
+
+        let body = parse_block(tokens, config)?;
+
+        Ok(tokens.ranged(
+            for_token.range().start..,
+            Expression::Loop(Box::new(LoopExpression {
+                kind: LoopKind::For { bindings, source },
+                block: body,
+            })),
+        ))
     }
 }
 
@@ -1776,7 +1862,17 @@ impl InfixParselet for Assign {
                 Ok(tokens.ranged(
                     lhs.1.start..,
                     Expression::Assign(Box::new(Assignment {
-                        target: Ranged::new(lhs.1, *lookup),
+                        target: Ranged::new(lhs.1, AssignTarget::Lookup(*lookup)),
+                        value,
+                    })),
+                ))
+            }
+            Expression::Index(index) => {
+                let value = config.parse(tokens)?;
+                Ok(tokens.ranged(
+                    lhs.1.start..,
+                    Expression::Assign(Box::new(Assignment {
+                        target: Ranged::new(lhs.1, AssignTarget::Index(*index)),
                         value,
                     })),
                 ))
@@ -1812,7 +1908,7 @@ fn parselets() -> Parselets {
     parser.push_infix(parselets![BitwiseAnd]);
     parser.push_infix(parselets![Add, Subtract]);
     parser.push_infix(parselets![Multiply, Divide, Remainder, IntegerDivide]);
-    parser.push_infix(parselets![Parentheses, Dot]);
+    parser.push_infix(parselets![Parentheses, Dot, Brackets,]);
     parser.push_prefix(parselets![
         Braces,
         Parentheses,
@@ -1834,6 +1930,7 @@ fn parselets() -> Parselets {
         Continue,
         Break,
         Return,
+        For,
     ]);
     parser.push_prefix(parselets![Term]);
     parser

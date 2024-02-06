@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::sync::Mutex;
 
+use crate::list::List;
 use crate::symbol::Symbol;
 use crate::value::{CustomType, StaticRustFunctionTable, Value};
 use crate::vm::{Arity, Fault, Register, Vm};
@@ -42,6 +43,22 @@ impl Map {
         }
 
         Ok(None)
+    }
+
+    pub fn nth(&self, index: &Value) -> Result<Value, Fault> {
+        let Some(index) = index.as_usize() else {
+            return Err(Fault::OutOfBounds);
+        };
+        let contents = self.0.lock().expect("poisoned");
+        contents
+            .get(index)
+            .map(|field| {
+                Value::dynamic(List::from_iter([
+                    field.key.value.clone(),
+                    field.value.clone(),
+                ]))
+            })
+            .ok_or(Fault::OutOfBounds)
     }
 
     pub fn insert(&self, vm: &mut Vm, key: Value, value: Value) -> Result<Option<Value>, Fault> {
@@ -91,7 +108,13 @@ impl CustomType for Map {
                 })
                 .with_fn(Symbol::get_symbol(), 1, |vm, this| {
                     let key = vm[Register(0)].take();
-                    Ok(this.get(vm, &key)?.unwrap_or_default())
+                    Ok(this
+                        .get(vm, &key)?
+                        .unwrap_or_else(|| Value::Symbol(Symbol::none_symbol().clone())))
+                })
+                .with_fn(Symbol::nth_symbol(), 1, |vm, this| {
+                    let index = vm[Register(0)].take();
+                    this.nth(&index)
                 })
         });
         FUNCTIONS.invoke(vm, name, arity, self)

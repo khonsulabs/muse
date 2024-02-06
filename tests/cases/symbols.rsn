@@ -1,0 +1,5 @@
+symbol: {
+    src: r#":asdf"#,
+    output: Symbol("asdf"),
+}
+

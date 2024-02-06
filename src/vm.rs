@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::fmt::{Debug, Write};
 use std::future::Future;
@@ -11,6 +10,7 @@ use std::task::{Poll, Wake, Waker};
 use std::time::{Duration, Instant};
 use std::{array, task};
 
+use ahash::AHashMap;
 use crossbeam_utils::sync::{Parker, Unparker};
 use kempt::Map;
 use serde::{Deserialize, Serialize};
@@ -463,6 +463,7 @@ impl Vm {
                     variables: Map::new(),
                     module: current_frame_module,
                     loading_module: None,
+                    exception_handler: None,
                 });
             }
             Ok(())
@@ -550,19 +551,27 @@ impl Vm {
         loop {
             self.budget.charge()?;
             let instruction = self.frames[code_frame].instruction;
-            match self.step(code.0, instruction)? {
-                StepResult::Complete if code_frame >= base_frame && code_frame > 0 => {
+            match self.step(code.0, instruction) {
+                Ok(StepResult::Complete) if code_frame >= base_frame && code_frame > 0 => {
                     self.exit_frame()?;
                     if self.current_frame < base_frame {
                         break;
                     }
                 }
-                StepResult::Complete => break,
-                StepResult::NextAddress(addr) => {
+                Ok(StepResult::Complete) => break,
+                Ok(StepResult::NextAddress(addr)) => {
                     // Only step to the next address if the frame's instruction
                     // wasn't altered by a jump.
                     if self.frames[code_frame].instruction == instruction {
                         self.frames[code_frame].instruction = addr;
+                    }
+                }
+                Err(err) => {
+                    if let Some(exception_target) = self.frames[code_frame].exception_handler {
+                        self[Register(0)] = err.as_value();
+                        self.frames[code_frame].instruction = exception_target.get();
+                    } else {
+                        return Err(err);
                     }
                 }
             }
@@ -616,6 +625,9 @@ impl Vm {
             LoadedOp::Jump(loaded) => self.op_jump(code_index, loaded.op, loaded.dest),
             LoadedOp::NewMap(loaded) => self.op_new_map(code_index, loaded.op, loaded.dest),
             LoadedOp::NewList(loaded) => self.op_new_list(code_index, loaded.op, loaded.dest),
+            LoadedOp::SetExceptionHandler(loaded) => {
+                self.op_set_exception_handler(code_index, loaded.op, loaded.dest)
+            }
             LoadedOp::LogicalXor(loaded) => self.op_binop(
                 code_index,
                 loaded.op1,
@@ -1061,6 +1073,30 @@ impl Vm {
         }
     }
 
+    fn op_set_exception_handler(
+        &mut self,
+        code_index: usize,
+        handler: LoadedSource,
+        previous_handler: OpDestination,
+    ) -> Result<(), Fault> {
+        let handler = self
+            .op_load(code_index, handler)?
+            .as_usize()
+            .and_then(NonZeroUsize::new);
+
+        let previous_handler_address = std::mem::replace(
+            &mut self.frames[self.current_frame].exception_handler,
+            handler,
+        );
+        self.op_store(
+            code_index,
+            previous_handler_address
+                .and_then(|addr| Value::try_from(addr.get()).ok())
+                .unwrap_or_default(),
+            previous_handler,
+        )
+    }
+
     fn op_load_symbol(&mut self, code_index: usize, symbol: usize) -> Result<Symbol, Fault> {
         self.code[code_index]
             .code
@@ -1261,6 +1297,7 @@ struct Frame {
     variables: Map<Symbol, BlockDeclaration>,
     module: usize,
     loading_module: Option<NonZeroUsize>,
+    exception_handler: Option<NonZeroUsize>,
 }
 
 impl Frame {
@@ -1270,10 +1307,11 @@ impl Frame {
         self.code = None;
         self.module = 0;
         self.loading_module = None;
+        self.exception_handler = None;
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Serialize, Deserialize, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Fault {
     UnknownSymbol(Symbol),
     IncorrectNumberOfArguments,
@@ -1282,7 +1320,6 @@ pub enum Fault {
     NotAFunction,
     StackOverflow,
     StackUnderflow,
-    InvalidIndex,
     UnsupportedOperation,
     OutOfMemory,
     OutOfBounds,
@@ -1299,11 +1336,42 @@ pub enum Fault {
     Timeout,
     Waiting,
     FrameChanged,
-    Custom {
-        // TODO add an optional Type as a source.
-        code: u32,
-        message: Box<Cow<'static, String>>,
-    },
+    Exception(Value),
+}
+
+impl Fault {
+    #[must_use]
+    pub fn as_value(&self) -> Value {
+        match self {
+            Fault::UnknownSymbol(sym) => Value::dynamic(List::from_iter([
+                Symbol::from("undefined").into(),
+                sym.into(),
+            ])),
+            Fault::IncorrectNumberOfArguments => Symbol::from("args").into(),
+            Fault::OperationOnNil => Symbol::from("nil").into(),
+            Fault::NotAFunction => Symbol::from("not_invokable").into(),
+            Fault::MissingModule => Symbol::from("internal").into(),
+            Fault::StackOverflow => Symbol::from("overflow").into(),
+            Fault::StackUnderflow => Symbol::from("underflow").into(),
+            Fault::UnsupportedOperation => Symbol::from("unsupported").into(),
+            Fault::OutOfMemory => Symbol::from("out_of_memory").into(),
+            Fault::OutOfBounds => Symbol::from("out_of_bounds").into(),
+            Fault::NotMutable => Symbol::from("immutable").into(),
+            Fault::DivideByZero => Symbol::from("divided_by_zero").into(),
+            Fault::InvalidInstructionAddress => Symbol::from("invalid_instruction").into(),
+            Fault::ExpectedSymbol => Symbol::from("expected_symbol").into(),
+            Fault::ExpectedInteger => Symbol::from("expected_integer").into(),
+            Fault::ExpectedString => Symbol::from("expected_string").into(),
+            Fault::InvalidArity => Symbol::from("invalid_arity").into(),
+            Fault::InvalidLabel => Symbol::from("invalid_label").into(),
+            Fault::InvalidOpcode => Symbol::from("invalid_opcode").into(),
+            Fault::NoBudget => Symbol::from("no_budget").into(),
+            Fault::Timeout => Symbol::from("timeout").into(),
+            Fault::Waiting => Symbol::from("waiting").into(),
+            Fault::FrameChanged => Symbol::from("frame_changed").into(),
+            Fault::Exception(value) => value.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1418,6 +1486,7 @@ struct CodeData {
     regexes: Vec<PrecompiledRegex>,
     stack_requirement: usize,
     symbols: Vec<Symbol>,
+    known_symbols: AHashMap<Symbol, usize>,
     dynamics: Vec<Dynamic>,
     functions: Vec<BitcodeFunction>,
     modules: Vec<BitcodeModule>,
@@ -1469,6 +1538,7 @@ impl CodeData {
                     UnaryKind::Jump => LoadedOp::Jump(unary),
                     UnaryKind::NewMap => LoadedOp::NewMap(unary),
                     UnaryKind::NewList => LoadedOp::NewList(unary),
+                    UnaryKind::SetExceptionHandler => LoadedOp::SetExceptionHandler(unary),
                 });
             }
             Op::BinOp {
@@ -1554,9 +1624,11 @@ impl CodeData {
     }
 
     fn push_symbol(&mut self, symbol: Symbol) -> usize {
-        let index = self.symbols.len();
-        self.symbols.push(symbol);
-        index
+        *self.known_symbols.entry(symbol.clone()).or_insert_with(|| {
+            let index = self.symbols.len();
+            self.symbols.push(symbol);
+            index
+        })
     }
 
     fn push_module(&mut self, module: &BitcodeModule) -> usize {
@@ -1753,6 +1825,7 @@ enum LoadedOp {
     Jump(LoadedUnary),
     NewMap(LoadedUnary),
     NewList(LoadedUnary),
+    SetExceptionHandler(LoadedUnary),
     LogicalXor(LoadedBinary),
     Assign(LoadedBinary),
     Add(LoadedBinary),
@@ -1851,10 +1924,7 @@ fn precompiled_regex(regex: &RegExLiteral) -> PrecompiledRegex {
         literal: regex.clone(),
         result: MuseRegEx::new(regex)
             .map(Value::dynamic)
-            .map_err(|err| Fault::Custom {
-                code: 0,
-                message: Box::new(Cow::Owned(err.to_string())),
-            }),
+            .map_err(|err| Fault::Exception(Value::dynamic(MuseString::from(err.to_string())))),
     }
 }
 

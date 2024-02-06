@@ -8,6 +8,16 @@ multi_map: {
     output: Map({Int(1): Bool(true), Int(2): Bool(false)}),
 }
 
+symbol_map: {
+    src: r#"{:a: true, :b: false}"#,
+    output: Map({Symbol("a"): Bool(true), Symbol("b"): Bool(false)}),
+}
+
+symbol_map_access: {
+    src: r#"let map = {:a: true}; map.a"#,
+    output: Bool(true),
+}
+
 single_set: {
     src: r#"{1,}"#,
     output: Map({Int(1): Int(1)}),

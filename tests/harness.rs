@@ -38,7 +38,67 @@ enum TestOutput {
     Map(TestMap),
     List(Vec<TestOutput>),
     Error(Vec<Ranged<Error>>),
-    Fault(Fault),
+    Fault(VmFault),
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
+enum VmFault {
+    UnknownSymbol(Symbol),
+    IncorrectNumberOfArguments,
+    OperationOnNil,
+    MissingModule,
+    NotAFunction,
+    StackOverflow,
+    StackUnderflow,
+    InvalidIndex,
+    UnsupportedOperation,
+    OutOfMemory,
+    OutOfBounds,
+    NotMutable,
+    DivideByZero,
+    InvalidInstructionAddress,
+    ExpectedSymbol,
+    ExpectedInteger,
+    ExpectedString,
+    InvalidArity,
+    InvalidLabel,
+    InvalidOpcode,
+    NoBudget,
+    Timeout,
+    Waiting,
+    FrameChanged,
+    Exception(Box<TestOutput>),
+}
+
+impl From<Fault> for VmFault {
+    fn from(value: Fault) -> Self {
+        match value {
+            Fault::UnknownSymbol(sym) => Self::UnknownSymbol(sym),
+            Fault::IncorrectNumberOfArguments => Self::IncorrectNumberOfArguments,
+            Fault::OperationOnNil => Self::OperationOnNil,
+            Fault::MissingModule => Self::MissingModule,
+            Fault::NotAFunction => Self::NotAFunction,
+            Fault::StackOverflow => Self::StackOverflow,
+            Fault::StackUnderflow => Self::StackUnderflow,
+            Fault::UnsupportedOperation => Self::UnsupportedOperation,
+            Fault::OutOfMemory => Self::OutOfMemory,
+            Fault::OutOfBounds => Self::OutOfBounds,
+            Fault::NotMutable => Self::NotMutable,
+            Fault::DivideByZero => Self::DivideByZero,
+            Fault::InvalidInstructionAddress => Self::InvalidInstructionAddress,
+            Fault::ExpectedSymbol => Self::ExpectedSymbol,
+            Fault::ExpectedInteger => Self::ExpectedInteger,
+            Fault::ExpectedString => Self::ExpectedString,
+            Fault::InvalidArity => Self::InvalidArity,
+            Fault::InvalidLabel => Self::InvalidLabel,
+            Fault::InvalidOpcode => Self::InvalidOpcode,
+            Fault::NoBudget => Self::NoBudget,
+            Fault::Timeout => Self::Timeout,
+            Fault::Waiting => Self::Waiting,
+            Fault::FrameChanged => Self::FrameChanged,
+            Fault::Exception(value) => Self::Exception(Box::new(TestOutput::from(value))),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,7 +114,7 @@ impl Case {
         match Compiler::compile(&self.src) {
             Ok(code) => match Vm::default().execute(&code) {
                 Ok(value) => (Some(code), TestOutput::from(value)),
-                Err(fault) => (Some(code), TestOutput::Fault(fault)),
+                Err(fault) => (Some(code), TestOutput::Fault(VmFault::from(fault))),
             },
             Err(err) => (None, TestOutput::Error(err)),
         }
