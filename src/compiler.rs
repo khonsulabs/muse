@@ -187,6 +187,7 @@ impl<'a> Scope<'a> {
             Expression::Nil => self.compiler.code.copy((), dest),
             Expression::Bool(bool) => self.compiler.code.copy(*bool, dest),
             Expression::Int(int) => self.compiler.code.copy(*int, dest),
+            Expression::UInt(int) => self.compiler.code.copy(*int, dest),
             Expression::Float(float) => self.compiler.code.copy(*float, dest),
             Expression::String(string) => self
                 .compiler
@@ -329,10 +330,6 @@ impl<'a> Scope<'a> {
             Expression::Unary(unary) => self.compile_unary(unary, dest),
             Expression::Binary(binop) => {
                 self.compile_binop(binop, dest);
-            }
-            Expression::Chain(chain) => {
-                self.compile_expression(&chain.0, OpDestination::Void);
-                self.compile_expression(&chain.1, dest);
             }
             Expression::Block(block) => {
                 let break_label = self.compiler.code.new_label();
@@ -738,7 +735,6 @@ impl<'a> Scope<'a> {
     }
 
     fn compile_binop(&mut self, binop: &BinaryExpression, dest: OpDestination) {
-        let left = self.compile_source(&binop.left);
         let kind = match binop.kind {
             syntax::BinaryKind::Add => BinaryKind::Add,
             syntax::BinaryKind::Subtract => BinaryKind::Subtract,
@@ -749,6 +745,11 @@ impl<'a> Scope<'a> {
             syntax::BinaryKind::Power => BinaryKind::Power,
             syntax::BinaryKind::Bitwise(kind) => BinaryKind::Bitwise(kind),
             syntax::BinaryKind::Compare(kind) => BinaryKind::Compare(kind),
+            syntax::BinaryKind::Chain => {
+                self.compile_expression(&binop.left, OpDestination::Void);
+                self.compile_expression(&binop.right, dest);
+                return;
+            }
             syntax::BinaryKind::Logical(LogicalKind::And) => {
                 let after = self.compiler.code.new_label();
                 self.compile_expression(&binop.left, dest);
@@ -775,6 +776,7 @@ impl<'a> Scope<'a> {
             }
             syntax::BinaryKind::Logical(LogicalKind::Xor) => BinaryKind::LogicalXor,
         };
+        let left = self.compile_source(&binop.left);
         let right = self.compile_source(&binop.right);
         self.compiler.code.push(Op::BinOp {
             op1: left,
@@ -789,6 +791,7 @@ impl<'a> Scope<'a> {
             Expression::Nil => ValueOrSource::Nil,
             Expression::Bool(bool) => ValueOrSource::Bool(*bool),
             Expression::Int(int) => ValueOrSource::Int(*int),
+            Expression::UInt(int) => ValueOrSource::UInt(*int),
             Expression::Float(float) => ValueOrSource::Float(*float),
             Expression::RegEx(regex) => ValueOrSource::RegEx(regex.clone()),
             Expression::String(string) => ValueOrSource::String(string.clone()),
@@ -814,7 +817,6 @@ impl<'a> Scope<'a> {
             | Expression::Binary(_)
             | Expression::Block(_)
             | Expression::Loop(_)
-            | Expression::Chain(_)
             | Expression::Break(_)
             | Expression::Continue(_)
             | Expression::Return(_) => {

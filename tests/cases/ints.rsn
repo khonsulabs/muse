@@ -1,0 +1,39 @@
+signed: {
+    src: "1_234_567_890",
+    output: Int(1_234_567_890),
+}
+
+negative_signed: {
+    src: "-1_234_567_890",
+    output: Int(-1_234_567_890),
+}
+
+unsigned: {
+    src: "1_234_567_890u",
+    output: UInt(1_234_567_890),
+}
+
+negative_unsigned: {
+    src: "-1_234_567_890u",
+    output: Int(-1_234_567_890),
+}
+
+negate_unsigned: {
+    src: "-(1_234_567_890u)",
+    output: Int(-1_234_567_890),
+}
+
+add_int_int: {
+    src: "1 + 2",
+    output: Int(3),
+}
+
+add_float_int: {
+    src: "1.1 + 2",
+    output: Float(3.1),
+}
+
+add_int_float: {
+    src: "2 + 1.1",
+    output: Float(3.1),
+}

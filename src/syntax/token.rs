@@ -17,6 +17,7 @@ pub enum Token {
     Symbol(Symbol),
     Label(Symbol),
     Int(i64),
+    UInt(u64),
     Float(f64),
     Char(char),
     String(String),
@@ -73,6 +74,7 @@ impl Hash for Token {
         match self {
             Token::Identifier(t) | Token::Label(t) | Token::Symbol(t) => t.hash(state),
             Token::Int(t) => t.hash(state),
+            Token::UInt(t) => t.hash(state),
             Token::Float(t) => t.to_bits().hash(state),
             Token::Char(t) => t.hash(state),
             Token::Open(t) | Token::Close(t) => t.hash(state),
@@ -193,10 +195,8 @@ impl Iterator for Tokens<'_> {
                 (start, '[') => Ok(self.chars.ranged(start.., Token::Open(Paired::Bracket))),
                 (start, ']') => Ok(self.chars.ranged(start.., Token::Close(Paired::Bracket))),
                 (start, ch) if ch.is_ascii_digit() => self.tokenize_number(start, ch),
-                (start, ch @ ('.' | '-'))
-                    if self.chars.peek().map_or(false, |ch| ch.is_ascii_digit()) =>
-                {
-                    self.tokenize_number(start, ch)
+                (start, '.') if self.chars.peek().map_or(false, |ch| ch.is_ascii_digit()) => {
+                    self.tokenize_number(start, '.')
                 }
                 (start, '.') if self.chars.peek() == Some('.') => {
                     self.chars.next();
@@ -284,8 +284,14 @@ impl<'a> Tokens<'a> {
         let has_decimal = if start_char == '.' {
             true
         } else {
-            while let Some(ch) = self.chars.peek().filter(char::is_ascii_digit) {
-                self.scratch.push(ch);
+            while let Some(ch) = self
+                .chars
+                .peek()
+                .filter(|ch| ch.is_ascii_digit() || *ch == '_')
+            {
+                if ch != '_' {
+                    self.scratch.push(ch);
+                }
                 self.chars.next();
             }
 
@@ -301,8 +307,14 @@ impl<'a> Tokens<'a> {
         // TODO e syntax?
 
         if has_decimal {
-            while let Some(ch) = self.chars.peek().filter(char::is_ascii_digit) {
-                self.scratch.push(ch);
+            while let Some(ch) = self
+                .chars
+                .peek()
+                .filter(|ch| ch.is_ascii_digit() || *ch == '_')
+            {
+                if ch != '_' {
+                    self.scratch.push(ch);
+                }
                 self.chars.next();
             }
 
@@ -311,6 +323,17 @@ impl<'a> Tokens<'a> {
                     .ranged(start.., Error::FloatParse(err.to_string()))
             })?;
             Ok(self.chars.ranged(start.., Token::Float(float)))
+        } else if self.chars.peek() == Some('u') {
+            self.chars.next();
+            // It may seem weird to allow `-100u`, because it's nonsensical.
+            // However, it makes it consistent with other ways to write this
+            // "expression". E.g., `- 100u` or `-(100u)`.
+
+            let int = self.scratch.parse::<u64>().map_err(|err| {
+                self.chars
+                    .ranged(start.., Error::IntegerParse(err.to_string()))
+            })?;
+            Ok(self.chars.ranged(start.., Token::UInt(int)))
         } else {
             let int = self.scratch.parse::<i64>().map_err(|err| {
                 self.chars

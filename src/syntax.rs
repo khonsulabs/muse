@@ -99,6 +99,7 @@ pub enum Expression {
     Nil,
     Bool(bool),
     Int(i64),
+    UInt(u64),
     Float(f64),
     String(String),
     Symbol(Symbol),
@@ -113,7 +114,6 @@ pub enum Expression {
     Assign(Box<Assignment>),
     Unary(Box<UnaryExpression>),
     Binary(Box<BinaryExpression>),
-    Chain(Box<Chain>),
     Block(Box<Block>),
     Loop(Box<LoopExpression>),
     Break(Box<BreakExpression>),
@@ -137,7 +137,11 @@ impl Chain {
         while let Some(previous) = expressions.pop() {
             expression = Ranged::new(
                 previous.range().start..expression.range().end(),
-                Expression::Chain(Box::new(Chain(previous, expression))),
+                Expression::Binary(Box::new(BinaryExpression {
+                    kind: BinaryKind::Chain,
+                    left: previous,
+                    right: expression,
+                })),
             );
         }
 
@@ -278,6 +282,7 @@ pub enum BinaryKind {
     IntegerDivide,
     Remainder,
     Power,
+    Chain,
     Bitwise(BitwiseKind),
     Logical(LogicalKind),
     Compare(CompareKind),
@@ -746,6 +751,7 @@ impl Parselet for Term {
         matches!(
             token,
             Token::Int(_)
+                | Token::UInt(_)
                 | Token::Float(_)
                 | Token::Identifier(_)
                 | Token::RegEx(_)
@@ -764,6 +770,7 @@ impl PrefixParselet for Term {
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
         match token.0 {
             Token::Int(value) => Ok(Ranged::new(token.1, Expression::Int(value))),
+            Token::UInt(value) => Ok(Ranged::new(token.1, Expression::UInt(value))),
             Token::Float(value) => Ok(Ranged::new(token.1, Expression::Float(value))),
             Token::String(string) => Ok(Ranged::new(token.1, Expression::String(string))),
             Token::RegEx(regex) => Ok(Ranged::new(token.1, Expression::RegEx(regex))),
