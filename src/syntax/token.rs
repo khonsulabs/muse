@@ -323,24 +323,100 @@ impl<'a> Tokens<'a> {
                     .ranged(start.., Error::FloatParse(err.to_string()))
             })?;
             Ok(self.chars.ranged(start.., Token::Float(float)))
-        } else if self.chars.peek() == Some('u') {
-            self.chars.next();
-            // It may seem weird to allow `-100u`, because it's nonsensical.
-            // However, it makes it consistent with other ways to write this
-            // "expression". E.g., `- 100u` or `-(100u)`.
-
-            let int = self.scratch.parse::<u64>().map_err(|err| {
-                self.chars
-                    .ranged(start.., Error::IntegerParse(err.to_string()))
-            })?;
-            Ok(self.chars.ranged(start.., Token::UInt(int)))
         } else {
-            let int = self.scratch.parse::<i64>().map_err(|err| {
-                self.chars
-                    .ranged(start.., Error::IntegerParse(err.to_string()))
-            })?;
-            Ok(self.chars.ranged(start.., Token::Int(int)))
+            let signed = if self.chars.peek() == Some('u') {
+                self.chars.next();
+                false
+            } else {
+                true
+            };
+            match self.chars.peek() {
+                Some('x') if self.scratch == "0" => {
+                    self.chars.next();
+                    self.tokenize_radix(start, 16, signed)
+                }
+                Some('b') if self.scratch == "0" => {
+                    self.chars.next();
+                    self.tokenize_radix(start, 2, signed)
+                }
+                Some('o') if self.scratch == "0" => {
+                    self.chars.next();
+                    self.tokenize_radix(start, 8, signed)
+                }
+                Some('r') => {
+                    self.chars.next();
+                    let radix = self.scratch.parse::<u32>().map_err(|err| {
+                        self.chars
+                            .ranged(start.., Error::IntegerParse(err.to_string()))
+                    })?;
+                    self.tokenize_radix(start, radix, signed)
+                }
+                _ => {
+                    let token = if signed {
+                        self.scratch.parse::<i64>().map(Token::Int)
+                    } else {
+                        self.scratch.parse::<u64>().map(Token::UInt)
+                    }
+                    .map_err(|err| {
+                        self.chars
+                            .ranged(start.., Error::IntegerParse(err.to_string()))
+                    })?;
+
+                    Ok(self.chars.ranged(start.., token))
+                }
+            }
         }
+    }
+
+    fn tokenize_radix(
+        &mut self,
+        start: usize,
+        radix: u32,
+        signed: bool,
+    ) -> Result<Ranged<Token>, Ranged<Error>> {
+        self.scratch.clear();
+        if let Some(alpha_radix @ 1..) = radix.checked_sub(10) {
+            // Radix > 10. We need to check ascii_digit as well as filter the
+            // ascii alphabet.
+            while let Some(ch) = self.chars.peek().filter(|ch| {
+                ch.is_ascii_digit()
+                    || u8::try_from(*ch).map_or(false, |ch| {
+                        u32::from(ch.to_ascii_lowercase().wrapping_sub(b'a')) < alpha_radix
+                    })
+                    || *ch == '_'
+            }) {
+                if ch != '_' {
+                    self.scratch.push(ch);
+                }
+                self.chars.next();
+            }
+        } else {
+            // Radix <= 10. We only need to filter based on ascii digits.
+            while let Some(ch) = self.chars.peek().filter(|ch| {
+                u8::try_from(*ch).map_or(false, |ch| {
+                    u32::from(ch.to_ascii_lowercase().wrapping_sub(b'0')) < radix
+                }) || *ch == '_'
+            }) {
+                if ch != '_' {
+                    self.scratch.push(ch);
+                }
+                self.chars.next();
+            }
+        }
+
+        let decoded_bits = u64::from_str_radix(&self.scratch, radix).map_err(|err| {
+            self.chars
+                .ranged(start.., Error::IntegerParse(err.to_string()))
+        })?;
+
+        #[allow(clippy::cast_possible_wrap)]
+        let token = if signed {
+            Token::Int(decoded_bits as i64)
+        } else {
+            Token::UInt(decoded_bits)
+        };
+
+        Ok(self.chars.ranged(start.., token))
     }
 
     fn tokenize_identifier_symbol(&mut self, start: usize, start_char: char) -> Ranged<Symbol> {

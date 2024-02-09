@@ -829,6 +829,7 @@ impl Value {
     pub fn equals(&self, vm: Option<&mut Vm>, other: &Self) -> Result<bool, Fault> {
         match (self, other) {
             (Self::Nil, Self::Nil) => Ok(true),
+            (Self::Nil, _) | (_, Self::Nil) => Ok(false),
 
             (Self::Bool(l0), Self::Bool(r0)) => Ok(l0 == r0),
             (Self::Bool(b), Self::Int(i)) | (Self::Int(i), Self::Bool(b)) => {

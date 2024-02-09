@@ -9,7 +9,7 @@ var: {
 
 map_obj: {
     src: r#"
-        let a = {};
+        let a = {,};
         a.c = 2 + (a.b = 1);
         a.b + a.c
     "#,

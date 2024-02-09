@@ -23,6 +23,46 @@ negate_unsigned: {
     output: Int(-1_234_567_890),
 }
 
+hex_signed: {
+    src: "0xFeed_D0d0_Dead_Beef",
+    output: Int(-0x112_2f2f_2152_4111),
+}
+
+hex_unsigned: {
+    src: "0uxFeed_D0d0_Dead_Beef",
+    output: UInt(0xFeed_D0d0_Dead_Beef),
+}
+
+octal_signed: {
+    src: "0o77",
+    output: Int(0x3F),
+}
+
+octal_unsigned: {
+    src: "0uo77",
+    output: UInt(0x3F),
+}
+
+binary_signed: {
+    src: "0b1000_0000",
+    output: Int(0x80),
+}
+
+binary_unsigned: {
+    src: "0ub1000_0000",
+    output: UInt(0x80),
+}
+
+radix_signed: {
+    src: "36rz0",
+    output: Int(1260),
+}
+
+radix_unsigned: {
+    src: "36urz0",
+    output: UInt(1260),
+}
+
 add_int_int: {
     src: "1 + 2",
     output: Int(3),

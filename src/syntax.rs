@@ -688,8 +688,6 @@ struct SharedPredence<T> {
     wildcard: Vec<T>,
 }
 
-// a (b) * 2
-
 impl<T> SharedPredence<T>
 where
     T: Parselet,
@@ -1041,9 +1039,21 @@ impl PrefixParselet for Braces {
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
-        if tokens.peek_token() == Some(Token::Close(Paired::Brace)) {
-            tokens.next()?;
-            return Ok(tokens.ranged(token.range().start.., Expression::Map(Box::default())));
+        match tokens.peek_token() {
+            Some(Token::Close(Paired::Brace)) => {
+                tokens.next()?;
+                return Ok(tokens.ranged(token.range().start.., Expression::Nil));
+            }
+            Some(Token::Char(',')) => {
+                tokens.next()?;
+                if tokens.peek_token() == Some(Token::Close(Paired::Brace)) {
+                    tokens.next()?;
+                    return Ok(
+                        tokens.ranged(token.range().start.., Expression::Map(Box::default()))
+                    );
+                }
+            }
+            _ => {}
         }
         let expr = config.parse_expression(tokens)?;
 
@@ -1086,18 +1096,23 @@ fn parse_paired(
     mut inner: impl FnMut(&mut TokenReader<'_>) -> Result<(), Ranged<Error>>,
 ) -> Result<bool, Ranged<Error>> {
     let mut ended_in_separator = false;
-    while tokens
-        .peek()
-        .map_or(false, |token| token.0 != Token::Close(end))
-    {
-        inner(tokens)?;
+    if tokens.peek().map_or(false, |token| &token.0 == separator) {
+        tokens.next()?;
+        ended_in_separator = true;
+    } else {
+        while tokens
+            .peek()
+            .map_or(false, |token| token.0 != Token::Close(end))
+        {
+            inner(tokens)?;
 
-        if tokens.peek_token().as_ref() == Some(separator) {
-            tokens.next()?;
-            ended_in_separator = true;
-        } else {
-            ended_in_separator = false;
-            break;
+            if tokens.peek_token().as_ref() == Some(separator) {
+                tokens.next()?;
+                ended_in_separator = true;
+            } else {
+                ended_in_separator = false;
+                break;
+            }
         }
     }
 

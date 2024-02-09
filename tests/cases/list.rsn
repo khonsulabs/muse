@@ -3,8 +3,18 @@ empty_list: {
     output: List([]),
 }
 
+empty_list_comma: {
+    src: r#"[,]"#,
+    output: List([]),
+}
+
 single_list: {
     src: r#"[1]"#,
+    output: List([Int(1)]),
+}
+
+single_list_comma: {
+    src: r#"[1,]"#,
     output: List([Int(1)]),
 }
 
@@ -15,6 +25,11 @@ multi_list: {
 
 empty_tuple: {
     src: r#"()"#,
+    output: List([]),
+}
+
+empty_tuple_comma: {
+    src: r#"(,)"#,
     output: List([]),
 }
 
