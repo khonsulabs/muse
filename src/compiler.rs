@@ -194,15 +194,46 @@ impl<'a> Scope<'a> {
                 .code
                 .copy(ValueOrSource::String(string.clone()), dest),
             Expression::Symbol(symbol) => self.compiler.code.copy(symbol.clone(), dest),
-            Expression::RegEx(regex) => self.compiler.code.copy(regex.clone(), dest),
+            Expression::Regex(regex) => self.compiler.code.copy(regex.clone(), dest),
             Expression::Lookup(lookup) => {
                 if let Some(base) = &lookup.base {
-                    let target = self.compile_source(base);
+                    let (target, after_label) = if let Expression::TryOrNil(try_op) = &base.0 {
+                        let exception_error = self.compiler.code.new_label();
+                        let after_expression = self.compiler.code.new_label();
+                        let after_handler = self.compiler.code.new_label();
+                        let previous_handler = self.new_temporary();
+                        self.compiler
+                            .code
+                            .set_exception_handler(exception_error, previous_handler);
+
+                        let base = self.compile_source(&try_op.body);
+                        self.compiler.code.copy((), dest);
+                        self.compiler
+                            .code
+                            .set_exception_handler(previous_handler, ());
+                        self.compiler.code.jump(after_handler, ());
+
+                        self.compiler.code.label(exception_error);
+                        self.compiler.code.copy((), dest);
+                        self.compiler
+                            .code
+                            .set_exception_handler(previous_handler, ());
+                        self.compiler.code.jump(after_expression, ());
+
+                        self.compiler.code.label(after_handler);
+                        (base, Some(after_expression))
+                    } else {
+                        (self.compile_source(base), None)
+                    };
                     self.compiler.code.copy(lookup.name.clone(), Register(0));
                     self.compiler
                         .code
                         .invoke(target, Symbol::get_symbol().clone(), 1);
                     self.compiler.code.copy(Register(0), dest);
+
+                    if let Some(label) = after_label {
+                        self.compiler.code.label(label);
+                    }
                 } else if let Some(var) = self.compiler.declarations.get(&lookup.name) {
                     self.compiler.code.copy(var.stack, dest);
                 } else {
@@ -342,6 +373,14 @@ impl<'a> Scope<'a> {
                 scope.compile_expression(&block.body, dest);
                 scope.compiler.code.label(break_label);
             }
+            Expression::Try(try_expr) => self.compile_try_catch(
+                |this| this.compile_expression(&try_expr.body, dest),
+                |this| this.compile_expression(&try_expr.catch, dest),
+            ),
+            Expression::TryOrNil(try_expr) => self.compile_try_catch(
+                |this| this.compile_expression(&try_expr.body, dest),
+                |this| this.compiler.code.copy((), dest),
+            ),
             Expression::Call(call) => self.compile_function_call(call, expr.range(), dest),
             Expression::Index(index) => self.compile_index(index, expr.range(), dest),
             Expression::Variable(decl) => {
@@ -430,6 +469,25 @@ impl<'a> Scope<'a> {
                 self.compiler.errors.append(&mut mod_compiler.errors);
             }
         }
+    }
+
+    fn compile_try_catch(&mut self, tried: impl FnOnce(&mut Self), catch: impl FnOnce(&mut Self)) {
+        let exception_error = self.compiler.code.new_label();
+        let after_handler = self.compiler.code.new_label();
+        let previous_handler = self.new_temporary();
+
+        self.compiler
+            .code
+            .set_exception_handler(exception_error, previous_handler);
+        tried(self);
+        self.compiler.code.jump(after_handler, ());
+
+        self.compiler.code.label(exception_error);
+        catch(self);
+        self.compiler.code.label(after_handler);
+        self.compiler
+            .code
+            .set_exception_handler(previous_handler, ());
     }
 
     fn compile_break(&mut self, break_expr: &BreakExpression, from: SourceRange) {
@@ -793,7 +851,7 @@ impl<'a> Scope<'a> {
             Expression::Int(int) => ValueOrSource::Int(*int),
             Expression::UInt(int) => ValueOrSource::UInt(*int),
             Expression::Float(float) => ValueOrSource::Float(*float),
-            Expression::RegEx(regex) => ValueOrSource::RegEx(regex.clone()),
+            Expression::Regex(regex) => ValueOrSource::Regex(regex.clone()),
             Expression::String(string) => ValueOrSource::String(string.clone()),
             Expression::Symbol(symbol) => ValueOrSource::Symbol(symbol.clone()),
             Expression::Lookup(lookup) => {
@@ -815,6 +873,8 @@ impl<'a> Scope<'a> {
             | Expression::Assign(_)
             | Expression::Unary(_)
             | Expression::Binary(_)
+            | Expression::Try(_)
+            | Expression::TryOrNil(_)
             | Expression::Block(_)
             | Expression::Loop(_)
             | Expression::Break(_)

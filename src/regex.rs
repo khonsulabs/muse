@@ -5,21 +5,25 @@ use std::ops::Deref;
 use regex::Regex;
 
 use crate::symbol::Symbol;
-use crate::syntax::token::RegExLiteral;
+use crate::syntax::token::RegexLiteral;
 use crate::value::{CustomType, Dynamic, StaticRustFunctionTable, Value, ValueHasher};
 use crate::vm::{Arity, Fault, Vm};
 
 #[derive(Debug, Clone)]
-pub struct MuseRegEx {
+pub struct MuseRegex {
     expr: Regex,
-    literal: RegExLiteral,
+    literal: RegexLiteral,
 }
 
-impl MuseRegEx {
-    pub fn new(literal: &RegExLiteral) -> Result<Self, regex::Error> {
+impl MuseRegex {
+    pub fn new(literal: &RegexLiteral) -> Result<Self, regex::Error> {
         let expr = regex::RegexBuilder::new(&literal.pattern)
             .ignore_whitespace(literal.expanded)
             .crlf(true)
+            .unicode(literal.unicode)
+            .dot_matches_new_line(literal.dot_matches_all)
+            .case_insensitive(literal.ignore_case)
+            .multi_line(literal.multiline)
             .build()?;
 
         Ok(Self {
@@ -29,12 +33,12 @@ impl MuseRegEx {
     }
 
     #[must_use]
-    pub const fn literal(&self) -> &RegExLiteral {
+    pub const fn literal(&self) -> &RegexLiteral {
         &self.literal
     }
 }
 
-impl Deref for MuseRegEx {
+impl Deref for MuseRegex {
     type Target = Regex;
 
     fn deref(&self) -> &Self::Target {
@@ -42,7 +46,7 @@ impl Deref for MuseRegEx {
     }
 }
 
-impl CustomType for MuseRegEx {
+impl CustomType for MuseRegex {
     fn hash(&self, _vm: &mut Vm, hasher: &mut ValueHasher) {
         self.expr.as_str().hash(hasher);
     }
@@ -67,16 +71,16 @@ impl CustomType for MuseRegEx {
     }
 
     fn invoke(&self, vm: &mut Vm, name: &Symbol, arity: Arity) -> Result<Value, Fault> {
-        static FUNCTIONS: StaticRustFunctionTable<MuseRegEx> =
+        static FUNCTIONS: StaticRustFunctionTable<MuseRegex> =
             StaticRustFunctionTable::new(|table| {
                 table
-                    .with_fn("total_captures", 0, |_vm: &mut Vm, this: &MuseRegEx| {
+                    .with_fn("total_captures", 0, |_vm: &mut Vm, this: &MuseRegex| {
                         Value::try_from(this.captures_len())
                     })
                     .with_fn(
                         "total_static_captures",
                         0,
-                        |_vm: &mut Vm, this: &MuseRegEx| {
+                        |_vm: &mut Vm, this: &MuseRegex| {
                             Ok(this
                                 .static_captures_len()
                                 .map(Value::try_from)
@@ -102,7 +106,7 @@ impl CustomType for MuseRegEx {
     }
 }
 
-impl Display for MuseRegEx {
+impl Display for MuseRegex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         Display::fmt(&self.expr, f)
     }

@@ -1093,7 +1093,7 @@ impl Source for PrecompiledRegex {
     }
 
     fn as_source(&self) -> ValueOrSource {
-        ValueOrSource::RegEx(self.literal.clone())
+        ValueOrSource::Regex(self.literal.clone())
     }
 }
 impl Source for Label {
@@ -1142,7 +1142,7 @@ macro_rules! decode_source {
             ValueOrSource::Int(source) => $next_fn($source, $code $(, $($arg)*)?, *source),
             ValueOrSource::UInt(source) => $next_fn($source, $code $(, $($arg)*)?, *source),
             ValueOrSource::Float(source) => $next_fn($source, $code $(, $($arg)*)?, *source),
-            ValueOrSource::RegEx(source) => $next_fn($source, $code $(, $($arg)*)?, precompiled_regex(source)),
+            ValueOrSource::Regex(source) => $next_fn($source, $code $(, $($arg)*)?, precompiled_regex(source)),
             ValueOrSource::String(source) => $next_fn($source, $code $(, $($arg)*)?, Value::dynamic(MuseString::from(source.clone()))),
             ValueOrSource::Symbol(source) => $next_fn($source, $code $(, $($arg)*)?, source.clone()),
             ValueOrSource::Function(source) => $next_fn($source, $code $(, $($arg)*)?, Function::from(source)),

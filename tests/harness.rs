@@ -4,10 +4,10 @@ use std::path::Path;
 use muse::compiler::{Compiler, Error};
 use muse::list::List;
 use muse::map::Map;
-use muse::regex::MuseRegEx;
+use muse::regex::MuseRegex;
 use muse::string::MuseString;
 use muse::symbol::Symbol;
-use muse::syntax::token::RegExLiteral;
+use muse::syntax::token::RegexLiteral;
 use muse::syntax::Ranged;
 use muse::value::Value;
 use muse::vm::{Code, Fault, Vm};
@@ -16,7 +16,7 @@ use serde::Deserialize;
 
 fn main() {
     let filter = std::env::args().nth(1).unwrap_or_default();
-    // let filter = String::from("map_obj");
+    // let filter = String::from("try_operator_dot");
     for entry in std::fs::read_dir("tests/cases").unwrap() {
         let entry = entry.unwrap().path();
         if entry.extension().map_or(false, |ext| ext == "rsn") {
@@ -34,7 +34,7 @@ enum TestOutput {
     Float(f64),
     Symbol(Symbol),
     String(String),
-    RegEx(RegExLiteral),
+    Regex(RegexLiteral),
     Map(TestMap),
     List(Vec<TestOutput>),
     Error(Vec<Ranged<Error>>),
@@ -133,8 +133,8 @@ impl From<Value> for TestOutput {
             Value::Dynamic(v) => {
                 if let Some(str) = v.downcast_ref::<MuseString>() {
                     TestOutput::String(str.to_string())
-                } else if let Some(regex) = v.downcast_ref::<MuseRegEx>() {
-                    TestOutput::RegEx(regex.literal().clone())
+                } else if let Some(regex) = v.downcast_ref::<MuseRegex>() {
+                    TestOutput::Regex(regex.literal().clone())
                 } else if let Some(map) = v.downcast_ref::<Map>() {
                     TestOutput::Map(TestMap(
                         map.to_vec()

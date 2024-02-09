@@ -1,0 +1,14 @@
+try_operator: {
+    src: r#"(1/0)?"#,
+    output: Nil,
+}
+
+div_by_zero: {
+    src: r#"1/0"#,
+    output: Fault(DivideByZero),
+}
+
+try_operator_dot: {
+    src: r#"(1/0)?.nonsense"#,
+    output: Nil,
+}

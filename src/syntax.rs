@@ -5,7 +5,7 @@ use std::ops::{Bound, Deref, DerefMut, Range, RangeBounds, RangeInclusive};
 use ahash::AHashMap;
 use serde::{Deserialize, Serialize};
 
-use self::token::{Paired, RegExLiteral, Token, Tokens};
+use self::token::{Paired, RegexLiteral, Token, Tokens};
 use crate::symbol::Symbol;
 pub mod token;
 
@@ -103,9 +103,11 @@ pub enum Expression {
     Float(f64),
     String(String),
     Symbol(Symbol),
-    RegEx(RegExLiteral),
+    Regex(RegexLiteral),
     Lookup(Box<Lookup>),
     If(Box<IfExpression>),
+    Try(Box<TryExpression>),
+    TryOrNil(Box<TryOrNil>),
     Map(Box<MapExpression>),
     List(Vec<Ranged<Expression>>),
     Tuple(Vec<Ranged<Expression>>),
@@ -183,6 +185,18 @@ pub struct IfExpression {
     pub condition: Ranged<Expression>,
     pub when_true: Ranged<Expression>,
     pub when_false: Option<Ranged<Expression>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TryOrNil {
+    pub body: Ranged<Expression>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TryExpression {
+    pub body: Ranged<Expression>,
+    pub exception_name: Option<Range<Symbol>>,
+    pub catch: Ranged<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -470,8 +484,12 @@ impl<'a> ParserConfig<'a> {
                 for level in &self.parselets.infix.0[start_index..] {
                     if let Some(parselet) = level.find_parselet(&possible_operator, tokens) {
                         tokens.next()?;
-                        lhs =
-                            parselet.parse(lhs, tokens, &self.with_precedence(level.precedence))?;
+                        lhs = parselet.parse(
+                            lhs,
+                            &possible_operator,
+                            tokens,
+                            &self.with_precedence(level.precedence),
+                        )?;
                         continue 'infix;
                     }
                 }
@@ -752,7 +770,7 @@ impl Parselet for Term {
                 | Token::UInt(_)
                 | Token::Float(_)
                 | Token::Identifier(_)
-                | Token::RegEx(_)
+                | Token::Regex(_)
                 | Token::String(_)
                 | Token::Symbol(_)
         )
@@ -771,7 +789,7 @@ impl PrefixParselet for Term {
             Token::UInt(value) => Ok(Ranged::new(token.1, Expression::UInt(value))),
             Token::Float(value) => Ok(Ranged::new(token.1, Expression::Float(value))),
             Token::String(string) => Ok(Ranged::new(token.1, Expression::String(string))),
-            Token::RegEx(regex) => Ok(Ranged::new(token.1, Expression::RegEx(regex))),
+            Token::Regex(regex) => Ok(Ranged::new(token.1, Expression::Regex(regex))),
             Token::Identifier(value) => Ok(Ranged::new(
                 token.1,
                 Expression::Lookup(Box::new(Lookup::from(value))),
@@ -1159,6 +1177,7 @@ impl InfixParselet for Parentheses {
     fn parse(
         &self,
         function: Ranged<Expression>,
+        _token: &Ranged<Token>,
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
@@ -1211,6 +1230,7 @@ impl InfixParselet for Brackets {
     fn parse(
         &self,
         target: Ranged<Expression>,
+        _token: &Ranged<Token>,
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
@@ -1258,6 +1278,7 @@ trait InfixParselet: Parselet {
     fn parse(
         &self,
         lhs: Ranged<Expression>,
+        token: &Ranged<Token>,
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>>;
@@ -1280,6 +1301,7 @@ macro_rules! impl_infix_parselet {
             fn parse(
                 &self,
                 left: Ranged<Expression>,
+                _token: &Ranged<Token>,
                 tokens: &mut TokenReader<'_>,
                 config: &ParserConfig<'_>,
             ) -> Result<Ranged<Expression>, Ranged<Error>> {
@@ -1740,6 +1762,7 @@ impl InfixParselet for ArrowFn {
     fn parse(
         &self,
         lhs: Ranged<Expression>,
+        _token: &Ranged<Token>,
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
@@ -1784,6 +1807,7 @@ impl InfixParselet for Dot {
     fn parse(
         &self,
         lhs: Ranged<Expression>,
+        _token: &Ranged<Token>,
         tokens: &mut TokenReader<'_>,
         _config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
@@ -1797,6 +1821,29 @@ impl InfixParselet for Dot {
                 base: Some(lhs),
                 name,
             })),
+        ))
+    }
+}
+
+struct TryOperator;
+
+impl Parselet for TryOperator {
+    fn token(&self) -> Option<Token> {
+        Some(Token::Char('?'))
+    }
+}
+
+impl InfixParselet for TryOperator {
+    fn parse(
+        &self,
+        lhs: Ranged<Expression>,
+        _token: &Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        _config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        Ok(tokens.ranged(
+            lhs.range().start..,
+            Expression::TryOrNil(Box::new(TryOrNil { body: lhs })),
         ))
     }
 }
@@ -1881,6 +1928,7 @@ impl InfixParselet for Assign {
     fn parse(
         &self,
         lhs: Ranged<Expression>,
+        _token: &Ranged<Token>,
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
@@ -1937,7 +1985,7 @@ fn parselets() -> Parselets {
     parser.push_infix(parselets![BitwiseAnd]);
     parser.push_infix(parselets![Add, Subtract]);
     parser.push_infix(parselets![Multiply, Divide, Remainder, IntegerDivide]);
-    parser.push_infix(parselets![Parentheses, Dot, Brackets,]);
+    parser.push_infix(parselets![Parentheses, Dot, Brackets, TryOperator]);
     parser.push_prefix(parselets![
         Braces,
         Parentheses,

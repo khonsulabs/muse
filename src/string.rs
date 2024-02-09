@@ -3,7 +3,7 @@ use std::hash::Hash;
 use std::sync::{Mutex, MutexGuard};
 
 use crate::list::List;
-use crate::regex::MuseRegEx;
+use crate::regex::MuseRegex;
 use crate::symbol::Symbol;
 use crate::value::{CustomType, Dynamic, StaticRustFunctionTable, Value, ValueHasher};
 use crate::vm::{Arity, Fault, Register, Vm};
@@ -81,7 +81,7 @@ impl CustomType for MuseString {
                                         .collect::<List>(),
                                 ))
                             }
-                        } else if let Some(needle) = needle.as_downcast_ref::<MuseRegEx>() {
+                        } else if let Some(needle) = needle.as_downcast_ref::<MuseRegex>() {
                             let haystack = this.lock();
                             Ok(Value::dynamic(
                                 needle

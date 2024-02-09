@@ -1,8 +1,18 @@
 basic_regex: {
     src: r#"\hello/"#,
-    output: RegEx {
+    output: Regex {
         pattern: "hello",
-        expanded: false,
+    },
+}
+
+regex_options: {
+    src: r#"\hello/uims"#,
+    output: Regex {
+        pattern: "hello",
+        unicode: true,
+        dot_matches_all: true,
+        multiline: true,
+        ignore_case: true,
     },
 }
 
@@ -13,7 +23,7 @@ regex_no_eol: {
 
 expanded_regex: {
     src: "w\\hello # world\n/",
-    output: RegEx {
+    output: Regex {
         pattern: "hello # world\n",
         expanded: true,
     },

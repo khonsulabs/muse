@@ -21,7 +21,7 @@ pub enum Token {
     Float(f64),
     Char(char),
     String(String),
-    RegEx(RegExLiteral),
+    Regex(RegexLiteral),
     Power,
     LessThanOrEqual,
     GreaterThanOrEqual,
@@ -79,7 +79,7 @@ impl Hash for Token {
             Token::Char(t) => t.hash(state),
             Token::Open(t) | Token::Close(t) => t.hash(state),
             Token::String(t) => t.hash(state),
-            Token::RegEx(t) => t.hash(state),
+            Token::Regex(t) => t.hash(state),
             Token::Whitespace
             | Token::Comment
             | Token::Power
@@ -600,16 +600,36 @@ impl<'a> Tokens<'a> {
                 None => {
                     return Err(self
                         .chars
-                        .ranged(self.chars.last_index.., Error::MissingRegExEnd))
+                        .ranged(self.chars.last_index.., Error::MissingRegexEnd))
                 }
             }
         }
 
+        let mut ignore_case = false;
+        let mut unicode = false;
+        let mut dot_matches_all = false;
+        let mut multiline = false;
+        loop {
+            match self.chars.peek() {
+                Some('i') => ignore_case = true,
+                Some('u') => unicode = true,
+                Some('s') => dot_matches_all = true,
+                Some('m') => multiline = true,
+                _ => break,
+            }
+
+            self.chars.next();
+        }
+
         Ok(self.chars.ranged(
             start..,
-            Token::RegEx(RegExLiteral {
+            Token::Regex(RegexLiteral {
                 pattern: self.scratch.clone(),
                 expanded,
+                ignore_case,
+                unicode,
+                dot_matches_all,
+                multiline,
             }),
         ))
     }
@@ -639,14 +659,24 @@ pub enum Error {
     IntegerParse(String),
     FloatParse(String),
     MissingEndQuote,
-    MissingRegExEnd,
+    MissingRegexEnd,
     InvalidEscapeSequence,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, Hash, PartialEq)]
-pub struct RegExLiteral {
+#[allow(clippy::struct_excessive_bools)]
+pub struct RegexLiteral {
     pub pattern: String,
+    #[serde(default)]
     pub expanded: bool,
+    #[serde(default)]
+    pub ignore_case: bool,
+    #[serde(default)]
+    pub unicode: bool,
+    #[serde(default)]
+    pub dot_matches_all: bool,
+    #[serde(default)]
+    pub multiline: bool,
 }
 
 #[test]

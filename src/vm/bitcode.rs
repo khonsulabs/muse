@@ -10,7 +10,7 @@ use super::{Arity, Code, CodeData, Function, LoadedSource, Register};
 use crate::compiler::{BitcodeModule, UnaryKind};
 use crate::string::MuseString;
 use crate::symbol::Symbol;
-use crate::syntax::token::RegExLiteral;
+use crate::syntax::token::RegexLiteral;
 use crate::syntax::{BitwiseKind, CompareKind};
 use crate::vm::Stack;
 
@@ -23,7 +23,7 @@ pub enum ValueOrSource {
     Float(f64),
     Symbol(Symbol),
     String(String),
-    RegEx(RegExLiteral),
+    Regex(RegexLiteral),
     Register(Register),
     Function(BitcodeFunction),
     Stack(Stack),
@@ -63,7 +63,7 @@ impl_from!(ValueOrSource, Stack, Stack);
 impl_from!(ValueOrSource, Label, Label);
 impl_from!(ValueOrSource, bool, Bool);
 impl_from!(ValueOrSource, BitcodeFunction, Function);
-impl_from!(ValueOrSource, RegExLiteral, RegEx);
+impl_from!(ValueOrSource, RegexLiteral, Regex);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum OpDestination {
@@ -478,7 +478,7 @@ pub(super) fn trusted_loaded_source_to_value(
         }
         LoadedSource::Stack(loaded) => ValueOrSource::Stack(*loaded),
         LoadedSource::Label(loaded) => ValueOrSource::Label(*loaded),
-        LoadedSource::Regex(loaded) => ValueOrSource::RegEx(code.regexes[*loaded].literal.clone()),
+        LoadedSource::Regex(loaded) => ValueOrSource::Regex(code.regexes[*loaded].literal.clone()),
         LoadedSource::Function(loaded) => ValueOrSource::Function(code.functions[*loaded].clone()),
     }
 }

@@ -22,10 +22,10 @@ use crate::compiler::{BitcodeModule, BlockDeclaration, UnaryKind};
 use crate::list::List;
 #[cfg(not(feature = "dispatched"))]
 use crate::map;
-use crate::regex::MuseRegEx;
+use crate::regex::MuseRegex;
 use crate::string::MuseString;
 use crate::symbol::{IntoOptionSymbol, Symbol};
-use crate::syntax::token::RegExLiteral;
+use crate::syntax::token::RegexLiteral;
 use crate::syntax::{BitwiseKind, CompareKind};
 use crate::value::{CustomType, Dynamic, StaticRustFunctionTable, Value, WeakDynamic};
 
@@ -1657,7 +1657,7 @@ impl CodeData {
         index
     }
 
-    fn push_regex(&mut self, regex: &RegExLiteral) -> usize {
+    fn push_regex(&mut self, regex: &RegexLiteral) -> usize {
         let index = self.regexes.len();
         self.regexes.push(precompiled_regex(regex));
         index
@@ -1675,7 +1675,7 @@ impl CodeData {
             ValueOrSource::String(string) => LoadedSource::Dynamic(
                 self.push_dynamic(Dynamic::new(MuseString::from(string.as_str()))),
             ),
-            ValueOrSource::RegEx(regex) => LoadedSource::Regex(self.push_regex(regex)),
+            ValueOrSource::Regex(regex) => LoadedSource::Regex(self.push_regex(regex)),
             ValueOrSource::Register(reg) => LoadedSource::Register(*reg),
             ValueOrSource::Stack(stack) => {
                 self.stack_requirement = self.stack_requirement.max(stack.0 + 1);
@@ -1937,13 +1937,13 @@ enum LoadedSource {
 
 #[derive(Debug, Clone)]
 struct PrecompiledRegex {
-    literal: RegExLiteral,
+    literal: RegexLiteral,
     result: Result<Value, Fault>,
 }
-fn precompiled_regex(regex: &RegExLiteral) -> PrecompiledRegex {
+fn precompiled_regex(regex: &RegexLiteral) -> PrecompiledRegex {
     PrecompiledRegex {
         literal: regex.clone(),
-        result: MuseRegEx::new(regex)
+        result: MuseRegex::new(regex)
             .map(Value::dynamic)
             .map_err(|err| Fault::Exception(Value::dynamic(MuseString::from(err.to_string())))),
     }
