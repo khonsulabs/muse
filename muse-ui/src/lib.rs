@@ -23,7 +23,8 @@ pub fn install(vm: &mut Vm) {
                 Err(Fault::IncorrectNumberOfArguments)
             }
         })),
-    );
+    )
+    .unwrap();
 }
 
 static APP: Mutex<Option<App>> = Mutex::new(None);

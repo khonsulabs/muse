@@ -11,7 +11,7 @@ use crate::compiler::{BitcodeModule, UnaryKind};
 use crate::string::MuseString;
 use crate::symbol::Symbol;
 use crate::syntax::token::RegexLiteral;
-use crate::syntax::{BitwiseKind, CompareKind};
+use crate::syntax::{BitwiseKind, CompareKind, Literal};
 use crate::vm::Stack;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -33,6 +33,21 @@ pub enum ValueOrSource {
 impl From<()> for ValueOrSource {
     fn from(_value: ()) -> Self {
         Self::Nil
+    }
+}
+
+impl From<Literal> for ValueOrSource {
+    fn from(value: Literal) -> Self {
+        match value {
+            Literal::Nil => ValueOrSource::Nil,
+            Literal::Bool(value) => ValueOrSource::Bool(value),
+            Literal::Int(value) => ValueOrSource::Int(value),
+            Literal::UInt(value) => ValueOrSource::UInt(value),
+            Literal::Float(value) => ValueOrSource::Float(value),
+            Literal::String(value) => ValueOrSource::String(value),
+            Literal::Symbol(value) => ValueOrSource::Symbol(value),
+            Literal::Regex(value) => ValueOrSource::Regex(value),
+        }
     }
 }
 
@@ -633,6 +648,14 @@ impl BitcodeFunction {
 
     pub fn insert_arity(&mut self, arity: impl Into<Arity>, body: impl Into<BitcodeBlock>) {
         self.bodies.insert(arity.into(), body.into());
+    }
+
+    pub fn insert_variable_arity(
+        &mut self,
+        arity: impl Into<Arity>,
+        body: impl Into<BitcodeBlock>,
+    ) {
+        self.varg_bodies.insert(arity.into(), body.into());
     }
 
     #[must_use]

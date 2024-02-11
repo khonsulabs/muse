@@ -21,6 +21,7 @@ fn main() {
                 Err(Fault::UnsupportedOperation)
             }
         })),
-    );
+    )
+    .unwrap();
     assert_eq!(vm.execute(&code).unwrap(), Value::Bool(true));
 }

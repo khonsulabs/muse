@@ -42,6 +42,7 @@ pub enum Token {
     RangeInclusive,
     SlimArrow,
     FatArrow,
+    NilCoalesce,
     Open(Paired),
     Close(Paired),
 }
@@ -81,6 +82,7 @@ impl Hash for Token {
             Token::String(t) => t.hash(state),
             Token::Regex(t) => t.hash(state),
             Token::Whitespace
+            | Token::NilCoalesce
             | Token::Comment
             | Token::Power
             | Token::LessThanOrEqual
@@ -238,6 +240,11 @@ impl Iterator for Tokens<'_> {
                 (start, '=') if self.chars.peek() == Some('>') => {
                     self.chars.next();
                     Ok(self.chars.ranged(start.., Token::FatArrow))
+                }
+                (start, '?') if self.chars.peek() == Some('?') => {
+                    self.chars.next();
+
+                    Ok(self.chars.ranged(start.., Token::NilCoalesce))
                 }
                 (start, ch) if ch.is_ascii_punctuation() => {
                     Ok(self.chars.ranged(start.., Token::Char(ch)))

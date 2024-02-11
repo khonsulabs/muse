@@ -39,6 +39,7 @@ static_symbols!(
     iterate_symbol => "iterate",
     let_symbol => "let",
     loop_symbol => "loop",
+    match_symbol => "match",
     mod_symbol => "mod",
     next_symbol => "next",
     not_symbol => "not",

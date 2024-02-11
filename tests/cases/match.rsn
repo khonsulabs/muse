@@ -1,0 +1,40 @@
+match: {
+    src: r#"match 1 {
+        0 => nonsense,
+        1 => true,
+    }"#,
+    output: Bool(true),
+}
+
+match_any: {
+    src: r#"match 1 {
+        _ => true,
+        1 => false,
+    }"#,
+    output: Bool(true),
+}
+
+match_two: {
+    src: r#"match (1, 2) {
+        (1, 0) => nonsense,
+        (0, 2) => nonsense,
+        (1, 2) => true,
+    }"#,
+    output: Bool(true),
+}
+
+match_two_any: {
+    src: r#"match (1, 2) {
+        (_, _) => true,
+        (1, 2) => false,
+    }"#,
+    output: Bool(true),
+}
+
+match_two_any_one: {
+    src: r#"match (1, 2) {
+        _ => true,
+        (1, 2) => false,
+    }"#,
+    output: Bool(true),
+}

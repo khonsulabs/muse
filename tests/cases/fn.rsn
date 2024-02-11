@@ -44,14 +44,6 @@ fn_no_params_arrow: {
     output: Int(42),
 }
 
-fn_no_params_block: {
-    src: r#"
-        fn test { 42 };
-        test()
-    "#,
-    output: Int(42),
-}
-
 nameless_arrow: {
     src: r#"
         let test = fn(a) => a * 2;
@@ -76,17 +68,9 @@ nameless_no_params: {
     output: Int(42),
 }
 
-nameless_no_params_block: {
-    src: r#"
-        let test = fn { 42 };
-        test()
-    "#,
-    output: Int(42),
-}
-
 named_and_bound: {
     src: r#"
-        let test = fn answer { 42 };
+        let test = fn answer => 42;
         test() * answer()
     "#,
     output: Int(1764),
@@ -123,4 +107,25 @@ lambda_multi_params: {
         test(2, 3)
     "#,
     output: Int(6),
+}
+
+overload: {
+    src: r#"
+        fn answer {
+            () => 42,
+            (n) => answer() * n,
+        };
+        answer(2)
+    "#,
+    output: Int(84),
+}
+
+fn_any_params: {
+    src: r#"
+        fn answer {
+            _ => 42,
+        };
+        answer() + answer(2, 3)
+    "#,
+    output: Int(84),
 }

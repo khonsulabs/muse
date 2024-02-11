@@ -187,6 +187,17 @@ impl Value {
         }
     }
 
+    #[must_use]
+    pub fn as_downcast_mut<T>(&mut self) -> Option<&mut T>
+    where
+        T: DynamicValue,
+    {
+        match self {
+            Value::Dynamic(value) => value.downcast_mut(),
+            _ => None,
+        }
+    }
+
     pub fn truthy(&self, vm: &mut Vm) -> bool {
         match self {
             Value::Nil => false,

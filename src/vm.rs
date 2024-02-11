@@ -12,6 +12,7 @@ use std::{array, task};
 
 use ahash::AHashMap;
 use crossbeam_utils::sync::{Parker, Unparker};
+use kempt::map::Entry;
 use kempt::Map;
 use serde::{Deserialize, Serialize};
 
@@ -351,11 +352,19 @@ impl Vm {
         }
     }
 
-    pub fn declare(&mut self, name: impl Into<Symbol>, value: Value) -> Option<Value> {
+    pub fn declare(
+        &mut self,
+        name: impl Into<Symbol>,
+        value: Value,
+    ) -> Result<Option<Value>, Fault> {
         self.declare_inner(name, value, false)
     }
 
-    pub fn declare_mut(&mut self, name: impl Into<Symbol>, value: Value) -> Option<Value> {
+    pub fn declare_mut(
+        &mut self,
+        name: impl Into<Symbol>,
+        value: Value,
+    ) -> Result<Option<Value>, Fault> {
         self.declare_inner(name, value, true)
     }
 
@@ -364,29 +373,30 @@ impl Vm {
         name: impl Into<Symbol>,
         value: Value,
         mutable: bool,
-    ) -> Option<Value> {
-        self.modules[self.frames[self.current_frame].module]
+    ) -> Result<Option<Value>, Fault> {
+        match self.modules[self.frames[self.current_frame].module]
             .downcast_ref::<Module>()
             .expect("always a module")
             .declarations()
-            .insert(name.into(), ModuleDeclaration { mutable, value })
-            .map(|f| f.value.value)
+            .entry(name.into())
+        {
+            Entry::Occupied(mut field) if field.mutable => {
+                Ok(Some(std::mem::replace(&mut field.value, value)))
+            }
+            Entry::Occupied(_) => Err(Fault::NotMutable),
+            Entry::Vacant(entry) => {
+                entry.insert(ModuleDeclaration { mutable, value });
+                Ok(None)
+            }
+        }
     }
 
-    pub fn declare_function(&mut self, function: Function) -> Option<Value> {
-        let name = function.name().as_ref()?.clone();
-        self.modules[self.frames[self.current_frame].module]
-            .downcast_ref::<Module>()
-            .expect("always a module")
-            .declarations()
-            .insert(
-                name,
-                ModuleDeclaration {
-                    mutable: false,
-                    value: Value::dynamic(function),
-                },
-            )
-            .map(|f| f.value.value)
+    pub fn declare_function(&mut self, function: Function) -> Result<Option<Value>, Fault> {
+        let Some(name) = function.name().clone() else {
+            return Ok(None);
+        };
+
+        self.declare_inner(name, Value::dynamic(function), true)
     }
 
     pub fn resolve(&self, name: &Symbol) -> Result<Value, Fault> {
@@ -838,7 +848,7 @@ impl Vm {
             .ok_or(Fault::InvalidOpcode)?;
 
         self.op_store(code_index, &value, dest)?;
-        self.declare_inner(name, value, mutable);
+        self.declare_inner(name, value, mutable)?;
         Ok(())
     }
 
@@ -1446,6 +1456,10 @@ impl CustomType for Function {
         } else {
             Err(Fault::IncorrectNumberOfArguments)
         }
+    }
+
+    fn deep_clone(&self) -> Option<Dynamic> {
+        Some(Dynamic::new(self.clone()))
     }
 }
 

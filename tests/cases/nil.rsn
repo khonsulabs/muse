@@ -1,0 +1,9 @@
+coalesce: {
+    src: r#"{} ?? 1"#,
+    output: Int(1),
+}
+
+coalesce_short_circuit: {
+    src: r#"1 ?? nonsense"#,
+    output: Int(1),
+}

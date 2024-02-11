@@ -32,7 +32,8 @@ fn main() {
     )
     .unwrap();
     let mut vm = Vm::default();
-    vm.declare(Symbol::from("increment_async"), Value::dynamic(async_func));
+    vm.declare(Symbol::from("increment_async"), Value::dynamic(async_func))
+        .unwrap();
 
     assert_eq!(
         pollster::block_on(vm.execute_async(&code).unwrap()).unwrap(),

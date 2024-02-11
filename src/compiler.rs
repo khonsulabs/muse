@@ -1,11 +1,14 @@
-use kempt::Map;
+use std::ops::{BitOr, BitOrAssign};
+
+use kempt::{Map, Set};
 use serde::{Deserialize, Serialize};
 
 use crate::symbol::Symbol;
 use crate::syntax::{
-    self, AssignTarget, BinaryExpression, BreakExpression, Chain, ContinueExpression, Expression,
-    FunctionCall, Index, LogicalKind, LoopExpression, LoopKind, Ranged, SourceRange,
-    UnaryExpression, Variable,
+    self, AssignTarget, BinaryExpression, BreakExpression, Chain, CompareKind, ContinueExpression,
+    Expression, FunctionCall, FunctionDefinition, Index, Literal, LogicalKind, LoopExpression,
+    LoopKind, MatchExpression, MatchPattern, PatternKind, Ranged, SourceRange, UnaryExpression,
+    Variable,
 };
 use crate::vm::bitcode::{
     BinaryKind, BitcodeBlock, BitcodeFunction, Label, Op, OpDestination, ValueOrSource,
@@ -184,17 +187,7 @@ impl<'a> Scope<'a> {
     #[allow(clippy::too_many_lines)]
     fn compile_expression(&mut self, expr: &Ranged<Expression>, dest: OpDestination) {
         match &**expr {
-            Expression::Nil => self.compiler.code.copy((), dest),
-            Expression::Bool(bool) => self.compiler.code.copy(*bool, dest),
-            Expression::Int(int) => self.compiler.code.copy(*int, dest),
-            Expression::UInt(int) => self.compiler.code.copy(*int, dest),
-            Expression::Float(float) => self.compiler.code.copy(*float, dest),
-            Expression::String(string) => self
-                .compiler
-                .code
-                .copy(ValueOrSource::String(string.clone()), dest),
-            Expression::Symbol(symbol) => self.compiler.code.copy(symbol.clone(), dest),
-            Expression::Regex(regex) => self.compiler.code.copy(regex.clone(), dest),
+            Expression::Literal(literal) => self.compile_literal(literal, dest),
             Expression::Lookup(lookup) => {
                 if let Some(base) = &lookup.base {
                     let (target, after_label) = if let Expression::TryOrNil(try_op) = &base.0 {
@@ -292,6 +285,7 @@ impl<'a> Scope<'a> {
                 self.compile_expression(&if_expr.when_true, dest);
                 self.compiler.code.label(after_true);
             }
+            Expression::Match(match_expr) => self.compile_match(match_expr, dest),
             Expression::Loop(loop_expr) => {
                 self.compile_loop(loop_expr, dest);
             }
@@ -387,55 +381,7 @@ impl<'a> Scope<'a> {
                 self.declare_variable(decl, dest);
             }
             Expression::Function(decl) => {
-                let arity = if let Ok(arity) = u8::try_from(decl.parameters.len()) {
-                    arity
-                } else {
-                    self.compiler
-                        .errors
-                        .push(Ranged::new(expr.range(), Error::TooManyArguments));
-                    255
-                };
-                let mut fn_compiler = Compiler {
-                    function_name: decl.name.as_ref().map(|name| name.0.clone()),
-                    ..Compiler::default()
-                };
-                let mut fn_scope = Scope::function_root(&mut fn_compiler);
-                for (var, index) in decl.parameters.iter().zip(0..arity) {
-                    let stack = fn_scope.new_temporary();
-                    fn_scope.compiler.code.copy(Register(index), stack);
-                    fn_scope.compiler.declarations.insert(
-                        var.0.clone(),
-                        BlockDeclaration {
-                            stack,
-                            mutable: false,
-                        },
-                    );
-                }
-                fn_scope.compile_expression(&decl.body, OpDestination::Register(Register(0)));
-                drop(fn_scope);
-
-                self.compiler.errors.append(&mut fn_compiler.errors);
-                let fun = BitcodeFunction::new(decl.name.as_ref().map(|name| name.0.clone()))
-                    .when(arity, fn_compiler.code);
-                match (&decl.name, decl.publish) {
-                    (Some(name), true) => {
-                        self.ensure_in_module(name.1);
-                        self.compiler.code.declare(name.0.clone(), false, fun, dest);
-                    }
-                    (Some(name), false) => {
-                        let stack = self.new_temporary();
-                        self.compiler.code.copy(fun, stack);
-                        self.declare_local(name.0.clone(), false, stack, dest);
-                    }
-                    (None, true) => {
-                        self.compiler
-                            .errors
-                            .push(Ranged::new(expr.range(), Error::InvalidDeclaration));
-                    }
-                    (None, false) => {
-                        self.compiler.code.copy(fun, dest);
-                    }
-                }
+                self.compile_function(decl, expr.range(), dest);
             }
             Expression::Module(module) => {
                 let Expression::Block(block) = &module.contents.0 else {
@@ -468,6 +414,258 @@ impl<'a> Scope<'a> {
 
                 self.compiler.errors.append(&mut mod_compiler.errors);
             }
+        }
+    }
+
+    fn compile_literal(&mut self, literal: &Literal, dest: OpDestination) {
+        match literal {
+            Literal::Nil => self.compiler.code.copy((), dest),
+            Literal::Bool(bool) => self.compiler.code.copy(*bool, dest),
+            Literal::Int(int) => self.compiler.code.copy(*int, dest),
+            Literal::UInt(int) => self.compiler.code.copy(*int, dest),
+            Literal::Float(float) => self.compiler.code.copy(*float, dest),
+            Literal::String(string) => self
+                .compiler
+                .code
+                .copy(ValueOrSource::String(string.clone()), dest),
+            Literal::Symbol(symbol) => self.compiler.code.copy(symbol.clone(), dest),
+            Literal::Regex(regex) => self.compiler.code.copy(regex.clone(), dest),
+        }
+    }
+
+    fn compile_function(
+        &mut self,
+        decl: &FunctionDefinition,
+        range: SourceRange,
+        dest: OpDestination,
+    ) {
+        let mut bodies_by_arity = kempt::Map::<(u8, bool), Vec<&MatchPattern>>::new();
+        for def in &decl.body.patterns {
+            let arity = if let Some(arity) = def.arity() {
+                arity
+            } else {
+                self.compiler
+                    .errors
+                    .push(Ranged::new(range, Error::TooManyArguments));
+                (255, false)
+            };
+            bodies_by_arity.entry(arity).or_default().push(def);
+        }
+
+        let mut fun = BitcodeFunction::new(decl.name.as_ref().map(|name| name.0.clone()));
+        for ((arity, var_arg), bodies) in bodies_by_arity
+            .into_iter()
+            .map(kempt::map::Field::into_parts)
+        {
+            let mut fn_compiler = Compiler {
+                function_name: decl.name.as_ref().map(|name| name.0.clone()),
+                ..Compiler::default()
+            };
+            let mut fn_scope = Scope::function_root(&mut fn_compiler);
+
+            let mut refutability = Refutability::Irrefutable;
+            for body in bodies {
+                let next_body = fn_scope.compiler.code.new_label();
+                let mut body_block = fn_scope.enter_block(None);
+                let parameters = match &body.pattern.kind.0 {
+                    PatternKind::Any(None) => None,
+                    PatternKind::Any(_) | PatternKind::Literal(_) | PatternKind::Or(_, _) => {
+                        Some(std::slice::from_ref(&body.pattern.kind))
+                    }
+                    PatternKind::DestructureTuple(patterns) => Some(&**patterns),
+                };
+                if let Some(parameters) = parameters {
+                    refutability |= body_block
+                        .compile_function_parameters_pattern(arity, parameters, next_body);
+                }
+
+                if let Some(guard) = &body.pattern.guard {
+                    let guard = body_block.compile_source(guard);
+                    body_block.compiler.code.jump_if_not(next_body, guard, ());
+                }
+                body_block.compile_expression(&body.body, OpDestination::Register(Register(0)));
+                body_block.compiler.code.return_early();
+                drop(body_block);
+                fn_scope.compiler.code.label(next_body);
+            }
+
+            if refutability == Refutability::Refutable {
+                eprintln!("throw a pattern mismatch fault");
+            }
+
+            drop(fn_scope);
+
+            self.compiler.errors.append(&mut fn_compiler.errors);
+
+            if var_arg {
+                fun.insert_variable_arity(arity, fn_compiler.code);
+            } else {
+                fun.insert_arity(arity, fn_compiler.code);
+            }
+        }
+
+        match (&decl.name, decl.publish) {
+            (Some(name), true) => {
+                self.ensure_in_module(name.1);
+                self.compiler.code.declare(name.0.clone(), false, fun, dest);
+            }
+            (Some(name), false) => {
+                let stack = self.new_temporary();
+                self.compiler.code.copy(fun, stack);
+                self.declare_local(name.0.clone(), false, stack, dest);
+            }
+            (None, true) => {
+                self.compiler
+                    .errors
+                    .push(Ranged::new(range, Error::InvalidDeclaration));
+            }
+            (None, false) => {
+                self.compiler.code.copy(fun, dest);
+            }
+        }
+    }
+
+    #[must_use]
+    fn compile_function_parameters_pattern(
+        &mut self,
+        arity: u8,
+        parameters: &[Ranged<PatternKind>],
+        doesnt_match: Label,
+    ) -> Refutability {
+        let mut refutable = Refutability::Irrefutable;
+
+        for (parameter, register) in parameters.iter().zip(0..arity) {
+            refutable |= self.compile_pattern_binding(
+                parameter,
+                ValueOrSource::Register(Register(register)),
+                doesnt_match,
+                &mut Set::new(),
+            );
+        }
+
+        refutable
+    }
+
+    fn compile_pattern_binding(
+        &mut self,
+        pattern: &Ranged<PatternKind>,
+        source: ValueOrSource,
+        doesnt_match: Label,
+        bound_names: &mut Set<Symbol>,
+    ) -> Refutability {
+        match &pattern.0 {
+            PatternKind::Any(name) => {
+                if let Some(name) = name {
+                    if !bound_names.insert(name.clone()) {
+                        self.compiler
+                            .errors
+                            .push(Ranged::new(pattern.range(), Error::NameAlreadyBound));
+                    }
+
+                    let stack = self.new_temporary();
+                    self.compiler.code.copy(source, stack);
+                    self.compiler.declarations.insert(
+                        name.clone(),
+                        BlockDeclaration {
+                            stack,
+                            mutable: false,
+                        },
+                    );
+                }
+                Refutability::Irrefutable
+            }
+            PatternKind::Literal(literal) => {
+                // TODO change to "matches".
+                self.compiler.code.compare(
+                    CompareKind::NotEqual,
+                    literal.clone(),
+                    source,
+                    doesnt_match,
+                );
+
+                Refutability::Refutable
+            }
+            PatternKind::Or(a, b) => {
+                let b_label = self.compiler.code.new_label();
+                let body_label = self.compiler.code.new_label();
+
+                let mut b_bindings = Set::new();
+
+                let mut refutable =
+                    self.compile_pattern_binding(a, source.clone(), b_label, bound_names);
+                self.compiler.code.jump(body_label, ());
+
+                self.compiler.code.label(b_label);
+                refutable |=
+                    self.compile_pattern_binding(b, source.clone(), doesnt_match, &mut b_bindings);
+
+                if bound_names != &b_bindings {
+                    self.compiler.errors.push(Ranged::new(
+                        pattern.range(),
+                        Error::OrPatternBindingsMismatch,
+                    ));
+                }
+
+                self.compiler.code.label(body_label);
+                refutable
+            }
+            PatternKind::DestructureTuple(_) => todo!("destructure tuple"),
+        }
+    }
+
+    fn compile_match(&mut self, match_expr: &MatchExpression, dest: OpDestination) {
+        let condition = if let Expression::Tuple(tuple) = &match_expr.condition.0 {
+            &**tuple
+        } else {
+            std::slice::from_ref(&match_expr.condition)
+        };
+        let conditions = condition
+            .iter()
+            .map(|condition| self.compile_source(condition))
+            .collect::<Vec<_>>();
+        let mut refutable = Refutability::Irrefutable;
+        let mut next_pattern = self.compiler.code.new_label();
+
+        for matches in &match_expr.matches.0.patterns {
+            let mut pattern_block = self.enter_block(None);
+            let parameters = match &matches.pattern.kind.0 {
+                PatternKind::Any(None) => None,
+                PatternKind::Any(_) | PatternKind::Literal(_) | PatternKind::Or(_, _) => {
+                    Some(std::slice::from_ref(&matches.pattern.kind))
+                }
+                PatternKind::DestructureTuple(patterns) => Some(&**patterns),
+            };
+
+            if let Some(parameters) = parameters {
+                if parameters.len() != conditions.len() {
+                    todo!("length mismatch")
+                }
+                for (parameter, condition) in parameters.iter().zip(&conditions) {
+                    refutable |= pattern_block.compile_pattern_binding(
+                        parameter,
+                        condition.clone(),
+                        next_pattern,
+                        &mut Set::new(),
+                    );
+                }
+            }
+
+            if let Some(guard) = &matches.pattern.guard {
+                let guard = pattern_block.compile_source(guard);
+                pattern_block
+                    .compiler
+                    .code
+                    .jump_if_not(next_pattern, guard, ());
+            }
+            pattern_block.compile_expression(&matches.body, dest);
+            pattern_block.compiler.code.return_early();
+            drop(pattern_block);
+            self.compiler.code.label(next_pattern);
+            next_pattern = self.compiler.code.new_label();
+        }
+
+        if refutable == Refutability::Refutable {
+            eprintln!("throw a pattern mismatch fault");
         }
     }
 
@@ -808,6 +1006,29 @@ impl<'a> Scope<'a> {
                 self.compile_expression(&binop.right, dest);
                 return;
             }
+            syntax::BinaryKind::NilCoalesce => {
+                let source = self.compile_source(&binop.left);
+                let when_nil = self.compiler.code.new_label();
+                let after_expression = self.compiler.code.new_label();
+
+                // Jump when source is nil.
+                self.compiler
+                    .code
+                    .compare(CompareKind::Equal, source.clone(), (), when_nil);
+
+                // When not nil, copy source to dest, then skip the right hand
+                // code.
+                self.compiler.code.copy(source, dest);
+                self.compiler.code.jump(after_expression, ());
+
+                // When nil, evaluate the right hand side.
+                self.compiler.code.label(when_nil);
+                self.compile_expression(&binop.right, dest);
+
+                self.compiler.code.label(after_expression);
+
+                return;
+            }
             syntax::BinaryKind::Logical(LogicalKind::And) => {
                 let after = self.compiler.code.new_label();
                 self.compile_expression(&binop.left, dest);
@@ -846,14 +1067,16 @@ impl<'a> Scope<'a> {
 
     fn compile_source(&mut self, source: &Ranged<Expression>) -> ValueOrSource {
         match &source.0 {
-            Expression::Nil => ValueOrSource::Nil,
-            Expression::Bool(bool) => ValueOrSource::Bool(*bool),
-            Expression::Int(int) => ValueOrSource::Int(*int),
-            Expression::UInt(int) => ValueOrSource::UInt(*int),
-            Expression::Float(float) => ValueOrSource::Float(*float),
-            Expression::Regex(regex) => ValueOrSource::Regex(regex.clone()),
-            Expression::String(string) => ValueOrSource::String(string.clone()),
-            Expression::Symbol(symbol) => ValueOrSource::Symbol(symbol.clone()),
+            Expression::Literal(literal) => match literal {
+                Literal::Nil => ValueOrSource::Nil,
+                Literal::Bool(bool) => ValueOrSource::Bool(*bool),
+                Literal::Int(int) => ValueOrSource::Int(*int),
+                Literal::UInt(int) => ValueOrSource::UInt(*int),
+                Literal::Float(float) => ValueOrSource::Float(*float),
+                Literal::Regex(regex) => ValueOrSource::Regex(regex.clone()),
+                Literal::String(string) => ValueOrSource::String(string.clone()),
+                Literal::Symbol(symbol) => ValueOrSource::Symbol(symbol.clone()),
+            },
             Expression::Lookup(lookup) => {
                 if let Some(decl) = self.compiler.declarations.get(&lookup.name) {
                     ValueOrSource::Stack(decl.stack)
@@ -865,6 +1088,7 @@ impl<'a> Scope<'a> {
             | Expression::List(_)
             | Expression::Tuple(_)
             | Expression::If(_)
+            | Expression::Match(_)
             | Expression::Function(_)
             | Expression::Module(_)
             | Expression::Call(_)
@@ -984,6 +1208,29 @@ impl Drop for Scope<'_> {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+enum Refutability {
+    Refutable,
+    Irrefutable,
+}
+
+impl BitOr for Refutability {
+    type Output = Self;
+
+    fn bitor(mut self, rhs: Self) -> Self::Output {
+        self |= rhs;
+        self
+    }
+}
+
+impl BitOrAssign for Refutability {
+    fn bitor_assign(&mut self, rhs: Self) {
+        if *self != Refutability::Refutable {
+            *self = rhs;
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Error {
     UnknownVariable,
@@ -994,6 +1241,8 @@ pub enum Error {
     InvalidLabel,
     PubOnlyInModules,
     ExpectedBlock,
+    NameAlreadyBound,
+    OrPatternBindingsMismatch,
     Syntax(syntax::Error),
 }
 
