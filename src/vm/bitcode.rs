@@ -570,6 +570,9 @@ impl From<&'_ Code> for BitcodeBlock {
                 LoadedOp::GreaterThanOrEqual(loaded) => {
                     loaded.as_op(BinaryKind::Compare(CompareKind::GreaterThanOrEqual), code)
                 }
+                LoadedOp::Matches(loaded) => {
+                    loaded.as_op(BinaryKind::Compare(CompareKind::Matches), code)
+                }
                 LoadedOp::Call { name, arity } => Op::Call {
                     name: trusted_loaded_source_to_value(name, &code.data),
                     arity: trusted_loaded_source_to_value(arity, &code.data),

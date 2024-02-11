@@ -4,6 +4,7 @@ use std::ops::Deref;
 
 use regex::Regex;
 
+use crate::string::MuseString;
 use crate::symbol::Symbol;
 use crate::syntax::token::RegexLiteral;
 use crate::value::{CustomType, Dynamic, StaticRustFunctionTable, Value, ValueHasher};
@@ -103,6 +104,15 @@ impl CustomType for MuseRegex {
 
     fn deep_clone(&self) -> Option<Dynamic> {
         Some(Dynamic::new(self.clone()))
+    }
+
+    fn matches(&self, vm: &mut Vm, rhs: &Value) -> Result<bool, Fault> {
+        if let Some(rhs) = rhs.as_downcast_ref::<MuseString>() {
+            Ok(self.is_match(&rhs.lock()))
+        } else {
+            let as_string = rhs.to_string(vm)?;
+            Ok(self.is_match(&as_string))
+        }
     }
 }
 

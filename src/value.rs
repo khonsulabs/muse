@@ -878,6 +878,14 @@ impl Value {
         }
     }
 
+    pub fn matches(&self, vm: &mut Vm, other: &Self) -> Result<bool, Fault> {
+        match (self, other) {
+            (Self::Dynamic(l0), _) => l0.matches(vm, other),
+            (_, Self::Dynamic(r0)) => r0.matches(vm, self),
+            _ => self.equals(Some(vm), other),
+        }
+    }
+
     pub fn total_cmp(&self, vm: &mut Vm, other: &Self) -> Result<Ordering, Fault> {
         match (self, other) {
             (Value::Nil, Value::Nil) => Ok(Ordering::Equal),
@@ -1153,6 +1161,13 @@ impl Dynamic {
         }
     }
 
+    pub fn matches(&self, vm: &mut Vm, rhs: &Value) -> Result<bool, Fault> {
+        match rhs {
+            Value::Dynamic(dynamic) if Arc::ptr_eq(&self.0, &dynamic.0) => Ok(true),
+            _ => self.0.matches(vm, rhs),
+        }
+    }
+
     pub fn cmp(&self, vm: &mut Vm, rhs: &Value) -> Result<Ordering, Fault> {
         self.0.total_cmp(vm, rhs)
     }
@@ -1223,6 +1238,11 @@ pub trait CustomType: Send + Sync + Debug + 'static {
     #[allow(unused_variables)]
     fn eq(&self, vm: Option<&mut Vm>, rhs: &Value) -> Result<bool, Fault> {
         Ok(false)
+    }
+
+    #[allow(unused_variables)]
+    fn matches(&self, vm: &mut Vm, rhs: &Value) -> Result<bool, Fault> {
+        self.eq(Some(vm), rhs)
     }
 
     #[allow(unused_variables)]

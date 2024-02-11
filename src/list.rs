@@ -71,6 +71,9 @@ impl CustomType for List {
     fn invoke(&self, vm: &mut Vm, name: &Symbol, arity: Arity) -> Result<Value, Fault> {
         static FUNCTIONS: StaticRustFunctionTable<List> = StaticRustFunctionTable::new(|table| {
             table
+                .with_fn(Symbol::len_symbol(), 0, |_vm: &mut Vm, this: &List| {
+                    Value::try_from(this.0.lock().expect("poisoned").len())
+                })
                 .with_fn(Symbol::set_symbol(), 2, |vm, this| {
                     let index = vm[Register(0)].take();
                     let value = vm[Register(1)].take();

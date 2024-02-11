@@ -38,3 +38,21 @@ match_two_any_one: {
     }"#,
     output: Bool(true),
 }
+
+match_regex: {
+    src: r#"match "hello" {
+        \HELLO/ => false,
+        \HELLO/i => true,
+    }"#,
+    output: Bool(true),
+}
+
+match_tuple: {
+    src: r#"match [1, 2] {
+        "hi" => false,
+        [1,] => false,
+        [1,2,3] => false,
+        [1, a] => a,
+    }"#,
+    output: Int(2),
+}

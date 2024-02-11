@@ -61,9 +61,13 @@ impl CustomType for MuseString {
         static FUNCTIONS: StaticRustFunctionTable<MuseString> =
             StaticRustFunctionTable::new(|table| {
                 table
-                    .with_fn("len", 0, |_vm: &mut Vm, this: &MuseString| {
-                        Value::try_from(this.0.lock().expect("poisoned").len())
-                    })
+                    .with_fn(
+                        Symbol::len_symbol(),
+                        0,
+                        |_vm: &mut Vm, this: &MuseString| {
+                            Value::try_from(this.0.lock().expect("poisoned").len())
+                        },
+                    )
                     .with_fn("split", 1, |vm: &mut Vm, this: &MuseString| {
                         let needle = vm[Register(0)].take();
                         if let Some(needle) = needle.as_downcast_ref::<MuseString>() {

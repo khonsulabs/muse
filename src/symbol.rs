@@ -37,6 +37,7 @@ static_symbols!(
     if_symbol => "if",
     in_symbol => "in",
     iterate_symbol => "iterate",
+    len_symbol => "len",
     let_symbol => "let",
     loop_symbol => "loop",
     match_symbol => "match",

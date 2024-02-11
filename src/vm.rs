@@ -747,6 +747,13 @@ impl Vm {
                     matches!(ord, Ordering::Greater | Ordering::Equal)
                 })
             }
+            LoadedOp::Matches(loaded) => self.op_binop(
+                code_index,
+                loaded.op1,
+                loaded.op2,
+                loaded.dest,
+                |vm, lhs, rhs| dbg!(lhs.matches(vm, &rhs).map(Value::Bool)),
+            ),
             LoadedOp::BitwiseAnd(loaded) => self.op_binop(
                 code_index,
                 loaded.op1,
@@ -1610,6 +1617,7 @@ impl CodeData {
                         CompareKind::NotEqual => LoadedOp::NotEqual(binary),
                         CompareKind::GreaterThan => LoadedOp::GreaterThan(binary),
                         CompareKind::GreaterThanOrEqual => LoadedOp::GreaterThanOrEqual(binary),
+                        CompareKind::Matches => LoadedOp::Matches(binary),
                     },
                 });
             }
@@ -1877,6 +1885,7 @@ enum LoadedOp {
     NotEqual(LoadedBinary),
     GreaterThan(LoadedBinary),
     GreaterThanOrEqual(LoadedBinary),
+    Matches(LoadedBinary),
     Call {
         name: LoadedSource,
         arity: LoadedSource,

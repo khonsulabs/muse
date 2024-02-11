@@ -464,9 +464,23 @@ impl<'a> Scope<'a> {
             let mut fn_scope = Scope::function_root(&mut fn_compiler);
 
             let mut refutability = Refutability::Irrefutable;
+            let previous_handler = self.new_temporary();
+            let mut stored_previous_handler = false;
             for body in bodies {
                 let next_body = fn_scope.compiler.code.new_label();
                 let mut body_block = fn_scope.enter_block(None);
+
+                let previous_handler = if stored_previous_handler {
+                    OpDestination::Void
+                } else {
+                    stored_previous_handler = true;
+                    OpDestination::Stack(previous_handler)
+                };
+                body_block
+                    .compiler
+                    .code
+                    .set_exception_handler(next_body, previous_handler);
+
                 let parameters = match &body.pattern.kind.0 {
                     PatternKind::Any(None) => None,
                     PatternKind::Any(_) | PatternKind::Literal(_) | PatternKind::Or(_, _) => {
@@ -483,14 +497,25 @@ impl<'a> Scope<'a> {
                     let guard = body_block.compile_source(guard);
                     body_block.compiler.code.jump_if_not(next_body, guard, ());
                 }
+                body_block
+                    .compiler
+                    .code
+                    .set_exception_handler(previous_handler, ());
+
                 body_block.compile_expression(&body.body, OpDestination::Register(Register(0)));
                 body_block.compiler.code.return_early();
                 drop(body_block);
                 fn_scope.compiler.code.label(next_body);
             }
 
+            if stored_previous_handler {
+                self.compiler
+                    .code
+                    .set_exception_handler(previous_handler, ());
+            }
+
             if refutability == Refutability::Refutable {
-                eprintln!("throw a pattern mismatch fault");
+                self.compiler.code.copy((), Register(0));
             }
 
             drop(fn_scope);
@@ -575,13 +600,13 @@ impl<'a> Scope<'a> {
                 Refutability::Irrefutable
             }
             PatternKind::Literal(literal) => {
-                // TODO change to "matches".
-                self.compiler.code.compare(
-                    CompareKind::NotEqual,
-                    literal.clone(),
-                    source,
-                    doesnt_match,
-                );
+                let matches = self.new_temporary();
+
+                self.compiler
+                    .code
+                    .compare(CompareKind::Matches, literal.clone(), source, matches);
+
+                self.compiler.code.jump_if_not(doesnt_match, matches, ());
 
                 Refutability::Refutable
             }
@@ -609,7 +634,41 @@ impl<'a> Scope<'a> {
                 self.compiler.code.label(body_label);
                 refutable
             }
-            PatternKind::DestructureTuple(_) => todo!("destructure tuple"),
+            PatternKind::DestructureTuple(patterns) => {
+                let Ok(expected_count) = u64::try_from(patterns.len()) else {
+                    todo!("too many patterns")
+                };
+
+                self.compiler
+                    .code
+                    .invoke(source.clone(), Symbol::len_symbol(), 0);
+                self.compiler.code.compare(
+                    CompareKind::Equal,
+                    Register(0),
+                    expected_count,
+                    Register(0),
+                );
+                self.compiler
+                    .code
+                    .jump_if_not(doesnt_match, Register(0), ());
+
+                let element = self.new_temporary();
+                for (i, index) in (0..expected_count).zip(0_usize..) {
+                    self.compiler.code.copy(i, Register(0));
+                    self.compiler
+                        .code
+                        .invoke(source.clone(), Symbol::get_symbol(), 1);
+                    self.compiler.code.copy(Register(0), element);
+                    self.compile_pattern_binding(
+                        &patterns[index],
+                        ValueOrSource::Stack(element),
+                        doesnt_match,
+                        bound_names,
+                    );
+                }
+
+                Refutability::Refutable
+            }
         }
     }
 
@@ -624,10 +683,24 @@ impl<'a> Scope<'a> {
             .map(|condition| self.compile_source(condition))
             .collect::<Vec<_>>();
         let mut refutable = Refutability::Irrefutable;
-        let mut next_pattern = self.compiler.code.new_label();
+        let previous_handler = self.new_temporary();
+        let mut stored_previous_handler = false;
 
         for matches in &match_expr.matches.0.patterns {
             let mut pattern_block = self.enter_block(None);
+            let next_pattern = pattern_block.compiler.code.new_label();
+
+            let previous_handler = if stored_previous_handler {
+                OpDestination::Void
+            } else {
+                stored_previous_handler = true;
+                OpDestination::Stack(previous_handler)
+            };
+            pattern_block
+                .compiler
+                .code
+                .set_exception_handler(next_pattern, previous_handler);
+
             let parameters = match &matches.pattern.kind.0 {
                 PatternKind::Any(None) => None,
                 PatternKind::Any(_) | PatternKind::Literal(_) | PatternKind::Or(_, _) => {
@@ -637,16 +710,19 @@ impl<'a> Scope<'a> {
             };
 
             if let Some(parameters) = parameters {
-                if parameters.len() != conditions.len() {
-                    todo!("length mismatch")
-                }
-                for (parameter, condition) in parameters.iter().zip(&conditions) {
-                    refutable |= pattern_block.compile_pattern_binding(
-                        parameter,
-                        condition.clone(),
-                        next_pattern,
-                        &mut Set::new(),
-                    );
+                if parameters.len() == conditions.len() {
+                    for (parameter, condition) in parameters.iter().zip(&conditions) {
+                        refutable |= pattern_block.compile_pattern_binding(
+                            parameter,
+                            condition.clone(),
+                            next_pattern,
+                            &mut Set::new(),
+                        );
+                    }
+                } else {
+                    // TODO once we support vararg style bindings this will need
+                    // to be updated.
+                    pattern_block.compiler.code.jump(next_pattern, ());
                 }
             }
 
@@ -657,15 +733,27 @@ impl<'a> Scope<'a> {
                     .code
                     .jump_if_not(next_pattern, guard, ());
             }
+
+            pattern_block
+                .compiler
+                .code
+                .set_exception_handler(previous_handler, ());
+
             pattern_block.compile_expression(&matches.body, dest);
             pattern_block.compiler.code.return_early();
             drop(pattern_block);
+
             self.compiler.code.label(next_pattern);
-            next_pattern = self.compiler.code.new_label();
+        }
+
+        if stored_previous_handler {
+            self.compiler
+                .code
+                .set_exception_handler(previous_handler, ());
         }
 
         if refutable == Refutability::Refutable {
-            eprintln!("throw a pattern mismatch fault");
+            self.compiler.code.copy((), dest);
         }
     }
 
