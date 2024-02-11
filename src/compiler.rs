@@ -635,9 +635,12 @@ impl<'a> Scope<'a> {
                 refutable
             }
             PatternKind::DestructureTuple(patterns) => {
-                let Ok(expected_count) = u64::try_from(patterns.len()) else {
-                    todo!("too many patterns")
-                };
+                let expected_count = u64::try_from(patterns.len()).unwrap_or_else(|_| {
+                    self.compiler
+                        .errors
+                        .push(Ranged::new(pattern.range(), Error::UsizeTooLarge));
+                    u64::MAX
+                });
 
                 self.compiler
                     .code
@@ -862,27 +865,7 @@ impl<'a> Scope<'a> {
                 outer_scope.compiler.code.label(tail_condition);
                 (ValueOrSource::Label(tail_condition), None)
             }
-            LoopKind::For { bindings, source } => {
-                let mut variables = Vec::new();
-                let mut splat = false;
-                match &bindings.0 {
-                    Expression::Lookup(lookup) if lookup.base.is_none() => {
-                        let stack = outer_scope.new_temporary();
-                        outer_scope.declare_local(lookup.name.clone(), true, stack, OpDestination::Void);
-                        variables.push(stack);
-                    }
-                    Expression::Tuple(names) if names.iter().all(|name| matches!(&name.0, Expression::Lookup(lookup) if lookup.base.is_none())) => {
-                        splat = true;
-                        for name in names {
-                            let Expression::Lookup(lookup) = &name.0 else { unreachable!("just matched")};
-                            let stack = outer_scope.new_temporary();
-                            outer_scope.declare_local(lookup.name.clone(), true, stack, OpDestination::Void);
-                            variables.push(stack);
-                        }
-                    }
-                    _ => todo!("invalid binding"),
-                }
-
+            LoopKind::For { pattern, source } => {
                 let source = outer_scope.compile_expression_into_temporary(source);
 
                 // We try to call :iterate on source. If this throws an
@@ -893,6 +876,7 @@ impl<'a> Scope<'a> {
                 let next_iteration = outer_scope.new_temporary();
                 let previous_handler = outer_scope.new_temporary();
                 let i = outer_scope.new_temporary();
+                let step = outer_scope.new_temporary();
                 // The continue_label is going to be used for iterating over the
                 // result of `source.iterate()`. We load this into the
                 // `next_iteration` stack location, as we are going to use
@@ -915,8 +899,8 @@ impl<'a> Scope<'a> {
                     .code
                     .invoke(source, Symbol::iterate_symbol(), 0);
 
-                // Store the iterator in `i`.
-                outer_scope.compiler.code.copy(Register(0), i);
+                // Store the iterator in `step`.
+                outer_scope.compiler.code.copy(Register(0), step);
                 // Update exception handling to jump to break. This ultimately
                 // should point to a separate set of instructions that checks
                 // the error.
@@ -927,15 +911,12 @@ impl<'a> Scope<'a> {
                     .set_exception_handler(exception_handler, ());
                 // Begin the iteration.
                 outer_scope.compiler.code.label(iterate_start);
-                // Invoke next(), store the result in the first variable slot.
+                // Invoke next(), store the result in the `i`.
                 outer_scope
                     .compiler
                     .code
-                    .invoke(i, Symbol::next_symbol(), 0);
-                outer_scope
-                    .compiler
-                    .code
-                    .copy(Register(0), variables[variables.len() - 1]);
+                    .invoke(step, Symbol::next_symbol(), 0);
+                outer_scope.compiler.code.copy(Register(0), i);
 
                 // Jump to the common loop body code.
                 outer_scope.compiler.code.jump(loop_body, ());
@@ -957,42 +938,69 @@ impl<'a> Scope<'a> {
                     .compiler
                     .code
                     .copy(nth_next_iteration, next_iteration);
-                outer_scope.compiler.code.copy(0, i);
+                outer_scope.compiler.code.copy(0, step);
                 let after_first_increment = outer_scope.compiler.code.new_label();
                 outer_scope.compiler.code.jump(after_first_increment, ());
 
                 // Each iteration of the nth-based iteration will return here.
                 // The first step is to increment i.
                 outer_scope.compiler.code.label(nth_next_iteration);
-                outer_scope.compiler.code.add(i, 1, i);
+                outer_scope.compiler.code.add(step, 1, step);
                 outer_scope.compiler.code.label(after_first_increment);
 
                 // Next, invoke nth(i)
-                outer_scope.compiler.code.copy(i, Register(0));
+                outer_scope.compiler.code.copy(step, Register(0));
                 outer_scope
                     .compiler
                     .code
                     .invoke(source, Symbol::nth_symbol(), 1);
-                // Copy the result into the first variable -- just like the
-                // iterator() code.
-                outer_scope
-                    .compiler
-                    .code
-                    .copy(Register(0), variables[variables.len() - 1]);
+                // Copy the result into `i` -- just like the iterator() code.
+                outer_scope.compiler.code.copy(Register(0), i);
 
                 // Finally, the shared loop body.
                 outer_scope.compiler.code.label(loop_body);
-                if splat {
-                    for (var, index) in variables.iter().zip(0_u8..) {
-                        outer_scope.compiler.code.copy(index, Register(0));
-                        outer_scope.compiler.code.invoke(
-                            variables[variables.len() - 1],
-                            Symbol::nth_symbol(),
-                            1,
-                        );
-                        outer_scope.compiler.code.copy(Register(0), *var);
-                    }
+
+                // Try to apply the pattern. If we have an error applying the
+                // pattern, continue to the next iteration.
+                let loop_body_with_bindings = outer_scope.compiler.code.new_label();
+                let pattern_mismatch = outer_scope.compiler.code.new_label();
+                outer_scope
+                    .compiler
+                    .code
+                    .set_exception_handler(pattern_mismatch, ());
+
+                outer_scope.compile_pattern_binding(
+                    &pattern.kind,
+                    ValueOrSource::Stack(i),
+                    pattern_mismatch,
+                    &mut Set::new(),
+                );
+
+                if let Some(guard) = &pattern.guard {
+                    let guard = outer_scope.compile_source(guard);
+                    outer_scope
+                        .compiler
+                        .code
+                        .jump_if_not(pattern_mismatch, guard, ());
                 }
+
+                outer_scope
+                    .compiler
+                    .code
+                    .set_exception_handler(exception_handler, ());
+                outer_scope.compiler.code.jump(loop_body_with_bindings, ());
+
+                // When the pattern mismatches, we need to restore the correct
+                // exception handler before jumping back to the next iteration.
+                outer_scope.compiler.code.label(pattern_mismatch);
+                outer_scope
+                    .compiler
+                    .code
+                    .set_exception_handler(exception_handler, ());
+                outer_scope.compiler.code.jump(next_iteration, ());
+
+                // And truly finally, the actual loop body.
+                outer_scope.compiler.code.label(loop_body_with_bindings);
 
                 (ValueOrSource::Stack(next_iteration), Some(previous_handler))
             }

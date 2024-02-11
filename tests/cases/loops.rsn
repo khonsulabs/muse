@@ -143,3 +143,14 @@ for_in_map: {
     "#,
     output: Int(4),
 }
+
+for_pattern: {
+    src: r#"
+        var total = 0;
+        for n if n % 2 in [1, 2, 3, 4, 5, 6] {
+            total = total + n;
+        };
+        total
+    "#,
+    output: Int(9),
+}

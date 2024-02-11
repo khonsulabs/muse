@@ -1104,7 +1104,6 @@ impl Vm {
             }
             self.op_store(code_index, Value::dynamic(list), dest)
         } else {
-            // TODO handle large list initialization
             Err(Fault::InvalidArity)
         }
     }

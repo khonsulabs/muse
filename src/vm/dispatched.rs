@@ -922,7 +922,7 @@ declare_binop_instruction!(
     BinaryKind::Bitwise(BitwiseKind::ShiftRight)
 );
 
-pub trait Source: Send + Sync + Debug + 'static {
+trait Source: Send + Sync + Debug + 'static {
     fn load(&self, vm: &Vm) -> Result<Value, Fault>;
     fn as_source(&self) -> ValueOrSource;
 }
@@ -1025,7 +1025,7 @@ impl Source for Function {
     }
 }
 
-pub trait Destination: Send + Sync + Debug + 'static {
+trait Destination: Send + Sync + Debug + 'static {
     fn store(&self, vm: &mut Vm, value: Value) -> Result<(), Fault>;
     fn as_dest(&self) -> OpDestination;
 }

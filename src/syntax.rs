@@ -240,7 +240,7 @@ pub enum LoopKind {
     While(Ranged<Expression>),
     TailWhile(Ranged<Expression>),
     For {
-        bindings: Ranged<Expression>,
+        pattern: Ranged<Pattern>,
         source: Ranged<Expression>,
     },
 }
@@ -1520,7 +1520,9 @@ impl PrefixParselet for For {
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
-        let bindings = config.parse_expression(tokens)?;
+        let Some(pattern) = parse_pattern(tokens, config)? else {
+            return Err(tokens.ranged(tokens.last_index.., Error::ExpectedPattern));
+        };
 
         let in_token = tokens.next()?;
         if !matches!(&in_token.0, Token::Identifier(ident) if ident == Symbol::in_symbol()) {
@@ -1534,7 +1536,7 @@ impl PrefixParselet for For {
         Ok(tokens.ranged(
             for_token.range().start..,
             Expression::Loop(Box::new(LoopExpression {
-                kind: LoopKind::For { bindings, source },
+                kind: LoopKind::For { pattern, source },
                 block: body,
             })),
         ))
