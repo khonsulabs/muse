@@ -108,9 +108,7 @@ impl CustomType for Map {
                 })
                 .with_fn(Symbol::get_symbol(), 1, |vm, this| {
                     let key = vm[Register(0)].take();
-                    Ok(this
-                        .get(vm, &key)?
-                        .unwrap_or_else(|| Value::Symbol(Symbol::none_symbol().clone())))
+                    this.get(vm, &key)?.ok_or(Fault::OutOfBounds)
                 })
                 .with_fn(Symbol::nth_symbol(), 1, |vm, this| {
                     let index = vm[Register(0)].take();

@@ -1,0 +1,4 @@
+left_to_right: {
+    src: r#"2 * 2 // 4"#,
+    output: Int(1),
+}

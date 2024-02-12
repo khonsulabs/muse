@@ -545,6 +545,14 @@ impl<'a> ParserConfig<'a> {
         Err(token.map(Error::UnexpectedToken))
     }
 
+    fn parse_next(
+        &self,
+        tokens: &mut TokenReader<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        self.with_precedence(self.minimum_precedence + 1)
+            .parse(tokens)
+    }
+
     fn parse_expression(
         &self,
         tokens: &mut TokenReader<'_>,
@@ -1355,7 +1363,7 @@ macro_rules! impl_infix_parselet {
                 tokens: &mut TokenReader<'_>,
                 config: &ParserConfig<'_>,
             ) -> Result<Ranged<Expression>, Ranged<Error>> {
-                let right = config.parse(tokens)?;
+                let right = config.parse_next(tokens)?;
                 Ok(tokens.ranged(
                     left.range().start..right.range().end(),
                     Expression::Binary(Box::new(BinaryExpression {
@@ -2360,8 +2368,13 @@ fn parselets() -> Parselets {
     parser.push_infix(parselets![BitwiseAnd]);
     parser.push_infix(parselets![Add, Subtract]);
     parser.push_infix(parselets![Multiply, Divide, Remainder, IntegerDivide]);
-    parser.push_infix(parselets![Parentheses, Dot, Brackets, TryOperator]);
-    parser.push_infix(parselets![NilCoalesce]);
+    parser.push_infix(parselets![
+        Parentheses,
+        Dot,
+        Brackets,
+        TryOperator,
+        NilCoalesce
+    ]);
     parser.push_prefix(parselets![
         Braces,
         Parentheses,

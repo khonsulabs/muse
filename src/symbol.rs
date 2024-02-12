@@ -44,7 +44,6 @@ static_symbols!(
     mod_symbol => "mod",
     next_symbol => "next",
     not_symbol => "not",
-    none_symbol => "none",
     nth_symbol => "nth",
     or_symbol => "or",
     pub_symbol => "pub",
