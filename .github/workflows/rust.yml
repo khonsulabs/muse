@@ -1,0 +1,35 @@
+name: Tests
+
+on: [push]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["stable", "1.70.0"]
+        os: ["ubuntu-latest", "windows-latest", "macos-latest"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.version }}
+
+      - name: Run clippy
+        if: matrix.version == 'stable'
+        run: |
+          cargo clippy --all-targets -p muse
+
+      - name: Compile with default features
+        run: |
+          cargo build --all-targets -p muse
+
+      - name: Run default features unit tests
+        run: |
+          cargo test --all-targets -p muse -- --nocapture
+
+      - name: Run all features unit tests
+        run: |
+          cargo test --all-features --all-targets -- --nocapture
