@@ -77,3 +77,8 @@ add_int_float: {
     src: "2 + 1.1",
     output: Float(3.1),
 }
+
+int_pow: {
+    src: "2 ** 3",
+    output: Int(8),
+}

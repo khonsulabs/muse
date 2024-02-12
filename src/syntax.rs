@@ -2368,6 +2368,7 @@ fn parselets() -> Parselets {
     parser.push_infix(parselets![BitwiseAnd]);
     parser.push_infix(parselets![Add, Subtract]);
     parser.push_infix(parselets![Multiply, Divide, Remainder, IntegerDivide]);
+    parser.push_infix(parselets![Power]);
     parser.push_infix(parselets![
         Parentheses,
         Dot,
