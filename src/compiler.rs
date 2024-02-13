@@ -564,6 +564,8 @@ impl<'a> Scope<'a> {
                 parameter,
                 ValueOrSource::Register(Register(register)),
                 doesnt_match,
+                false,
+                false,
                 &mut Set::new(),
             );
         }
@@ -576,6 +578,8 @@ impl<'a> Scope<'a> {
         pattern: &Ranged<PatternKind>,
         source: ValueOrSource,
         doesnt_match: Label,
+        publish: bool,
+        mutable: bool,
         bound_names: &mut Set<Symbol>,
     ) -> Refutability {
         match &pattern.0 {
@@ -587,15 +591,15 @@ impl<'a> Scope<'a> {
                             .push(Ranged::new(pattern.range(), Error::NameAlreadyBound));
                     }
 
-                    let stack = self.new_temporary();
-                    self.compiler.code.copy(source, stack);
-                    self.compiler.declarations.insert(
-                        name.clone(),
-                        BlockDeclaration {
-                            stack,
-                            mutable: false,
-                        },
-                    );
+                    if publish {
+                        self.compiler
+                            .code
+                            .declare(name.clone(), mutable, source, ());
+                    } else {
+                        let stack = self.new_temporary();
+                        self.compiler.code.copy(source, stack);
+                        self.declare_local(name.clone(), mutable, stack, OpDestination::Void);
+                    }
                 }
                 Refutability::Irrefutable
             }
@@ -614,13 +618,25 @@ impl<'a> Scope<'a> {
 
                 let mut b_bindings = Set::new();
 
-                let mut refutable =
-                    self.compile_pattern_binding(a, source.clone(), b_label, bound_names);
+                let mut refutable = self.compile_pattern_binding(
+                    a,
+                    source.clone(),
+                    b_label,
+                    publish,
+                    mutable,
+                    bound_names,
+                );
                 self.compiler.code.jump(body_label, ());
 
                 self.compiler.code.label(b_label);
-                refutable |=
-                    self.compile_pattern_binding(b, source.clone(), doesnt_match, &mut b_bindings);
+                refutable |= self.compile_pattern_binding(
+                    b,
+                    source.clone(),
+                    doesnt_match,
+                    publish,
+                    mutable,
+                    &mut b_bindings,
+                );
 
                 if bound_names != &b_bindings {
                     self.compiler.errors.push(Ranged::new(
@@ -664,6 +680,8 @@ impl<'a> Scope<'a> {
                         &patterns[index],
                         ValueOrSource::Stack(element),
                         doesnt_match,
+                        publish,
+                        mutable,
                         bound_names,
                     );
                 }
@@ -717,6 +735,8 @@ impl<'a> Scope<'a> {
                             parameter,
                             condition.clone(),
                             next_pattern,
+                            false,
+                            false,
                             &mut Set::new(),
                         );
                     }
@@ -971,6 +991,8 @@ impl<'a> Scope<'a> {
                     &pattern.kind,
                     ValueOrSource::Stack(i),
                     pattern_mismatch,
+                    false,
+                    false,
                     &mut Set::new(),
                 );
 
@@ -1035,15 +1057,40 @@ impl<'a> Scope<'a> {
     }
 
     fn declare_variable(&mut self, decl: &Variable, dest: OpDestination) {
-        let stack = self.new_temporary();
-        self.compile_expression(&decl.value, OpDestination::Stack(stack));
-        if decl.publish {
-            self.compiler
-                .code
-                .declare(decl.name.clone(), decl.mutable, stack, dest);
-        } else {
-            self.declare_local(decl.name.clone(), decl.mutable, stack, dest);
+        let value = self.compile_source(&decl.value);
+
+        let pattern_mismatch = self.compiler.code.new_label();
+        let after_declare = self.compiler.code.new_label();
+        let mut refutable = self.compile_pattern_binding(
+            &decl.pattern.kind,
+            value,
+            pattern_mismatch,
+            decl.publish,
+            decl.mutable,
+            &mut Set::new(),
+        );
+
+        if let Some(guard) = &decl.pattern.guard {
+            refutable = Refutability::Refutable;
+            let guard = self.compile_source(guard);
+            self.compiler.code.jump_if(pattern_mismatch, guard, ());
         }
+
+        self.compiler.code.jump(after_declare, ());
+
+        self.compiler.code.label(pattern_mismatch);
+
+        if let Some(r#else) = &decl.r#else {
+            match refutable {
+                Refutability::Refutable => todo!("ensure all branches in else exit"),
+                Refutability::Irrefutable => {}
+            }
+        } else {
+            self.compiler.code.throw(FaultKind::PatternMismatch);
+        }
+
+        self.compiler.code.label(after_declare);
+        self.compiler.code.copy(true, dest);
     }
 
     fn declare_local(&mut self, name: Symbol, mutable: bool, value: Stack, dest: OpDestination) {

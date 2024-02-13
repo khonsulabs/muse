@@ -350,8 +350,9 @@ pub enum LogicalKind {
 pub struct Variable {
     pub publish: bool,
     pub mutable: bool,
-    pub name: Symbol,
+    pub pattern: Ranged<Pattern>,
     pub value: Ranged<Expression>,
+    pub r#else: Option<Ranged<Expression>>,
 }
 
 pub fn parse(source: &str) -> Result<Ranged<Expression>, Ranged<Error>> {
@@ -2057,22 +2058,26 @@ fn parse_variable(
     tokens: &mut TokenReader<'_>,
     config: &ParserConfig<'_>,
 ) -> Result<Ranged<Expression>, Ranged<Error>> {
-    let name_token = tokens.next()?;
-    let Token::Identifier(name) = name_token.0 else {
-        return Err(name_token.map(|_| Error::ExpectedName));
+    let Some(pattern) = parse_pattern(tokens, config)? else {
+        return Err(tokens.ranged(tokens.last_index.., Error::ExpectedPattern));
     };
+
     let value = if tokens.peek_token() == Some(Token::Char('=')) {
         tokens.next()?;
         config.parse_expression(tokens)?
     } else {
-        Ranged::new(name_token.1, Expression::Literal(Literal::Nil))
+        Ranged::new(
+            tokens.last_index..tokens.last_index,
+            Expression::Literal(Literal::Nil),
+        )
     };
     Ok(tokens.ranged(
         start..,
         Expression::Variable(Box::new(Variable {
             publish,
             mutable,
-            name,
+            pattern,
+            r#else: None,
             value,
         })),
     ))
