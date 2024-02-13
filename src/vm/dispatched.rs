@@ -5,8 +5,8 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use super::bitcode::{
-    trusted_loaded_source_to_value, BinaryKind, BitcodeFunction, Label, Op, OpDestination,
-    ValueOrSource,
+    trusted_loaded_source_to_value, BinaryKind, BitcodeFunction, FaultKind, Label, Op,
+    OpDestination, ValueOrSource,
 };
 use super::{
     precompiled_regex, Code, CodeData, Function, LoadedOp, Module, PrecompiledRegex, Register,
@@ -195,6 +195,12 @@ impl CodeData {
                 &loaded.dest,
                 self,
             ),
+            LoadedOp::Matches(loaded) => match_matches(
+                &trusted_loaded_source_to_value(&loaded.op1, self),
+                &trusted_loaded_source_to_value(&loaded.op2, self),
+                &loaded.dest,
+                self,
+            ),
             LoadedOp::Call { name, arity } => match_call(
                 &trusted_loaded_source_to_value(&name, self),
                 &trusted_loaded_source_to_value(&arity, self),
@@ -246,6 +252,9 @@ impl CodeData {
             LoadedOp::LoadModule { module, dest } => {
                 match_load_module(&self.modules[module].clone(), &dest, self);
             }
+            LoadedOp::Throw(kind) => {
+                self.push_dispatched(Throw(kind));
+            }
         }
     }
 
@@ -272,6 +281,19 @@ impl Instruction for Return {
 
     fn as_op(&self) -> Op {
         Op::Return
+    }
+}
+
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
+pub struct Throw(pub FaultKind);
+
+impl Instruction for Throw {
+    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+        Err(Fault::from_kind(self.0, vm))
+    }
+
+    fn as_op(&self) -> Op {
+        Op::Throw(self.0)
     }
 }
 
@@ -858,6 +880,38 @@ where
 
 pub type Equal<Lhs, Rhs, Dest> = Eq<Lhs, Rhs, Dest, false>;
 pub type NotEqual<Lhs, Rhs, Dest> = Eq<Lhs, Rhs, Dest, true>;
+
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
+pub struct Matches<Lhs, Rhs, Dest> {
+    pub lhs: Lhs,
+    pub rhs: Rhs,
+    pub dest: Dest,
+}
+
+impl<Lhs, Rhs, Dest> Instruction for Matches<Lhs, Rhs, Dest>
+where
+    Lhs: Source,
+    Rhs: Source,
+    Dest: Destination,
+{
+    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+        let lhs = self.lhs.load(vm)?;
+        let rhs = self.rhs.load(vm)?;
+        let matches = lhs.matches(vm, &rhs)?;
+        self.dest.store(vm, Value::Bool(matches))?;
+
+        Ok(ControlFlow::Continue(()))
+    }
+
+    fn as_op(&self) -> Op {
+        Op::BinOp {
+            op1: self.lhs.as_source(),
+            op2: self.rhs.as_source(),
+            dest: self.dest.as_dest(),
+            kind: BinaryKind::LogicalXor,
+        }
+    }
+}
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
 pub struct Assign<Lhs, Rhs, Dest> {
@@ -1462,6 +1516,7 @@ define_match_binop!(match_equal, compile_equal, Equal);
 define_match_binop!(match_not_equal, compile_not_equal, NotEqual);
 define_match_binop!(match_gt, compile_gt, GreaterThan);
 define_match_binop!(match_gte, compile_gte, GreaterThanOrEqual);
+define_match_binop!(match_matches, compile_matches, Matches);
 define_match_binop!(match_bitwise_and, compile_bitwise_and, BitwiseAnd);
 define_match_binop!(match_bitwise_or, compile_bitwise_or, BitwiseOr);
 define_match_binop!(match_bitwise_xor, compile_bitwise_xor, BitwiseXor);
@@ -1542,7 +1597,7 @@ where
 {
     fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
         let value = self.declaration.load(vm)?;
-        vm.declare_inner(self.name.clone(), value.clone(), self.mutable);
+        vm.declare_inner(self.name.clone(), value.clone(), self.mutable)?;
 
         self.dest.store(vm, value)?;
 

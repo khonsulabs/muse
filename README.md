@@ -70,8 +70,9 @@ fn fib {
 All of these examples create a function named `fib` that accepts one parameter
 and produce identical results.
 
-A full language reference is available in the [Muse User's Guide][guide] is
+A full [language reference][language-ref] is available in the [Muse User's Guide][guide] is
 available in the User's Guide.
 
-[design-goals]: TODO
-[guide]: TODO
+[design-goals]: https://khonsu.dev/muse/main/guide/design.html
+[guide]: https://khonsu.dev/muse/main/guide/
+[language-ref]: https://khonsu.dev/muse/main/guide/reference.html

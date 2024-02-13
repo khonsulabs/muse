@@ -132,6 +132,13 @@ pub enum Op {
         name: Symbol,
         arity: ValueOrSource,
     },
+    Throw(FaultKind),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Hash)]
+pub enum FaultKind {
+    Exception,
+    PatternMismatch,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -328,6 +335,10 @@ impl BitcodeBlock {
             dest: dest.into(),
             kind: UnaryKind::Copy,
         });
+    }
+
+    pub fn throw(&mut self, kind: FaultKind) {
+        self.push(Op::Throw(kind));
     }
 
     pub fn set_exception_handler(
@@ -608,6 +619,7 @@ impl From<&'_ Code> for BitcodeBlock {
                     module: code.data.modules[*initializer].clone(),
                     dest: *dest,
                 },
+                LoadedOp::Throw(kind) => Op::Throw(*kind),
             });
         }
 

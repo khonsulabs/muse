@@ -67,6 +67,7 @@ enum VmFault {
     Timeout,
     Waiting,
     FrameChanged,
+    PatternMismatch,
     Exception(Box<TestOutput>),
 }
 
@@ -96,6 +97,7 @@ impl From<Fault> for VmFault {
             Fault::Timeout => Self::Timeout,
             Fault::Waiting => Self::Waiting,
             Fault::FrameChanged => Self::FrameChanged,
+            Fault::PatternMismatch => Self::PatternMismatch,
             Fault::Exception(value) => Self::Exception(Box::new(TestOutput::from(value))),
         }
     }

@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(not(feature = "dispatched"))]
 use self::bitcode::trusted_loaded_source_to_value;
-use self::bitcode::{BinaryKind, BitcodeFunction, Label, Op, OpDestination, ValueOrSource};
+use self::bitcode::{
+    BinaryKind, BitcodeFunction, FaultKind, Label, Op, OpDestination, ValueOrSource,
+};
 use crate::compiler::{BitcodeModule, BlockDeclaration, UnaryKind};
 use crate::list::List;
 #[cfg(not(feature = "dispatched"))]
@@ -792,6 +794,7 @@ impl Vm {
             LoadedOp::LoadModule { module, dest } => {
                 self.op_load_module(code_index, *module, *dest)
             }
+            LoadedOp::Throw(kind) => Err(Fault::from_kind(*kind, self)),
         };
 
         match result {
@@ -1350,6 +1353,7 @@ impl Frame {
 pub enum Fault {
     UnknownSymbol(Symbol),
     IncorrectNumberOfArguments,
+    PatternMismatch,
     OperationOnNil,
     MissingModule,
     NotAFunction,
@@ -1405,6 +1409,14 @@ impl Fault {
             Fault::Waiting => Symbol::from("waiting").into(),
             Fault::FrameChanged => Symbol::from("frame_changed").into(),
             Fault::Exception(value) => value.clone(),
+            Fault::PatternMismatch => Symbol::from("mismatch").into(),
+        }
+    }
+
+    fn from_kind(kind: FaultKind, vm: &mut Vm) -> Self {
+        match kind {
+            FaultKind::Exception => Self::Exception(vm[Register(0)].take()),
+            FaultKind::PatternMismatch => Self::PatternMismatch,
         }
     }
 }
@@ -1644,6 +1656,7 @@ impl CodeData {
                 let dest = self.load_dest(dest);
                 self.push_loaded(LoadedOp::LoadModule { module, dest });
             }
+            Op::Throw(kind) => self.push_loaded(LoadedOp::Throw(*kind)),
         }
     }
 
@@ -1903,6 +1916,7 @@ enum LoadedOp {
         module: usize,
         dest: OpDestination,
     },
+    Throw(FaultKind),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

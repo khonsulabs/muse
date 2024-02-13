@@ -56,3 +56,17 @@ match_tuple: {
     }"#,
     output: Int(2),
 }
+
+mismatch: {
+    src: r#"match true {
+        false => 0,
+    }"#,
+    output: Fault(PatternMismatch),
+}
+
+try_mismatch: {
+    src: r#"match true {
+        false => 0,
+    }?"#,
+    output: Nil,
+}

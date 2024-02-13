@@ -11,7 +11,7 @@ use crate::syntax::{
     Variable,
 };
 use crate::vm::bitcode::{
-    BinaryKind, BitcodeBlock, BitcodeFunction, Label, Op, OpDestination, ValueOrSource,
+    BinaryKind, BitcodeBlock, BitcodeFunction, FaultKind, Label, Op, OpDestination, ValueOrSource,
 };
 use crate::vm::{Code, Register, Stack};
 
@@ -756,7 +756,7 @@ impl<'a> Scope<'a> {
         }
 
         if refutable == Refutability::Refutable {
-            self.compiler.code.copy((), dest);
+            self.compiler.code.throw(FaultKind::PatternMismatch);
         }
     }
 
