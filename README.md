@@ -12,7 +12,7 @@ to **run untrusted scripts**. It is designed to be familiar to users of other
 dynamic programming languages, while also feeling inspired by Rust.
 
 Muse aims to be flexible enough to be adopted as a general purpose scripting
-langauge, while remaining minimal in its base implementation to ensure embedders
+language, while remaining minimal in its base implementation to ensure embedders
 have ultimate control over what is available when executing code.
 
 Muse uses Rust's standard library, which means while Muse is designed to be
@@ -24,8 +24,8 @@ chapter][design-goals] of Muse's User's Guide.
 
 ## Example: Fibonacci
 
-This is a recursive Fibonnaci function. This algorithm should never be used in
-production, as iterative approaches are expenentially faster, but it provides a
+This is a recursive Fibonacci function. This algorithm should never be used in
+production, as iterative approaches are exponentially faster, but it provides a
 few opportunities to demonstrate Muse's features.
 
 ```muse
