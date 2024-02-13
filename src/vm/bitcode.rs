@@ -204,6 +204,20 @@ impl BitcodeBlock {
         });
     }
 
+    pub fn matches(
+        &mut self,
+        lhs: impl Into<ValueOrSource>,
+        rhs: impl Into<ValueOrSource>,
+        dest: impl Into<OpDestination>,
+    ) {
+        self.push(Op::BinOp {
+            op1: lhs.into(),
+            op2: rhs.into(),
+            dest: dest.into(),
+            kind: BinaryKind::Matches,
+        });
+    }
+
     pub fn call(&mut self, function: impl Into<ValueOrSource>, arity: impl Into<ValueOrSource>) {
         self.push(Op::Call {
             name: function.into(),
@@ -581,9 +595,7 @@ impl From<&'_ Code> for BitcodeBlock {
                 LoadedOp::GreaterThanOrEqual(loaded) => {
                     loaded.as_op(BinaryKind::Compare(CompareKind::GreaterThanOrEqual), code)
                 }
-                LoadedOp::Matches(loaded) => {
-                    loaded.as_op(BinaryKind::Compare(CompareKind::Matches), code)
-                }
+                LoadedOp::Matches(loaded) => loaded.as_op(BinaryKind::Matches, code),
                 LoadedOp::Call { name, arity } => Op::Call {
                     name: trusted_loaded_source_to_value(name, &code.data),
                     arity: trusted_loaded_source_to_value(arity, &code.data),
@@ -735,6 +747,7 @@ pub enum BinaryKind {
     JumpIfNot,
     LogicalXor,
     Assign,
+    Matches,
     Bitwise(BitwiseKind),
     Compare(CompareKind),
 }

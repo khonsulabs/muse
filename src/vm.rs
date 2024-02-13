@@ -1614,6 +1614,7 @@ impl CodeData {
                     BinaryKind::JumpIfNot => LoadedOp::JumpIfNot(binary),
                     BinaryKind::LogicalXor => LoadedOp::LogicalXor(binary),
                     BinaryKind::Assign => LoadedOp::Assign(binary),
+                    BinaryKind::Matches => LoadedOp::Matches(binary),
                     BinaryKind::Bitwise(kind) => match kind {
                         BitwiseKind::And => LoadedOp::BitwiseAnd(binary),
                         BitwiseKind::Or => LoadedOp::BitwiseOr(binary),
@@ -1628,7 +1629,6 @@ impl CodeData {
                         CompareKind::NotEqual => LoadedOp::NotEqual(binary),
                         CompareKind::GreaterThan => LoadedOp::GreaterThan(binary),
                         CompareKind::GreaterThanOrEqual => LoadedOp::GreaterThanOrEqual(binary),
-                        CompareKind::Matches => LoadedOp::Matches(binary),
                     },
                 });
             }

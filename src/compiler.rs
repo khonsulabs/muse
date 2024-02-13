@@ -602,9 +602,7 @@ impl<'a> Scope<'a> {
             PatternKind::Literal(literal) => {
                 let matches = self.new_temporary();
 
-                self.compiler
-                    .code
-                    .compare(CompareKind::Matches, literal.clone(), source, matches);
+                self.compiler.code.matches(literal.clone(), source, matches);
 
                 self.compiler.code.jump_if_not(doesnt_match, matches, ());
 
@@ -1086,6 +1084,69 @@ impl<'a> Scope<'a> {
         self.compiler.code.push(Op::Unary { op, dest, kind });
     }
 
+    fn try_compile_chain_compare(
+        &mut self,
+        binop: &BinaryExpression,
+        kind: CompareKind,
+        dest: OpDestination,
+    ) -> bool {
+        if let Expression::Binary(left_binop) = &binop.left.0 {
+            let mut left_binop: &BinaryExpression = left_binop;
+            if let syntax::BinaryKind::Compare(left_kind) = left_binop.kind {
+                let after_compare = self.compiler.code.new_label();
+                let mut stack = Vec::new();
+                stack.push((kind, &binop.right));
+                stack.push((left_kind, &left_binop.right));
+                loop {
+                    if let Expression::Binary(next_binop) = &left_binop.left.0 {
+                        if let syntax::BinaryKind::Compare(left_kind) = next_binop.kind {
+                            stack.push((left_kind, &next_binop.right));
+                            left_binop = next_binop;
+
+                            continue;
+                        }
+                    }
+                    break;
+                }
+
+                let mut left = self.compile_source(&left_binop.left);
+                while let Some((kind, right)) = stack.pop() {
+                    let right = self.compile_source(right);
+
+                    if stack.is_empty() {
+                        self.compiler.code.push(Op::BinOp {
+                            op1: left,
+                            op2: right,
+                            dest,
+                            kind: BinaryKind::Compare(kind),
+                        });
+
+                        break;
+                    }
+
+                    let continue_compare = self.compiler.code.new_label();
+                    self.compiler.code.push(Op::BinOp {
+                        op1: left,
+                        op2: right.clone(),
+                        dest: OpDestination::Label(continue_compare),
+                        kind: BinaryKind::Compare(kind),
+                    });
+                    self.compiler.code.copy(false, dest);
+                    self.compiler.code.jump(after_compare, ());
+
+                    self.compiler.code.label(continue_compare);
+
+                    left = right;
+                }
+
+                self.compiler.code.label(after_compare);
+                return true;
+            }
+        }
+
+        false
+    }
+
     fn compile_binop(&mut self, binop: &BinaryExpression, dest: OpDestination) {
         let kind = match binop.kind {
             syntax::BinaryKind::Add => BinaryKind::Add,
@@ -1096,7 +1157,13 @@ impl<'a> Scope<'a> {
             syntax::BinaryKind::Remainder => BinaryKind::Remainder,
             syntax::BinaryKind::Power => BinaryKind::Power,
             syntax::BinaryKind::Bitwise(kind) => BinaryKind::Bitwise(kind),
-            syntax::BinaryKind::Compare(kind) => BinaryKind::Compare(kind),
+            syntax::BinaryKind::Compare(kind) => {
+                if self.try_compile_chain_compare(binop, kind, dest) {
+                    return;
+                }
+
+                BinaryKind::Compare(kind)
+            }
             syntax::BinaryKind::Chain => {
                 self.compile_expression(&binop.left, OpDestination::Void);
                 self.compile_expression(&binop.right, dest);

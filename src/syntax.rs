@@ -328,7 +328,6 @@ pub enum CompareKind {
     NotEqual,
     GreaterThan,
     GreaterThanOrEqual,
-    Matches,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
