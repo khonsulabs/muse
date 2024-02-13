@@ -1081,9 +1081,19 @@ impl<'a> Scope<'a> {
         self.compiler.code.label(pattern_mismatch);
 
         if let Some(r#else) = &decl.r#else {
+            self.compile_expression(r#else, OpDestination::Void);
             match refutable {
-                Refutability::Refutable => todo!("ensure all branches in else exit"),
-                Refutability::Irrefutable => {}
+                Refutability::Refutable => {
+                    if let Err(range) = Self::check_all_branches_diverge(r#else) {
+                        self.compiler
+                            .errors
+                            .push(Ranged::new(range, Error::LetElseMustDiverge));
+                    }
+                }
+                Refutability::Irrefutable => self
+                    .compiler
+                    .errors
+                    .push(Ranged::new(r#else.1, Error::ElseOnIrrefutablePattern)),
             }
         } else {
             self.compiler.code.throw(FaultKind::PatternMismatch);
@@ -1091,6 +1101,56 @@ impl<'a> Scope<'a> {
 
         self.compiler.code.label(after_declare);
         self.compiler.code.copy(true, dest);
+    }
+
+    fn check_all_branches_diverge(expr: &Ranged<Expression>) -> Result<(), SourceRange> {
+        match &expr.0 {
+            Expression::Break(_) | Expression::Return(_) | Expression::Continue(_) => Ok(()),
+            Expression::If(if_expr) => {
+                let Some(when_false) = &if_expr.when_false else {
+                    return Err(expr.1);
+                };
+                Self::check_all_branches_diverge(&if_expr.when_true)?;
+
+                Self::check_all_branches_diverge(when_false)
+            }
+            Expression::Block(block) => Self::check_all_branches_diverge(&block.body),
+            Expression::Binary(binary) if binary.kind == syntax::BinaryKind::Chain => {
+                Self::check_all_branches_diverge(&binary.left)
+                    .or_else(|_| Self::check_all_branches_diverge(&binary.right))
+            }
+            Expression::Try(_) => {
+                todo!("try isn't implemented yet")
+            }
+            Expression::Loop(loop_expr) => {
+                let conditional = match &loop_expr.kind {
+                    LoopKind::Infinite => false,
+                    LoopKind::While(_) | LoopKind::TailWhile(_) | LoopKind::For { .. } => true,
+                };
+
+                if !conditional {
+                    return Err(expr.1);
+                }
+
+                Self::check_all_branches_diverge(&loop_expr.block.body)
+            }
+
+            Expression::Literal(_)
+            | Expression::Lookup(_)
+            | Expression::Match(_)
+            | Expression::TryOrNil(_)
+            | Expression::Map(_)
+            | Expression::List(_)
+            | Expression::Tuple(_)
+            | Expression::Call(_)
+            | Expression::Index(_)
+            | Expression::Assign(_)
+            | Expression::Unary(_)
+            | Expression::Binary(_)
+            | Expression::Module(_)
+            | Expression::Function(_)
+            | Expression::Variable(_) => Err(expr.1),
+        }
     }
 
     fn declare_local(&mut self, name: Symbol, mutable: bool, value: Stack, dest: OpDestination) {
@@ -1453,6 +1513,8 @@ pub enum Error {
     ExpectedBlock,
     NameAlreadyBound,
     OrPatternBindingsMismatch,
+    ElseOnIrrefutablePattern,
+    LetElseMustDiverge,
     Syntax(syntax::Error),
 }
 

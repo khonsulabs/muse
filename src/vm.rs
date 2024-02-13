@@ -619,7 +619,7 @@ impl Vm {
             Ordering::Equal => return Ok(StepResult::Complete),
             Ordering::Greater => return Err(Fault::InvalidInstructionAddress),
         };
-        println!("Executing {instruction:?}");
+        // println!("Executing {instruction:?}");
         let next_instruction = StepResult::from(address.checked_add(1));
         let result = match instruction {
             LoadedOp::Return => return Ok(StepResult::Complete),
@@ -754,7 +754,7 @@ impl Vm {
                 loaded.op1,
                 loaded.op2,
                 loaded.dest,
-                |vm, lhs, rhs| dbg!(lhs.matches(vm, &rhs).map(Value::Bool)),
+                |vm, lhs, rhs| lhs.matches(vm, &rhs).map(Value::Bool),
             ),
             LoadedOp::BitwiseAnd(loaded) => self.op_binop(
                 code_index,

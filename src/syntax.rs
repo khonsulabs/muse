@@ -2071,14 +2071,22 @@ fn parse_variable(
             Expression::Literal(Literal::Nil),
         )
     };
+
+    let r#else = if tokens.peek_token() == Some(Token::Identifier(Symbol::else_symbol().clone())) {
+        tokens.next()?;
+        Some(config.parse_expression(tokens)?)
+    } else {
+        None
+    };
+
     Ok(tokens.ranged(
         start..,
         Expression::Variable(Box::new(Variable {
             publish,
             mutable,
             pattern,
-            r#else: None,
             value,
+            r#else,
         })),
     ))
 }

@@ -44,6 +44,6 @@ unsafe_code = "forbid"
 name = "harness"
 harness = false
 
-[profile.release]
-debug = true
-lto = true
+# [profile.release]
+# debug = true
+# lto = true
