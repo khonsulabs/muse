@@ -12,3 +12,26 @@ try_operator_dot: {
     src: r#"(1/0)?.nonsense"#,
     output: Nil,
 }
+
+try: {
+    src: r#"try { 1/0 }"#,
+    output: Nil,
+}
+
+try_catch: {
+    src: r#"try { 1/0 } catch err { err }"#,
+    output: Symbol("divided_by_zero"),
+}
+
+try_catch_expr: {
+    src: r#"try { 1/0 } catch => it"#,
+    output: Symbol("divided_by_zero"),
+}
+
+
+try_catch_pattern: {
+    src: r#"try { 1/0 } catch { :divided_by_zero => 0 }"#,
+    output: Int(0),
+}
+
+

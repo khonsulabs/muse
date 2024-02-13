@@ -7,8 +7,8 @@ use crate::symbol::Symbol;
 use crate::syntax::{
     self, AssignTarget, BinaryExpression, BreakExpression, Chain, CompareKind, ContinueExpression,
     Expression, FunctionCall, FunctionDefinition, Index, Literal, LogicalKind, LoopExpression,
-    LoopKind, MatchExpression, MatchPattern, PatternKind, Ranged, SourceRange, UnaryExpression,
-    Variable,
+    LoopKind, MatchExpression, MatchPattern, Matches, PatternKind, Ranged, SourceRange,
+    TryExpression, UnaryExpression, Variable,
 };
 use crate::vm::bitcode::{
     BinaryKind, BitcodeBlock, BitcodeFunction, FaultKind, Label, Op, OpDestination, ValueOrSource,
@@ -285,7 +285,7 @@ impl<'a> Scope<'a> {
                 self.compile_expression(&if_expr.when_true, dest);
                 self.compiler.code.label(after_true);
             }
-            Expression::Match(match_expr) => self.compile_match(match_expr, dest),
+            Expression::Match(match_expr) => self.compile_match_expression(match_expr, dest),
             Expression::Loop(loop_expr) => {
                 self.compile_loop(loop_expr, dest);
             }
@@ -367,10 +367,7 @@ impl<'a> Scope<'a> {
                 scope.compile_expression(&block.body, dest);
                 scope.compiler.code.label(break_label);
             }
-            Expression::Try(try_expr) => self.compile_try_catch(
-                |this| this.compile_expression(&try_expr.body, dest),
-                |this| this.compile_expression(&try_expr.catch, dest),
-            ),
+            Expression::Try(try_expr) => self.compile_try(try_expr, dest),
             Expression::TryOrNil(try_expr) => self.compile_try_catch(
                 |this| this.compile_expression(&try_expr.body, dest),
                 |this| this.compiler.code.copy((), dest),
@@ -691,7 +688,7 @@ impl<'a> Scope<'a> {
         }
     }
 
-    fn compile_match(&mut self, match_expr: &MatchExpression, dest: OpDestination) {
+    fn compile_match_expression(&mut self, match_expr: &MatchExpression, dest: OpDestination) {
         let condition = if let Expression::Tuple(tuple) = &match_expr.condition.0 {
             &**tuple
         } else {
@@ -701,11 +698,20 @@ impl<'a> Scope<'a> {
             .iter()
             .map(|condition| self.compile_source(condition))
             .collect::<Vec<_>>();
+        self.compile_match(&conditions, &match_expr.matches, dest);
+    }
+
+    fn compile_match(
+        &mut self,
+        conditions: &[ValueOrSource],
+        matches: &Matches,
+        dest: OpDestination,
+    ) {
         let mut refutable = Refutability::Irrefutable;
         let previous_handler = self.new_temporary();
         let mut stored_previous_handler = false;
 
-        for matches in &match_expr.matches.0.patterns {
+        for matches in &matches.patterns {
             let mut pattern_block = self.enter_block(None);
             let next_pattern = pattern_block.compiler.code.new_label();
 
@@ -730,7 +736,7 @@ impl<'a> Scope<'a> {
 
             if let Some(parameters) = parameters {
                 if parameters.len() == conditions.len() {
-                    for (parameter, condition) in parameters.iter().zip(&conditions) {
+                    for (parameter, condition) in parameters.iter().zip(conditions) {
                         refutable |= pattern_block.compile_pattern_binding(
                             parameter,
                             condition.clone(),
@@ -776,6 +782,21 @@ impl<'a> Scope<'a> {
         if refutable == Refutability::Refutable {
             self.compiler.code.throw(FaultKind::PatternMismatch);
         }
+    }
+
+    fn compile_try(&mut self, try_expr: &TryExpression, dest: OpDestination) {
+        self.compile_try_catch(
+            |this| this.compile_expression(&try_expr.body, dest),
+            |this| {
+                if let Some(matches) = &try_expr.catch {
+                    this.compile_match(&[ValueOrSource::Register(Register(0))], matches, dest);
+                } else {
+                    // A catch-less try converts to nil. It's just a different
+                    // form of the ? operator.
+                    this.compiler.code.copy((), dest);
+                }
+            },
+        );
     }
 
     fn compile_try_catch(&mut self, tried: impl FnOnce(&mut Self), catch: impl FnOnce(&mut Self)) {

@@ -213,8 +213,7 @@ pub struct TryOrNil {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TryExpression {
     pub body: Ranged<Expression>,
-    pub exception_name: Option<Range<Symbol>>,
-    pub catch: Ranged<Expression>,
+    pub catch: Option<Ranged<Matches>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -468,6 +467,7 @@ pub enum Error {
     ExpectedPattern,
     ExpectedPatternOr(Paired),
     ExpectedFatArrow,
+    ExpectedCatchBlock,
     InvalidAssignmentTarget,
     InvalidLabelTarget,
 }
@@ -1579,6 +1579,92 @@ impl PrefixParselet for While {
     }
 }
 
+struct Try;
+
+impl Parselet for Try {
+    fn token(&self) -> Option<Token> {
+        Some(Token::Identifier(Symbol::try_symbol().clone()))
+    }
+}
+
+impl PrefixParselet for Try {
+    fn parse(
+        &self,
+        token: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        let body = config.parse_expression(tokens)?;
+
+        let catch =
+            if tokens.peek_token() == Some(Token::Identifier(Symbol::catch_symbol().clone())) {
+                let catch_token = tokens.next()?;
+                match tokens.peek_token() {
+                    Some(Token::Open(Paired::Brace)) => {
+                        // Match catch
+                        let open_brace = tokens.next()?;
+
+                        Some(parse_match_block_body(open_brace.1.start, tokens, config)?)
+                    }
+                    Some(Token::FatArrow) => {
+                        tokens.next()?;
+                        let pattern = Ranged::new(
+                            catch_token.range(),
+                            Pattern {
+                                kind: Ranged::new(
+                                    catch_token.range(),
+                                    PatternKind::Any(Some(Symbol::it_symbol().clone())),
+                                ),
+                                guard: None,
+                            },
+                        );
+
+                        let body = config.parse_expression(tokens)?;
+
+                        Some(tokens.ranged(
+                            pattern.range().start..,
+                            Matches {
+                                patterns: vec![tokens.ranged(
+                                    pattern.range().start..,
+                                    MatchPattern { pattern, body },
+                                )],
+                            },
+                        ))
+                    }
+                    _ => {
+                        // Inline binding
+                        let Some(pattern) = parse_pattern(tokens, config)? else {
+                            return Err(
+                                tokens.ranged(tokens.last_index.., Error::ExpectedCatchBlock)
+                            );
+                        };
+                        let body = parse_block(tokens, config)?;
+
+                        Some(tokens.ranged(
+                            pattern.range().start..,
+                            Matches {
+                                patterns: vec![tokens.ranged(
+                                    pattern.range().start..,
+                                    MatchPattern {
+                                        pattern,
+                                        body: body.map(|block| Expression::Block(Box::new(block))),
+                                    },
+                                )],
+                            },
+                        ))
+                    }
+                }
+            } else {
+                None
+            };
+
+        Ok(tokens.ranged(
+            token.range().start..,
+            Expression::Try(Box::new(TryExpression { body, catch })),
+        ))
+    }
+}
+
 struct Match;
 
 impl Parselet for Match {
@@ -2410,7 +2496,8 @@ fn parselets() -> Parselets {
         Break,
         Return,
         For,
-        Match
+        Match,
+        Try,
     ]);
     parser.push_prefix(parselets![Term]);
     parser
