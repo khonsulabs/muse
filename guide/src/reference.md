@@ -92,7 +92,8 @@ Prefix:
         Continue |
         Break |
         Return |
-        Match> | Term;
+        Match |
+        Try> | Term;
 
 Literal: 'true' | 'false';
 
@@ -121,8 +122,10 @@ ArrowBody: '=>' <Expression>;
 BlockBody: '{' <Chain> '}';
 FnMatch: '{' <MatchBody> '}';
 
-Let: 'let' <Pattern> '=' <Expression>;
-Var: 'var' <Pattern> '=' <Expression>;
+Let: 'let' <VariablePattern>;
+Var: 'var' <VariablePattern>;
+VariablePattern: <GuardedPattern> '=' <Expression> <VariableElse>?;
+VariableElse: 'else' <Expression>;
 
 If: 'if' <Expression> <ThenExpression | Block> <ElseExpression>?;
 ThenExpression: 'then' <Expression>;
@@ -138,7 +141,8 @@ Continue: 'continue' <Label>?;
 Break: 'break' <Label>? <Expression>?;
 Return: 'return' <Expression>?;
 
-Match: 'match' <Expression> '{' <MatchBody> '}';
+Match: 'match' <Expression> <MatchBlock>;
+MatchBlock: '{' <MatchBody> '}';
 MatchBody: (<MatchPattern> (',' <MatchPattern>)*)?;
 MatchPattern: <GuardedPattern> '=>' <Expression>;
 GuardedPattern: <Pattern> ('if' <Expression>)?;
@@ -146,6 +150,10 @@ Pattern: <IdentifierPattern | TuplePattern | ListPattern>;
 IdentifierPattern: '_' | <Identifier>;
 TuplePattern: '(' (<Pattern> (',' <Pattern>)*)? ')';
 ListPattern: '[' (<Pattern> (',' <Pattern>)*)? ']';
+
+Try: 'try' <Expression> ('catch' <MatchBlock | SingleCatch | ArrowCatch>)?;
+SingleCatch: <GuardedPattern> <Block>;
+ArrowCatch: '=>' <Expression>;
 
 Term: <Identifier | Number | Regex | String | Symbol>;
 ```
