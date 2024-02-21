@@ -12,6 +12,7 @@ pub type ValueHasher = ahash::AHasher;
 
 use kempt::Map;
 
+use crate::string::MuseString;
 use crate::symbol::{Symbol, SymbolList};
 use crate::vm::{Arity, Fault, Vm};
 
@@ -246,12 +247,10 @@ impl Value {
             (Value::Bool(_), _) | (_, Value::Bool(_)) => Err(Fault::UnsupportedOperation),
 
             (Value::Symbol(lhs), rhs) => {
-                let rhs = rhs.to_string(vm)?;
-                Ok(Value::Symbol(lhs + &rhs))
+                rhs.map_str(vm, |_vm, rhs| Value::Symbol(Symbol::from(lhs + rhs)))
             }
             (lhs, Value::Symbol(rhs)) => {
-                let lhs = lhs.to_string(vm)?;
-                Ok(Value::Symbol(&lhs + rhs))
+                lhs.map_str(vm, |_vm, lhs| Value::Symbol(Symbol::from(lhs + rhs)))
             }
 
             (Value::Int(lhs), Value::Int(rhs)) => Ok(Self::Int(lhs.saturating_add(*rhs))),
@@ -807,6 +806,20 @@ impl Value {
         }
     }
 
+    pub fn map_str<R>(
+        &self,
+        vm: &mut Vm,
+        map: impl FnOnce(&mut Vm, &str) -> R,
+    ) -> Result<R, Fault> {
+        if let Value::Dynamic(dynamic) = self {
+            if let Some(str) = dynamic.downcast_ref::<MuseString>() {
+                return Ok(map(vm, &str.lock()));
+            }
+        }
+
+        self.to_string(vm).map(|string| map(vm, &string))
+    }
+
     pub fn hash_into(&self, vm: &mut Vm, hasher: &mut ValueHasher) {
         core::mem::discriminant(self).hash(hasher);
         match self {
@@ -1060,6 +1073,15 @@ impl Dynamic {
 
     pub fn call(&self, vm: &mut Vm, arity: impl Into<Arity>) -> Result<Value, Fault> {
         self.0.call(vm, self, arity.into())
+    }
+
+    pub fn invoke(
+        &self,
+        vm: &mut Vm,
+        symbol: &Symbol,
+        arity: impl Into<Arity>,
+    ) -> Result<Value, Fault> {
+        self.0.invoke(vm, symbol, arity.into())
     }
 
     pub fn add(&self, vm: &mut Vm, rhs: &Value) -> Result<Value, Fault> {

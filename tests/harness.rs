@@ -4,7 +4,7 @@ use std::path::Path;
 use muse::compiler::{Compiler, Error};
 use muse::list::List;
 use muse::map::Map;
-use muse::regex::MuseRegex;
+use muse::regex::{MuseMatch, MuseRegex};
 use muse::string::MuseString;
 use muse::symbol::Symbol;
 use muse::syntax::token::RegexLiteral;
@@ -35,6 +35,7 @@ enum TestOutput {
     Symbol(Symbol),
     String(String),
     Regex(RegexLiteral),
+    RegexMatch { content: String, start: usize },
     Map(TestMap),
     List(Vec<TestOutput>),
     Error(Vec<Ranged<Error>>),
@@ -149,6 +150,15 @@ impl From<Value> for TestOutput {
                     ))
                 } else if let Some(list) = v.downcast_ref::<List>() {
                     TestOutput::List(list.to_vec().into_iter().map(TestOutput::from).collect())
+                } else if let Some(m) = v.downcast_ref::<MuseMatch>() {
+                    TestOutput::RegexMatch {
+                        content: m
+                            .content
+                            .downcast_ref::<MuseString>()
+                            .expect("capture is string")
+                            .to_string(),
+                        start: m.start,
+                    }
                 } else {
                     unreachable!("test returned dynamic {v:?}, but the harness doesn't support it")
                 }

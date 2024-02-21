@@ -1,6 +1,7 @@
 use std::ops::{BitOr, BitOrAssign};
 
 use kempt::{Map, Set};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::symbol::Symbol;
@@ -561,13 +562,81 @@ impl<'a> Scope<'a> {
                 parameter,
                 ValueOrSource::Register(Register(register)),
                 doesnt_match,
-                false,
-                false,
-                &mut Set::new(),
+                &mut PatternBindings::default(),
             );
         }
 
         refutable
+    }
+
+    fn compile_literal_binding(
+        &mut self,
+        literal: &Literal,
+        range: SourceRange,
+        source: ValueOrSource,
+        doesnt_match: Label,
+        bindings: &mut PatternBindings,
+    ) -> Refutability {
+        let matches = self.new_temporary();
+
+        if let Literal::Regex(regex) = literal {
+            match Regex::new(&regex.pattern) {
+                Ok(regex) if regex.capture_names().any(|s| s.is_some()) => {
+                    self.compiler.code.copy(source, Register(0));
+                    self.compiler
+                        .code
+                        .invoke(literal.clone(), Symbol::captures_symbol(), 1);
+                    self.compiler
+                        .code
+                        .jump_if_not(doesnt_match, Register(0), ());
+                    self.compiler.code.copy(Register(0), matches);
+
+                    for capture_name in regex.capture_names().flatten() {
+                        let name = Symbol::from(capture_name);
+                        self.check_bound_name(Ranged::new(range, name.clone()), bindings);
+
+                        let variable = self.new_temporary();
+                        self.compiler.code.copy(name.clone(), Register(0));
+                        self.compiler.code.invoke(matches, Symbol::get_symbol(), 1);
+                        self.compiler.code.copy(Register(0), variable);
+
+                        if bindings.publish {
+                            self.ensure_in_module(range);
+
+                            self.compiler.code.declare(
+                                name.clone(),
+                                bindings.mutable,
+                                variable,
+                                (),
+                            );
+                        } else {
+                            self.declare_local(
+                                name.clone(),
+                                bindings.mutable,
+                                variable,
+                                OpDestination::Void,
+                            );
+                        }
+                    }
+
+                    return Refutability::Refutable;
+                }
+                _ => {}
+            }
+        }
+
+        self.compiler.code.matches(literal.clone(), source, matches);
+        self.compiler.code.jump_if_not(doesnt_match, matches, ());
+
+        Refutability::Refutable
+    }
+
+    fn check_bound_name(&mut self, name: Ranged<Symbol>, bindings: &mut PatternBindings) {
+        if !bindings.bound_names.insert(name.0) {
+            self.compiler
+                .errors
+                .push(Ranged::new(name.1, Error::NameAlreadyBound));
+        }
     }
 
     fn compile_pattern_binding(
@@ -575,67 +644,52 @@ impl<'a> Scope<'a> {
         pattern: &Ranged<PatternKind>,
         source: ValueOrSource,
         doesnt_match: Label,
-        publish: bool,
-        mutable: bool,
-        bound_names: &mut Set<Symbol>,
+        bindings: &mut PatternBindings,
     ) -> Refutability {
         match &pattern.0 {
             PatternKind::Any(name) => {
                 if let Some(name) = name {
-                    if !bound_names.insert(name.clone()) {
-                        self.compiler
-                            .errors
-                            .push(Ranged::new(pattern.range(), Error::NameAlreadyBound));
-                    }
+                    self.check_bound_name(Ranged::new(pattern.range(), name.clone()), bindings);
 
-                    if publish {
+                    if bindings.publish {
                         self.compiler
                             .code
-                            .declare(name.clone(), mutable, source, ());
+                            .declare(name.clone(), bindings.mutable, source, ());
                     } else {
                         let stack = self.new_temporary();
                         self.compiler.code.copy(source, stack);
-                        self.declare_local(name.clone(), mutable, stack, OpDestination::Void);
+                        self.declare_local(
+                            name.clone(),
+                            bindings.mutable,
+                            stack,
+                            OpDestination::Void,
+                        );
                     }
                 }
                 Refutability::Irrefutable
             }
-            PatternKind::Literal(literal) => {
-                let matches = self.new_temporary();
-
-                self.compiler.code.matches(literal.clone(), source, matches);
-
-                self.compiler.code.jump_if_not(doesnt_match, matches, ());
-
-                Refutability::Refutable
-            }
+            PatternKind::Literal(literal) => self.compile_literal_binding(
+                literal,
+                pattern.range(),
+                source,
+                doesnt_match,
+                bindings,
+            ),
             PatternKind::Or(a, b) => {
                 let b_label = self.compiler.code.new_label();
                 let body_label = self.compiler.code.new_label();
 
-                let mut b_bindings = Set::new();
+                let mut b_bindings = PatternBindings::default();
 
-                let mut refutable = self.compile_pattern_binding(
-                    a,
-                    source.clone(),
-                    b_label,
-                    publish,
-                    mutable,
-                    bound_names,
-                );
+                let mut refutable =
+                    self.compile_pattern_binding(a, source.clone(), b_label, bindings);
                 self.compiler.code.jump(body_label, ());
 
                 self.compiler.code.label(b_label);
-                refutable |= self.compile_pattern_binding(
-                    b,
-                    source.clone(),
-                    doesnt_match,
-                    publish,
-                    mutable,
-                    &mut b_bindings,
-                );
+                refutable |=
+                    self.compile_pattern_binding(b, source.clone(), doesnt_match, &mut b_bindings);
 
-                if bound_names != &b_bindings {
+                if bindings.bound_names != b_bindings.bound_names {
                     self.compiler.errors.push(Ranged::new(
                         pattern.range(),
                         Error::OrPatternBindingsMismatch,
@@ -677,9 +731,7 @@ impl<'a> Scope<'a> {
                         &patterns[index],
                         ValueOrSource::Stack(element),
                         doesnt_match,
-                        publish,
-                        mutable,
-                        bound_names,
+                        bindings,
                     );
                 }
 
@@ -741,9 +793,7 @@ impl<'a> Scope<'a> {
                             parameter,
                             condition.clone(),
                             next_pattern,
-                            false,
-                            false,
-                            &mut Set::new(),
+                            &mut PatternBindings::default(),
                         );
                     }
                 } else {
@@ -1012,9 +1062,7 @@ impl<'a> Scope<'a> {
                     &pattern.kind,
                     ValueOrSource::Stack(i),
                     pattern_mismatch,
-                    false,
-                    false,
-                    &mut Set::new(),
+                    &mut PatternBindings::default(),
                 );
 
                 if let Some(guard) = &pattern.guard {
@@ -1086,9 +1134,11 @@ impl<'a> Scope<'a> {
             &decl.pattern.kind,
             value,
             pattern_mismatch,
-            decl.publish,
-            decl.mutable,
-            &mut Set::new(),
+            &mut PatternBindings {
+                publish: decl.publish,
+                mutable: decl.mutable,
+                bound_names: Set::new(),
+            },
         );
 
         if let Some(guard) = &decl.pattern.guard {
@@ -1563,4 +1613,11 @@ pub enum UnaryKind {
 pub struct BitcodeModule {
     pub name: Symbol,
     pub initializer: BitcodeBlock,
+}
+
+#[derive(Default)]
+struct PatternBindings {
+    publish: bool,
+    mutable: bool,
+    bound_names: Set<Symbol>,
 }

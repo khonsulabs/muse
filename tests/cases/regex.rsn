@@ -38,3 +38,11 @@ regex_static_captures: {
     src: r#"\(a)|(b)/.total_static_captures()"#,
     output: UInt(2),
 }
+
+regex_named_capture: {
+    src: r#"
+        let \(?<first>\w+) (?<second>\w+)/ = "Muse Language";
+        "Hello, " + first
+    "#,
+    output: String("Hello, Muse"),
+}

@@ -43,6 +43,7 @@ static_symbols!(
     let_symbol => "let",
     loop_symbol => "loop",
     match_symbol => "match",
+    captures_symbol => "captures",
     mod_symbol => "mod",
     next_symbol => "next",
     not_symbol => "not",
@@ -147,10 +148,37 @@ impl<'a, 'b> Add<&'a Symbol> for &'b Symbol {
     type Output = Symbol;
 
     fn add(self, rhs: &'a Symbol) -> Self::Output {
+        Symbol::from(self + &**rhs)
+    }
+}
+
+impl<'a, 'b> Add<&'a str> for &'b Symbol {
+    type Output = String;
+
+    fn add(self, rhs: &'a str) -> Self::Output {
         let mut out = String::with_capacity(self.len() + rhs.len());
         out.push_str(self);
         out.push_str(rhs);
-        Symbol::from(out)
+        out
+    }
+}
+
+impl<'a, 'b> Add<&'a Symbol> for &'b str {
+    type Output = String;
+
+    fn add(self, rhs: &'a Symbol) -> Self::Output {
+        let mut out = String::with_capacity(self.len() + rhs.len());
+        out.push_str(self);
+        out.push_str(rhs);
+        out
+    }
+}
+
+impl<'a, 'b> Add<&'a String> for &'b Symbol {
+    type Output = String;
+
+    fn add(self, rhs: &'a String) -> Self::Output {
+        self + rhs.as_str()
     }
 }
 
