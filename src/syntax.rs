@@ -101,6 +101,7 @@ pub enum Expression {
     Match(Box<MatchExpression>),
     Try(Box<TryExpression>),
     TryOrNil(Box<TryOrNil>),
+    Throw(Box<Ranged<Expression>>),
     Map(Box<MapExpression>),
     List(Vec<Ranged<Expression>>),
     Tuple(Vec<Ranged<Expression>>),
@@ -1665,6 +1666,27 @@ impl PrefixParselet for Try {
     }
 }
 
+struct Throw;
+
+impl Parselet for Throw {
+    fn token(&self) -> Option<Token> {
+        Some(Token::Identifier(Symbol::throw_symbol().clone()))
+    }
+}
+
+impl PrefixParselet for Throw {
+    fn parse(
+        &self,
+        token: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        let value = config.parse_expression(tokens)?;
+
+        Ok(tokens.ranged(token.range().start.., Expression::Throw(Box::new(value))))
+    }
+}
+
 struct Match;
 
 impl Parselet for Match {
@@ -2498,6 +2520,7 @@ fn parselets() -> Parselets {
         For,
         Match,
         Try,
+        Throw,
     ]);
     parser.push_prefix(parselets![Term]);
     parser

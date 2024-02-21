@@ -54,6 +54,7 @@ static_symbols!(
     set_symbol => "set",
     super_symbol => "super",
     then_symbol => "then",
+    throw_symbol => "throw",
     true_symbol => "true",
     try_symbol => "try",
     var_symbol => "var",

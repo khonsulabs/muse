@@ -34,4 +34,12 @@ try_catch_pattern: {
     output: Int(0),
 }
 
+throw: {
+    src: r#"throw true"#,
+    output: Fault(Exception(Bool(true))),
+}
 
+try_throw_catch: {
+    src: r#"try { throw true; return false } catch true { 42 }"#,
+    output: Int(42),
+}

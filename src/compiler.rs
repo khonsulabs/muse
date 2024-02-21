@@ -373,6 +373,7 @@ impl<'a> Scope<'a> {
                 |this| this.compile_expression(&try_expr.body, dest),
                 |this| this.compiler.code.copy((), dest),
             ),
+            Expression::Throw(value) => self.compile_throw(value),
             Expression::Call(call) => self.compile_function_call(call, expr.range(), dest),
             Expression::Index(index) => self.compile_index(index, expr.range(), dest),
             Expression::Variable(decl) => {
@@ -834,6 +835,12 @@ impl<'a> Scope<'a> {
         }
     }
 
+    fn compile_throw(&mut self, value: &Ranged<Expression>) {
+        let value = self.compile_source(value);
+        self.compiler.code.copy(value, Register(0));
+        self.compiler.code.throw(FaultKind::Exception);
+    }
+
     fn compile_try(&mut self, try_expr: &TryExpression, dest: OpDestination) {
         self.compile_try_catch(
             |this| this.compile_expression(&try_expr.body, dest),
@@ -1176,7 +1183,10 @@ impl<'a> Scope<'a> {
 
     fn check_all_branches_diverge(expr: &Ranged<Expression>) -> Result<(), SourceRange> {
         match &expr.0 {
-            Expression::Break(_) | Expression::Return(_) | Expression::Continue(_) => Ok(()),
+            Expression::Break(_)
+            | Expression::Return(_)
+            | Expression::Continue(_)
+            | Expression::Throw(_) => Ok(()),
             Expression::If(if_expr) => {
                 let Some(when_false) = &if_expr.when_false else {
                     return Err(expr.1);
@@ -1190,8 +1200,13 @@ impl<'a> Scope<'a> {
                 Self::check_all_branches_diverge(&binary.left)
                     .or_else(|_| Self::check_all_branches_diverge(&binary.right))
             }
-            Expression::Try(_) => {
-                todo!("try isn't implemented yet")
+            Expression::Try(try_expr) => {
+                Self::check_all_branches_diverge(&try_expr.body)?;
+                if let Some(catch) = &try_expr.catch {
+                    Self::check_matches_diverge(catch)
+                } else {
+                    Err(expr.range())
+                }
             }
             Expression::Loop(loop_expr) => {
                 let conditional = match &loop_expr.kind {
@@ -1206,9 +1221,9 @@ impl<'a> Scope<'a> {
                 Self::check_all_branches_diverge(&loop_expr.block.body)
             }
 
+            Expression::Match(match_expr) => Self::check_matches_diverge(&match_expr.matches),
             Expression::Literal(_)
             | Expression::Lookup(_)
-            | Expression::Match(_)
             | Expression::TryOrNil(_)
             | Expression::Map(_)
             | Expression::List(_)
@@ -1222,6 +1237,18 @@ impl<'a> Scope<'a> {
             | Expression::Function(_)
             | Expression::Variable(_) => Err(expr.1),
         }
+    }
+
+    fn check_matches_diverge(matches: &Ranged<Matches>) -> Result<(), SourceRange> {
+        for pattern in &matches.patterns {
+            if matches!(&pattern.0.pattern.kind, Ranged(PatternKind::Any(None), _))
+                && pattern.0.pattern.guard.is_none()
+            {
+                return Ok(());
+            }
+        }
+
+        Err(matches.range())
     }
 
     fn declare_local(&mut self, name: Symbol, mutable: bool, value: Stack, dest: OpDestination) {
@@ -1440,6 +1467,7 @@ impl<'a> Scope<'a> {
             | Expression::Binary(_)
             | Expression::Try(_)
             | Expression::TryOrNil(_)
+            | Expression::Throw(_)
             | Expression::Block(_)
             | Expression::Loop(_)
             | Expression::Break(_)
