@@ -46,6 +46,7 @@ static_symbols!(
     captures_symbol => "captures",
     mod_symbol => "mod",
     next_symbol => "next",
+    nil_symbol => "nil",
     not_symbol => "not",
     nth_symbol => "nth",
     or_symbol => "or",

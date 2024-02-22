@@ -110,7 +110,7 @@ dividing an integer by 0. In Rust, it unwinds the stack to the panic handler. In
 Muse, it unwinds the stack to the exception handler.
 
 In Rust, it's much easier to check for 0 compared to catching an panic. In Muse,
-the try operator (`?`) makes it easy to turn any exception into `Nil`:
+the try operator (`?`) makes it easy to turn any exception into `nil`:
 
 ```muse
 # '//' is the integer division operator

@@ -933,6 +933,11 @@ impl_prefix_standalone_parselet!(
     Token::Identifier(Symbol::false_symbol().clone()),
     Expression::Literal(Literal::Bool(false))
 );
+impl_prefix_standalone_parselet!(
+    Nil,
+    Token::Identifier(Symbol::nil_symbol().clone()),
+    Expression::Literal(Literal::Nil)
+);
 
 struct Braces;
 
@@ -1715,7 +1720,14 @@ impl PrefixParselet for Throw {
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
-        let value = config.parse_expression(tokens)?;
+        let value = if tokens
+            .peek_token()
+            .map_or(false, |token| !token.is_likely_end())
+        {
+            config.parse_expression(tokens)?
+        } else {
+            tokens.ranged(tokens.last_index.., Expression::Literal(Literal::Nil))
+        };
 
         Ok(tokens.ranged(token.range().start.., Expression::Throw(Box::new(value))))
     }
@@ -2049,6 +2061,10 @@ fn parse_pattern_kind(
                 indicator.range(),
                 PatternKind::Literal(Literal::Bool(false)),
             )
+        }
+        Token::Identifier(name) if name == Symbol::nil_symbol() => {
+            tokens.next()?;
+            Ranged::new(indicator.range(), PatternKind::Literal(Literal::Nil))
         }
         Token::Identifier(name) => {
             tokens.next()?;
@@ -2546,6 +2562,7 @@ fn parselets() -> Parselets {
         If,
         True,
         False,
+        Nil,
         Loop,
         While,
         Labeled,

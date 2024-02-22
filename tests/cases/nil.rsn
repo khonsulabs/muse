@@ -1,5 +1,5 @@
 coalesce: {
-    src: r#"{} ?? 1"#,
+    src: r#"nil ?? 1"#,
     output: Int(1),
 }
 

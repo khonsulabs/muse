@@ -158,7 +158,7 @@ Try: 'try' <Expression> ('catch' <MatchBlock | SingleCatch | ArrowCatch>)?;
 SingleCatch: <GuardedPattern> <Block>;
 ArrowCatch: '=>' <Expression>;
 
-Throw: 'throw' <Expression>;
+Throw: 'throw' <Expression>?;
 
 Term: <Identifier | Number | Regex | String | Symbol>;
 ```
