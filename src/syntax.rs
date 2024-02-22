@@ -2422,6 +2422,16 @@ impl_infix_parselet!(
     BinaryKind::Bitwise(BitwiseKind::Xor)
 );
 impl_infix_parselet!(
+    BitwiseShiftLeft,
+    Token::ShiftLeft,
+    BinaryKind::Bitwise(BitwiseKind::ShiftLeft)
+);
+impl_infix_parselet!(
+    BitwiseShiftRight,
+    Token::ShiftRight,
+    BinaryKind::Bitwise(BitwiseKind::ShiftRight)
+);
+impl_infix_parselet!(
     And,
     Token::Identifier(Symbol::and_symbol().clone()),
     BinaryKind::Logical(LogicalKind::And)
@@ -2537,6 +2547,7 @@ fn parselets() -> Parselets {
     parser.push_infix(parselets![BitwiseOr]);
     parser.push_infix(parselets![BitwiseXor]);
     parser.push_infix(parselets![BitwiseAnd]);
+    parser.push_infix(parselets![BitwiseShiftLeft, BitwiseShiftRight]);
     parser.push_infix(parselets![Add, Subtract]);
     parser.push_infix(parselets![Multiply, Divide, Remainder, IntegerDivide]);
     parser.push_infix(parselets![Power]);
