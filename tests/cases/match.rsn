@@ -80,3 +80,8 @@ let_else_doesnt_diverge: {
     src: r#"let 1 = true else { true }"#,
     output: Error([Ranged(LetElseMustDiverge, SourceRange { start: 20, length: 4 })]),
 }
+
+map_tuple_destructure: {
+    src: r#"let ["a", 1] = {"a": 1}"#,
+    output: Bool(true),
+}

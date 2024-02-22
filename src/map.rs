@@ -114,6 +114,10 @@ impl CustomType for Map {
                     let index = vm[Register(0)].take();
                     this.nth(&index)
                 })
+                .with_fn(Symbol::len_symbol(), 0, |_vm, this| {
+                    let contents = this.0.lock().expect("poisoned");
+                    Value::try_from(contents.len())
+                })
         });
         FUNCTIONS.invoke(vm, name, arity, self)
     }

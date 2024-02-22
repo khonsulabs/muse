@@ -726,7 +726,7 @@ impl<'a> Scope<'a> {
                     self.compiler.code.copy(i, Register(0));
                     self.compiler
                         .code
-                        .invoke(source.clone(), Symbol::get_symbol(), 1);
+                        .invoke(source.clone(), Symbol::nth_symbol(), 1);
                     self.compiler.code.copy(Register(0), element);
                     self.compile_pattern_binding(
                         &patterns[index],
