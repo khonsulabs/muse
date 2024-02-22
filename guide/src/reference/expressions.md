@@ -5,5 +5,5 @@ Program: <Chain>;
 
 Chain: <Expression> (';' <Expression>)*;
 
-Expression: <Assignment>;
+Expression: <Assignment> | <ArrowFn> | <InlineIf>;
 ```

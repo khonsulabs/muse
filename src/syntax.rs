@@ -539,7 +539,11 @@ impl<'a> ParserConfig<'a> {
             .skip_while(|level| level.precedence < self.minimum_precedence)
         {
             if let Some(parselet) = level.find_parselet(&token, tokens) {
-                return parselet.parse(token, tokens, &self.with_precedence(level.precedence));
+                return parselet.parse_prefix(
+                    token,
+                    tokens,
+                    &self.with_precedence(level.precedence),
+                );
             }
         }
 
@@ -580,7 +584,7 @@ impl Parselet for Break {
 }
 
 impl PrefixParselet for Break {
-    fn parse(
+    fn parse_prefix(
         &self,
         token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
@@ -623,7 +627,7 @@ impl Parselet for Continue {
 }
 
 impl PrefixParselet for Continue {
-    fn parse(
+    fn parse_prefix(
         &self,
         token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
@@ -658,7 +662,7 @@ impl Parselet for Return {
 }
 
 impl PrefixParselet for Return {
-    fn parse(
+    fn parse_prefix(
         &self,
         token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
@@ -789,7 +793,7 @@ where
 }
 
 trait PrefixParselet: Parselet {
-    fn parse(
+    fn parse_prefix(
         &self,
         token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
@@ -819,7 +823,7 @@ impl Parselet for Term {
 }
 
 impl PrefixParselet for Term {
-    fn parse(
+    fn parse_prefix(
         &self,
         token: Ranged<Token>,
         _tokens: &mut TokenReader<'_>,
@@ -873,7 +877,7 @@ macro_rules! impl_prefix_unary_parselet {
         }
 
         impl PrefixParselet for $name {
-            fn parse(
+            fn parse_prefix(
                 &self,
                 token: Ranged<Token>,
                 tokens: &mut TokenReader<'_>,
@@ -907,7 +911,7 @@ macro_rules! impl_prefix_standalone_parselet {
         }
 
         impl PrefixParselet for $name {
-            fn parse(
+            fn parse_prefix(
                 &self,
                 token: Ranged<Token>,
                 _tokens: &mut TokenReader<'_>,
@@ -1110,7 +1114,7 @@ impl Parselet for Braces {
 }
 
 impl PrefixParselet for Braces {
-    fn parse(
+    fn parse_prefix(
         &self,
         token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
@@ -1210,7 +1214,7 @@ impl Parselet for Parentheses {
 }
 
 impl PrefixParselet for Parentheses {
-    fn parse(
+    fn parse_prefix(
         &self,
         token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
@@ -1267,7 +1271,7 @@ impl Parselet for Brackets {
 }
 
 impl PrefixParselet for Brackets {
-    fn parse(
+    fn parse_prefix(
         &self,
         token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
@@ -1387,7 +1391,7 @@ impl Parselet for If {
 }
 
 impl PrefixParselet for If {
-    fn parse(
+    fn parse_prefix(
         &self,
         token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
@@ -1396,26 +1400,27 @@ impl PrefixParselet for If {
         let condition = config.parse_expression(tokens)?;
         let brace_or_then = tokens.next()?;
         let when_true = match &brace_or_then.0 {
-            Token::Open(Paired::Brace) => Braces.parse(brace_or_then, tokens, config)?,
+            Token::Open(Paired::Brace) => Braces.parse_prefix(brace_or_then, tokens, config)?,
             Token::Identifier(ident) if ident == Symbol::then_symbol() => {
                 config.parse_expression(tokens)?
             }
             _ => return Err(brace_or_then.map(|_| Error::ExpectedThenOrBrace)),
         };
-        let when_false = if tokens.peek_token()
-            == Some(Token::Identifier(Symbol::else_symbol().clone()))
-        {
-            tokens.next()?;
-            Some(match tokens.peek_token() {
-                Some(Token::Identifier(ident)) if ident == *Symbol::if_symbol() => {
-                    Self.parse(tokens.next()?, tokens, config)?
-                }
-                Some(Token::Open(Paired::Brace)) => Braces.parse(tokens.next()?, tokens, config)?,
-                _ => config.parse_expression(tokens)?,
-            })
-        } else {
-            None
-        };
+        let when_false =
+            if tokens.peek_token() == Some(Token::Identifier(Symbol::else_symbol().clone())) {
+                tokens.next()?;
+                Some(match tokens.peek_token() {
+                    Some(Token::Identifier(ident)) if ident == *Symbol::if_symbol() => {
+                        Self.parse_prefix(tokens.next()?, tokens, config)?
+                    }
+                    Some(Token::Open(Paired::Brace)) => {
+                        Braces.parse_prefix(tokens.next()?, tokens, config)?
+                    }
+                    _ => config.parse_expression(tokens)?,
+                })
+            } else {
+                None
+            };
 
         Ok(tokens.ranged(
             token.range().start..,
@@ -1423,6 +1428,35 @@ impl PrefixParselet for If {
                 condition,
                 when_true,
                 when_false,
+            })),
+        ))
+    }
+}
+
+impl InfixParselet for If {
+    fn parse(
+        &self,
+        lhs: Ranged<Expression>,
+        _token: &Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<Error>> {
+        let condition = config.parse_next(tokens)?;
+        let else_expr = if tokens.peek_token().map_or(false, |token| {
+            token == Token::Identifier(Symbol::else_symbol().clone())
+        }) {
+            tokens.next()?;
+            Some(config.parse_expression(tokens)?)
+        } else {
+            None
+        };
+
+        Ok(tokens.ranged(
+            lhs.range().start..,
+            Expression::If(Box::new(IfExpression {
+                condition,
+                when_true: lhs,
+                when_false: else_expr,
             })),
         ))
     }
@@ -1444,7 +1478,7 @@ impl Parselet for Labeled {
 }
 
 impl PrefixParselet for Labeled {
-    fn parse(
+    fn parse_prefix(
         &self,
         label: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
@@ -1483,7 +1517,7 @@ impl Parselet for Loop {
 }
 
 impl PrefixParselet for Loop {
-    fn parse(
+    fn parse_prefix(
         &self,
         token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
@@ -1523,7 +1557,7 @@ impl Parselet for For {
 }
 
 impl PrefixParselet for For {
-    fn parse(
+    fn parse_prefix(
         &self,
         for_token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
@@ -1561,7 +1595,7 @@ impl Parselet for While {
 }
 
 impl PrefixParselet for While {
-    fn parse(
+    fn parse_prefix(
         &self,
         token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
@@ -1589,7 +1623,7 @@ impl Parselet for Try {
 }
 
 impl PrefixParselet for Try {
-    fn parse(
+    fn parse_prefix(
         &self,
         token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
@@ -1675,7 +1709,7 @@ impl Parselet for Throw {
 }
 
 impl PrefixParselet for Throw {
-    fn parse(
+    fn parse_prefix(
         &self,
         token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
@@ -1703,7 +1737,7 @@ impl Parselet for Match {
 }
 
 impl PrefixParselet for Match {
-    fn parse(
+    fn parse_prefix(
         &self,
         match_token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
@@ -1741,7 +1775,7 @@ impl Parselet for Mod {
 }
 
 impl PrefixParselet for Mod {
-    fn parse(
+    fn parse_prefix(
         &self,
         token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
@@ -1765,7 +1799,7 @@ impl Mod {
 
         let brace = tokens.next()?;
         let contents = if brace.0 == Token::Open(Paired::Brace) {
-            Braces.parse(brace, tokens, config)?
+            Braces.parse_prefix(brace, tokens, config)?
         } else {
             return Err(brace.map(|_| Error::ExpectedModuleBody));
         };
@@ -1790,7 +1824,7 @@ impl Parselet for Pub {
 }
 
 impl PrefixParselet for Pub {
-    fn parse(
+    fn parse_prefix(
         &self,
         token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
@@ -1867,7 +1901,7 @@ impl Fn {
 
         let body_indicator = tokens.next()?;
         let body = match &body_indicator.0 {
-            Token::Open(Paired::Brace) => Braces.parse(body_indicator, tokens, config)?,
+            Token::Open(Paired::Brace) => Braces.parse_prefix(body_indicator, tokens, config)?,
             Token::FatArrow => config.parse_expression(tokens)?,
             _ => return Err(body_indicator.map(|_| Error::ExpectedBody)),
         };
@@ -1909,7 +1943,7 @@ impl Parselet for Fn {
 }
 
 impl PrefixParselet for Fn {
-    fn parse(
+    fn parse_prefix(
         &self,
         token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
@@ -2208,7 +2242,7 @@ impl Parselet for Let {
 }
 
 impl PrefixParselet for Let {
-    fn parse(
+    fn parse_prefix(
         &self,
         token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
@@ -2227,7 +2261,7 @@ impl Parselet for Var {
 }
 
 impl PrefixParselet for Var {
-    fn parse(
+    fn parse_prefix(
         &self,
         token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
@@ -2472,6 +2506,7 @@ fn parselets() -> Parselets {
     parser.push_infix(parselets![Assign]);
     parser.push_infix(parselets![ArrowFn]);
     parser.markers.conditional = parser.precedence;
+    parser.push_infix(parselets![If]);
     parser.push_infix(parselets![Or]);
     parser.push_infix(parselets![Xor]);
     parser.push_infix(parselets![And]);

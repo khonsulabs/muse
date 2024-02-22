@@ -19,11 +19,13 @@ Program: <Chain>;
 
 Chain: <Expression> (';' <Expression>)*;
 
-Expression: <Assignment>;
+Expression: <Assignment> | <ArrowFn> | <InlineIf>;
 
 Assignment: <Lookup | Index> ('=' <Assignment>)*;
 
 ArrowFn: <Identifier | Tuple(Identifier*)> '=>' <ArrowFn>;
+
+InlineIf: <LogicalOr> ('if' <LogicalOr> ('else' <Expression>)?)?;
 
 LogicalOr: <LogicalXor> ('or' <LogicalXor>)*;
 LogicalXor: <LogicalAnd> ('xor' <LogicalAnd>)*;

@@ -40,3 +40,23 @@ if_then_false: {
     "#,
     output: Int(0),
 }
+
+inline_if: {
+    src: r#"42 if true"#,
+    output: Int(42),
+}
+
+inline_if_false: {
+    src: r#"42 if false"#,
+    output: Nil,
+}
+
+inline_if_else: {
+    src: r#"42 if false else 1"#,
+    output: Int(1),
+}
+
+inline_if_chain: {
+    src: r#"42 if false else 43 if true else nonsense"#,
+    output: Int(43),
+}
