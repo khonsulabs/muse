@@ -1,5 +1,6 @@
 use muse::compiler::Compiler;
 use muse::symbol::Symbol;
+use muse::syntax::SourceCode;
 use muse::value::{AsyncFunction, Value};
 use muse::vm::{Arity, Fault, Register, Vm};
 
@@ -21,7 +22,7 @@ fn main() {
         async move { Ok::<_, Fault>(Value::Int(output_receiver.recv_async().await.unwrap())) }
     });
 
-    let code = Compiler::compile(
+    let code = Compiler::compile(&SourceCode::anonymous(
         r"
             var a = increment_async(0);
             a = increment_async(a);
@@ -29,7 +30,7 @@ fn main() {
             a = increment_async(a);
             increment_async(a)
         ",
-    )
+    ))
     .unwrap();
     let mut vm = Vm::default();
     vm.declare(Symbol::from("increment_async"), Value::dynamic(async_func))

@@ -8,6 +8,7 @@ use cushy::widgets::list::ListStyle;
 use cushy::widgets::Label;
 use cushy::{Open, PendingApp};
 use muse::compiler::Compiler;
+use muse::syntax::{SourceCode, SourceId, Sources};
 use muse::value::Value as MuseValue;
 use muse::vm::{Fault, Vm};
 use muse_ui::VmUi;
@@ -16,6 +17,7 @@ fn main() {
     let runtime = Dynamic::new(Runtime {
         vm: Vm::default().with_ui(),
         compiler: Compiler::default(),
+        sources: Sources::default(),
     });
     let history = Dynamic::<Vec<History>>::default();
     let history_list = history.map_each({
@@ -29,8 +31,9 @@ fn main() {
     });
 
     let input = Dynamic::<String>::default();
-    let parsed =
-        input.map_each(|source| muse::syntax::parse(source).map_err(|err| format!("{err:?}")));
+    let parsed = input.map_each(|source| {
+        muse::syntax::parse(&SourceCode::anonymous(source)).map_err(|err| format!("{err:?}"))
+    });
     let expression = parsed.map_each(|parsed| {
         parsed
             .as_ref()
@@ -71,48 +74,57 @@ fn main() {
 }
 
 struct History {
-    source: String,
+    source: SourceId,
     result: Result<MuseValue, Fault>,
 }
 
 impl History {
     fn make_widget(&self, runtime: &Dynamic<Runtime>) -> WidgetInstance {
         let mut runtime = runtime.lock();
-        Label::new(self.source.clone())
-            .with(&FontFamily, FamilyOwned::Monospace)
-            .align_left()
-            .and(
-                match &self.result {
-                    Ok(value) => match value.to_string(&mut runtime.vm) {
-                        Ok(formatted) => formatted.to_string(),
-                        Err(_) => format!("{:?}", value),
-                    }
-                    .with(&FontFamily, FamilyOwned::Monospace)
-                    .make_widget(),
-                    Err(err) => format!("{err:?}")
-                        .with_dynamic(&TextColor, ErrorColor)
-                        .make_widget(),
+        Label::new(
+            runtime
+                .sources
+                .get(self.source)
+                .expect("missing source")
+                .to_string(),
+        )
+        .with(&FontFamily, FamilyOwned::Monospace)
+        .align_left()
+        .and(
+            match &self.result {
+                Ok(value) => match value.to_string(&mut runtime.vm) {
+                    Ok(formatted) => formatted.to_string(),
+                    Err(_) => format!("{:?}", value),
                 }
-                .align_left()
-                .contain(),
-            )
-            .into_rows()
-            .make_widget()
+                .with(&FontFamily, FamilyOwned::Monospace)
+                .make_widget(),
+                Err(err) => format!("{err:?}")
+                    .with_dynamic(&TextColor, ErrorColor)
+                    .make_widget(),
+            }
+            .align_left()
+            .contain(),
+        )
+        .into_rows()
+        .make_widget()
     }
 }
 
 struct Runtime {
     vm: Vm,
     compiler: Compiler,
+    sources: Sources,
 }
 
 fn execute_input(source: String, runtime: &Dynamic<Runtime>, history: &Dynamic<Vec<History>>) {
     let mut runtime = runtime.lock();
+    let runtime = &mut *runtime;
+    let source = runtime.sources.push(source);
     runtime.compiler.push(&source);
     match runtime.compiler.build() {
         Ok(code) => {
             let entry = History {
-                source,
+                source: source.id,
                 result: runtime.vm.execute(&code),
             };
             history.lock().push(entry);

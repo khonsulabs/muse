@@ -18,7 +18,7 @@ regex_options: {
 
 regex_no_eol: {
     src: "\\\n/",
-    output: Error([Ranged(Syntax(Token(UnexpectedChar('\n'))), SourceRange { start: 1, length: 1 })]),
+    output: Error([Ranged(Syntax(Token(UnexpectedChar('\n'))), SourceRange { source_id: SourceId(None), start: 1, length: 1 })]),
 }
 
 expanded_regex: {

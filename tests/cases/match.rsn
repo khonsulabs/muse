@@ -73,12 +73,12 @@ try_mismatch: {
 
 let_irrefutable: {
     src: r#"let foo = 1 else { return }"#,
-    output: Error([Ranged(ElseOnIrrefutablePattern, SourceRange { start: 17, length: 10 })]),
+    output: Error([Ranged(ElseOnIrrefutablePattern, SourceRange { source_id: SourceId(None), start: 17, length: 10 })]),
 }
 
 let_else_doesnt_diverge: {
     src: r#"let 1 = true else { true }"#,
-    output: Error([Ranged(LetElseMustDiverge, SourceRange { start: 20, length: 4 })]),
+    output: Error([Ranged(LetElseMustDiverge, SourceRange { source_id: SourceId(None), start: 20, length: 4 })]),
 }
 
 map_tuple_destructure: {

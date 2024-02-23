@@ -8,7 +8,7 @@ use crate::symbol::Symbol;
 use crate::syntax::{
     self, AssignTarget, BinaryExpression, BreakExpression, Chain, CompareKind, ContinueExpression,
     Expression, FunctionCall, FunctionDefinition, Index, Literal, LogicalKind, LoopExpression,
-    LoopKind, MatchExpression, MatchPattern, Matches, PatternKind, Ranged, SourceRange,
+    LoopKind, MatchExpression, MatchPattern, Matches, PatternKind, Ranged, SourceCode, SourceRange,
     TryExpression, UnaryExpression, Variable,
 };
 use crate::vm::bitcode::{
@@ -27,17 +27,17 @@ pub struct Compiler {
 }
 
 impl Compiler {
-    pub fn push(&mut self, source: &str) {
+    pub fn push(&mut self, source: &SourceCode<'_>) {
         self.parsed.push(syntax::parse(source));
     }
 
     #[must_use]
-    pub fn with(mut self, source: &str) -> Self {
+    pub fn with(mut self, source: &SourceCode<'_>) -> Self {
         self.push(source);
         self
     }
 
-    pub fn compile(source: &str) -> Result<Code, Vec<Ranged<Error>>> {
+    pub fn compile(source: &SourceCode<'_>) -> Result<Code, Vec<Ranged<Error>>> {
         Self::default().with(source).build()
     }
 

@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::fmt::Debug;
+use std::num::NonZeroUsize;
 use std::ops::{Bound, Deref, DerefMut, Range, RangeBounds, RangeInclusive};
 
 use ahash::AHashMap;
@@ -9,6 +10,43 @@ use self::token::{Paired, RegexLiteral, Token, Tokens};
 use crate::symbol::Symbol;
 pub mod token;
 
+pub struct SourceCode<'a> {
+    pub code: &'a str,
+    pub id: SourceId,
+}
+
+impl<'a> SourceCode<'a> {
+    #[must_use]
+    pub const fn new(code: &'a str, id: SourceId) -> Self {
+        Self { code, id }
+    }
+
+    #[must_use]
+    pub const fn anonymous(code: &'a str) -> Self {
+        Self {
+            code,
+            id: SourceId::anonymous(),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct Sources(Vec<String>);
+
+impl Sources {
+    pub fn push(&mut self, source: impl Into<String>) -> SourceCode<'_> {
+        let id = SourceId::new(NonZeroUsize::new(self.0.len() + 1).expect("always > 0"));
+        self.0.push(source.into());
+        SourceCode::new(self.0.last().expect("just pushed"), id)
+    }
+
+    #[must_use]
+    pub fn get(&self, id: SourceId) -> Option<&str> {
+        let index = id.0?.get() - 1;
+        self.0.get(index).map(String::as_str)
+    }
+}
+
 #[derive(Default, Clone, Copy, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Ranged<T>(pub T, pub SourceRange);
 
@@ -17,7 +55,12 @@ impl<T> Ranged<T> {
         Self(value, range.into())
     }
 
-    pub fn bounded(range: impl RangeBounds<usize>, end: usize, value: T) -> Ranged<T> {
+    pub fn bounded(
+        source_id: SourceId,
+        range: impl RangeBounds<usize>,
+        end: usize,
+        value: T,
+    ) -> Ranged<T> {
         let start = match range.start_bound() {
             Bound::Included(start) => *start,
             Bound::Excluded(start) => start + 1,
@@ -31,6 +74,7 @@ impl<T> Ranged<T> {
         Ranged(
             value,
             SourceRange {
+                source_id,
                 start,
                 length: end.saturating_sub(start),
             },
@@ -63,7 +107,24 @@ impl<T> DerefMut for Ranged<T> {
 }
 
 #[derive(Default, Clone, Copy, Eq, PartialEq, Debug, Serialize, Deserialize)]
+pub struct SourceId(Option<NonZeroUsize>);
+
+impl SourceId {
+    #[must_use]
+    pub const fn anonymous() -> Self {
+        Self(None)
+    }
+
+    #[must_use]
+    pub const fn new(id: NonZeroUsize) -> Self {
+        Self(Some(id))
+    }
+}
+
+#[derive(Default, Clone, Copy, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct SourceRange {
+    #[serde(default)]
+    pub source_id: SourceId,
     pub start: usize,
     pub length: usize,
 }
@@ -73,20 +134,34 @@ impl SourceRange {
     pub const fn end(&self) -> usize {
         self.start + self.length
     }
+
+    #[must_use]
+    pub fn with_length(mut self, length: usize) -> Self {
+        self.length = length;
+        self
+    }
+
+    #[must_use]
+    pub fn with_end(mut self, end: usize) -> Self {
+        self.length = end.saturating_sub(self.start);
+        self
+    }
 }
 
-impl From<Range<usize>> for SourceRange {
-    fn from(range: Range<usize>) -> Self {
+impl From<(SourceId, Range<usize>)> for SourceRange {
+    fn from((source_id, range): (SourceId, Range<usize>)) -> Self {
         Self {
+            source_id,
             start: range.start,
             length: range.end - range.start,
         }
     }
 }
 
-impl From<RangeInclusive<usize>> for SourceRange {
-    fn from(range: RangeInclusive<usize>) -> Self {
+impl From<(SourceId, RangeInclusive<usize>)> for SourceRange {
+    fn from((source_id, range): (SourceId, RangeInclusive<usize>)) -> Self {
         Self {
+            source_id,
             start: *range.start(),
             length: range.end() - range.start(),
         }
@@ -146,12 +221,15 @@ impl Chain {
     #[must_use]
     pub fn from_expressions(mut expressions: Vec<Ranged<Expression>>) -> Ranged<Expression> {
         let Some(mut expression) = expressions.pop() else {
-            return Ranged::new(0..0, Expression::Literal(Literal::Nil));
+            return Ranged::new(
+                (SourceId::anonymous(), 0..0),
+                Expression::Literal(Literal::Nil),
+            );
         };
 
         while let Some(previous) = expressions.pop() {
             expression = Ranged::new(
-                previous.range().start..expression.range().end(),
+                previous.range().with_end(expression.range().end()),
                 Expression::Binary(Box::new(BinaryExpression {
                     kind: BinaryKind::Chain,
                     left: previous,
@@ -355,7 +433,7 @@ pub struct Variable {
     pub r#else: Option<Ranged<Expression>>,
 }
 
-pub fn parse(source: &str) -> Result<Ranged<Expression>, Ranged<Error>> {
+pub fn parse(source: &SourceCode<'_>) -> Result<Ranged<Expression>, Ranged<Error>> {
     let mut tokens = TokenReader::new(source);
 
     let parselets = parselets();
@@ -369,7 +447,7 @@ pub fn parse(source: &str) -> Result<Ranged<Expression>, Ranged<Error>> {
             // Peeking an error returns None
             match tokens.next() {
                 Ok(_) | Err(Ranged(Error::UnexpectedEof, _)) => {
-                    results.push(Ranged::new(
+                    results.push(tokens.ranged(
                         tokens.last_index..tokens.last_index,
                         Expression::Literal(Literal::Nil),
                     ));
@@ -400,7 +478,7 @@ struct TokenReader<'a> {
 }
 
 impl<'a> TokenReader<'a> {
-    pub fn new(source: &'a str) -> Self {
+    pub fn new(source: &SourceCode<'a>) -> Self {
         Self {
             tokens: Tokens::new(source)
                 .excluding_comments()
@@ -443,7 +521,7 @@ impl<'a> TokenReader<'a> {
     }
 
     fn ranged<T>(&self, range: impl RangeBounds<usize>, value: T) -> Ranged<T> {
-        Ranged::bounded(range, self.last_index, value)
+        Ranged::bounded(self.tokens.source(), range, self.last_index, value)
     }
 }
 
@@ -954,7 +1032,10 @@ fn parse_block(
                 Block {
                     name: None,
                     body: Ranged::new(
-                        open_brace.range().end()..close_brace.range().start,
+                        (
+                            open_brace.range().source_id,
+                            open_brace.range().end()..close_brace.range().start,
+                        ),
                         Expression::Literal(Literal::Nil),
                     ),
                 },
@@ -2224,10 +2305,7 @@ fn parse_variable(
         tokens.next()?;
         config.parse_expression(tokens)?
     } else {
-        Ranged::new(
-            tokens.last_index..tokens.last_index,
-            Expression::Literal(Literal::Nil),
-        )
+        tokens.ranged(tokens.last_index.., Expression::Literal(Literal::Nil))
     };
 
     let r#else = if tokens.peek_token() == Some(Token::Identifier(Symbol::else_symbol().clone())) {

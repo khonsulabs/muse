@@ -1,4 +1,5 @@
 use crate::compiler::Compiler;
+use crate::syntax::SourceCode;
 use crate::vm::bitcode::BitcodeBlock;
 use crate::vm::{Code, Fault, Register, Vm};
 
@@ -27,7 +28,7 @@ fn budgeting() {
 #[test]
 fn module_budgeting() {
     const MAX_OPS: usize = 22;
-    let code = Compiler::compile(
+    let code = Compiler::compile(&SourceCode::anonymous(
         r"
             mod foo {
                 pub var a = 1;
@@ -39,7 +40,7 @@ fn module_budgeting() {
 
             foo.a
         ",
-    )
+    ))
     .unwrap();
     let mut vm = Vm::default();
     // Turn on budgeting, but don't give any budget.

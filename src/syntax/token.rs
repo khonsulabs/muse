@@ -6,7 +6,7 @@ use std::str::CharIndices;
 
 use serde::{Deserialize, Serialize};
 
-use super::Ranged;
+use super::{Ranged, SourceCode, SourceId};
 use crate::symbol::Symbol;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -116,16 +116,22 @@ pub enum Paired {
 }
 
 struct Chars<'a> {
+    id: SourceId,
     source: Peekable<CharIndices<'a>>,
     last_index: usize,
 }
 
 impl<'a> Chars<'a> {
-    fn new(source: &'a str) -> Self {
+    fn new(source: &'a str, id: SourceId) -> Self {
         Self {
+            id,
             source: source.char_indices().peekable(),
             last_index: 0,
         }
+    }
+
+    pub const fn source(&self) -> SourceId {
+        self.id
     }
 
     fn peek(&mut self) -> Option<char> {
@@ -133,7 +139,7 @@ impl<'a> Chars<'a> {
     }
 
     fn ranged<T>(&self, range: impl RangeBounds<usize>, value: T) -> Ranged<T> {
-        Ranged::bounded(range, self.last_index, value)
+        Ranged::bounded(self.id, range, self.last_index, value)
     }
 }
 
@@ -260,13 +266,18 @@ impl Iterator for Tokens<'_> {
 
 impl<'a> Tokens<'a> {
     #[must_use]
-    pub fn new(source: &'a str) -> Self {
+    pub fn new(source: &SourceCode<'a>) -> Self {
         Self {
-            chars: Chars::new(source),
+            chars: Chars::new(source.code, source.id),
             scratch: String::new(),
             include_whitespace: true,
             include_comments: true,
         }
+    }
+
+    #[must_use]
+    pub const fn source(&self) -> SourceId {
+        self.chars.source()
     }
 
     #[must_use]
@@ -688,35 +699,40 @@ pub struct RegexLiteral {
 
 #[test]
 fn basics() {
-    let tokens = Tokens::new("a_09_ + 1 - .2")
+    use std::num::NonZeroUsize;
+    let tokens = Tokens::new(&SourceCode::anonymous("a_09_ + 1 - .2"))
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(
         tokens,
         &[
-            Ranged::new(0..5, Token::Identifier(Symbol::from("a_09_"))),
-            Ranged::new(5..6, Token::Whitespace),
-            Ranged::new(6..7, Token::Char('+')),
-            Ranged::new(7..8, Token::Whitespace),
-            Ranged::new(8..9, Token::Int(1)),
-            Ranged::new(9..10, Token::Whitespace),
-            Ranged::new(10..11, Token::Char('-')),
-            Ranged::new(11..12, Token::Whitespace),
-            Ranged::new(12..14, Token::Float(0.2)),
+            Ranged::new(
+                (SourceId::anonymous(), 0..5),
+                Token::Identifier(Symbol::from("a_09_"))
+            ),
+            Ranged::new((SourceId::anonymous(), 5..6), Token::Whitespace),
+            Ranged::new((SourceId::anonymous(), 6..7), Token::Char('+')),
+            Ranged::new((SourceId::anonymous(), 7..8), Token::Whitespace),
+            Ranged::new((SourceId::anonymous(), 8..9), Token::Int(1)),
+            Ranged::new((SourceId::anonymous(), 9..10), Token::Whitespace),
+            Ranged::new((SourceId::anonymous(), 10..11), Token::Char('-')),
+            Ranged::new((SourceId::anonymous(), 11..12), Token::Whitespace),
+            Ranged::new((SourceId::anonymous(), 12..14), Token::Float(0.2)),
         ]
     );
-    let tokens = Tokens::new("a_09_ + 1 - .2")
+    let id = SourceId::new(NonZeroUsize::MIN);
+    let tokens = Tokens::new(&SourceCode::new("a_09_ + 1 - .2", id))
         .excluding_whitespace()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(
         tokens,
         &[
-            Ranged::new(0..5, Token::Identifier(Symbol::from("a_09_"))),
-            Ranged::new(6..7, Token::Char('+')),
-            Ranged::new(8..9, Token::Int(1)),
-            Ranged::new(10..11, Token::Char('-')),
-            Ranged::new(12..14, Token::Float(0.2)),
+            Ranged::new((id, 0..5), Token::Identifier(Symbol::from("a_09_"))),
+            Ranged::new((id, 6..7), Token::Char('+')),
+            Ranged::new((id, 8..9), Token::Int(1)),
+            Ranged::new((id, 10..11), Token::Char('-')),
+            Ranged::new((id, 12..14), Token::Float(0.2)),
         ]
     );
 }

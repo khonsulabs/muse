@@ -8,7 +8,7 @@ use muse::regex::{MuseMatch, MuseRegex};
 use muse::string::MuseString;
 use muse::symbol::Symbol;
 use muse::syntax::token::RegexLiteral;
-use muse::syntax::Ranged;
+use muse::syntax::{Ranged, SourceCode};
 use muse::value::Value;
 use muse::vm::{Code, Fault, Vm};
 use serde::de::Visitor;
@@ -114,7 +114,7 @@ struct Case {
 
 impl Case {
     fn run(&self) -> (Option<Code>, TestOutput) {
-        match Compiler::compile(&self.src) {
+        match Compiler::compile(&SourceCode::anonymous(&self.src)) {
             Ok(code) => match Vm::default().execute(&code) {
                 Ok(value) => (Some(code), TestOutput::from(value)),
                 Err(fault) => (Some(code), TestOutput::Fault(VmFault::from(fault))),

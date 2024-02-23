@@ -1,5 +1,5 @@
 use muse::compiler::Compiler;
-use muse::syntax::{parse, Ranged};
+use muse::syntax::{parse, Ranged, SourceCode, Sources};
 use muse::vm::Vm;
 use rustyline::completion::Completer;
 use rustyline::error::ReadlineError;
@@ -13,11 +13,13 @@ fn main() {
     let mut editor: Editor<Muse, DefaultHistory> = Editor::new().unwrap();
     editor.set_helper(Some(Muse));
     let mut vm = Vm::default();
+    let mut sources = Sources::default();
     let mut compiler = Compiler::default();
     loop {
         match editor.readline("> ") {
             Ok(line) => {
-                compiler.push(&line);
+                let source = sources.push(line);
+                compiler.push(&source);
                 match compiler.build() {
                     Ok(code) => match vm.execute(&code) {
                         Ok(value) => {
@@ -52,7 +54,7 @@ impl Helper for Muse {}
 
 impl Validator for Muse {
     fn validate(&self, ctx: &mut ValidationContext) -> rustyline::Result<ValidationResult> {
-        match parse(ctx.input()) {
+        match parse(&SourceCode::anonymous(ctx.input())) {
             Ok(_) => Ok(ValidationResult::Valid(None)),
             Err(Ranged(muse::syntax::Error::UnexpectedEof, _)) => Ok(ValidationResult::Incomplete),
             Err(err) => Ok(ValidationResult::Invalid(Some(format!(
