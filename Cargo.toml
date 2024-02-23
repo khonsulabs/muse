@@ -14,8 +14,14 @@ repository = "https://github.com/khonsulabs/muse"
 license = "MIT OR Apache-2.0"
 
 [features]
-default = []
+default = ["repl"]
 dispatched = []
+repl = ["dep:rustyline"]
+
+[[bin]]
+name = "muse"
+path = "src/main.rs"
+required-features = ["repl"]
 
 [dependencies]
 ahash = "0.8.7"
@@ -24,6 +30,9 @@ crossbeam-utils = "0.8.19"
 interner = "0.2.1"
 kempt = { version = "0.2.3", features = ["serde"] }
 regex = "1.10.3"
+rustyline = { version = "13.0.0", optional = true, default-features = false, features = [
+    "with-file-history",
+] }
 serde = { version = "1.0.195", features = ["derive"] }
 unicode-ident = "1.0.12"
 
