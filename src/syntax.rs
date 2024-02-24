@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 use std::num::NonZeroUsize;
 use std::ops::{Bound, Deref, DerefMut, Range, RangeBounds, RangeInclusive};
 
@@ -41,9 +41,9 @@ impl Sources {
     }
 
     #[must_use]
-    pub fn get(&self, id: SourceId) -> Option<&str> {
+    pub fn get(&self, id: SourceId) -> Option<&String> {
         let index = id.0?.get() - 1;
-        self.0.get(index).map(String::as_str)
+        self.0.get(index)
     }
 }
 
@@ -106,7 +106,7 @@ impl<T> DerefMut for Ranged<T> {
     }
 }
 
-#[derive(Default, Clone, Copy, Eq, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Default, Clone, Copy, Eq, PartialEq, Hash, Debug, Serialize, Deserialize)]
 pub struct SourceId(Option<NonZeroUsize>);
 
 impl SourceId {
@@ -118,6 +118,11 @@ impl SourceId {
     #[must_use]
     pub const fn new(id: NonZeroUsize) -> Self {
         Self(Some(id))
+    }
+
+    #[must_use]
+    pub const fn get(&self) -> Option<NonZeroUsize> {
+        self.0
     }
 }
 
@@ -531,14 +536,14 @@ pub enum Error {
     ExpectedEof,
     MissingEnd(Paired),
     Token(token::Error),
-    UnexpectedToken(Token),
+    UnexpectedToken,
     ExpectedDeclaration,
     ExpectedName,
     ExpectedBlock,
     ExpectedModuleBody,
-    ExpectedBody,
+    ExpectedFunctionBody,
     ExpectedIn,
-    ExpectedFunctionParamters,
+    ExpectedFunctionParameters,
     ExpectedVariableInitialValue,
     ExpectedThenOrBrace,
     ExpectedColon,
@@ -549,6 +554,68 @@ pub enum Error {
     ExpectedCatchBlock,
     InvalidAssignmentTarget,
     InvalidLabelTarget,
+}
+
+impl crate::Error for Error {
+    fn kind(&self) -> &'static str {
+        match self {
+            Error::UnexpectedEof => "unexpected eof",
+            Error::ExpectedEof => "expected eof",
+            Error::MissingEnd(_) => "missing end",
+            Error::Token(err) => err.kind(),
+            Error::UnexpectedToken => "unexpected token",
+            Error::ExpectedDeclaration => "expected declaration",
+            Error::ExpectedName => "expected name",
+            Error::ExpectedBlock => "expected block",
+            Error::ExpectedModuleBody => "expected module body",
+            Error::ExpectedFunctionBody => "expected function body",
+            Error::ExpectedIn => "expected in",
+            Error::ExpectedFunctionParameters => "expected function parameters",
+            Error::ExpectedVariableInitialValue => "expected variable initial value",
+            Error::ExpectedThenOrBrace => "expected then or brace",
+            Error::ExpectedColon => "expected colon",
+            Error::ExpectedMatchBody => "expected match body",
+            Error::ExpectedPattern => "expected pattern",
+            Error::ExpectedPatternOr(_) => "expected pattern or end",
+            Error::ExpectedFatArrow => "expected fat arrow",
+            Error::ExpectedCatchBlock => "expected catch block",
+            Error::InvalidAssignmentTarget => "invalid assignment target",
+            Error::InvalidLabelTarget => "invalid label target",
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::UnexpectedEof => f.write_str("unexpected end-of-file"),
+            Error::ExpectedEof => f.write_str("expected the end of input"),
+            Error::MissingEnd(kind) => write!(f, "missing closing {}", kind.as_close()),
+            Error::Token(err) => Display::fmt(err, f),
+            Error::UnexpectedToken => f.write_str("unexpected token"),
+            Error::ExpectedDeclaration => f.write_str("expected a declaration"),
+            Error::ExpectedName => f.write_str("expected a name (identifier)"),
+            Error::ExpectedBlock => f.write_str("expected a block"),
+            Error::ExpectedModuleBody => f.write_str("expected a module body"),
+            Error::ExpectedFunctionBody => f.write_str("expected function body"),
+            Error::ExpectedIn => f.write_str("expected \"in\""),
+            Error::ExpectedFunctionParameters => f.write_str("expected function parameters"),
+            Error::ExpectedVariableInitialValue => f.write_str("expected initial value"),
+            Error::ExpectedThenOrBrace => f.write_str("expected \"then\" or \"{\""),
+            Error::ExpectedColon => f.write_str("expected \":\""),
+            Error::ExpectedMatchBody => f.write_str("expected match body"),
+            Error::ExpectedPattern => f.write_str("expected match pattern"),
+            Error::ExpectedPatternOr(paired) => {
+                write!(f, "expected match pattern or {}", paired.as_close())
+            }
+            Error::ExpectedFatArrow => f.write_str("expected fat arrow (=>)"),
+            Error::ExpectedCatchBlock => f.write_str("expected catch block"),
+            Error::InvalidAssignmentTarget => f.write_str("invalid assignment target"),
+            Error::InvalidLabelTarget => f.write_str("invalid label target"),
+        }
+    }
 }
 
 impl From<Ranged<token::Error>> for Ranged<Error> {
@@ -625,7 +692,7 @@ impl<'a> ParserConfig<'a> {
             }
         }
 
-        Err(token.map(Error::UnexpectedToken))
+        Err(token.map(|_| Error::UnexpectedToken))
     }
 
     fn parse_next(
@@ -1996,7 +2063,7 @@ impl Fn {
         let body = match &body_indicator.0 {
             Token::Open(Paired::Brace) => Braces.parse_prefix(body_indicator, tokens, config)?,
             Token::FatArrow => config.parse_expression(tokens)?,
-            _ => return Err(body_indicator.map(|_| Error::ExpectedBody)),
+            _ => return Err(body_indicator.map(|_| Error::ExpectedFunctionBody)),
         };
 
         Ok(tokens.ranged(
@@ -2398,7 +2465,7 @@ impl InfixParselet for ArrowFn {
                     .collect::<Result<_, _>>()?;
                 Ranged::new(lhs.range(), PatternKind::DestructureTuple(tuple))
             }
-            _ => return Err(lhs.map(|_| Error::ExpectedFunctionParamters)),
+            _ => return Err(lhs.map(|_| Error::ExpectedFunctionParameters)),
         };
 
         let body = config.parse_expression(tokens)?;

@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::fmt::Display;
 use std::hash::Hash;
 use std::iter::Peekable;
 use std::ops::RangeBounds;
@@ -113,6 +114,26 @@ pub enum Paired {
     Brace,
     Paren,
     Bracket,
+}
+
+impl Paired {
+    #[must_use]
+    pub fn as_open(self) -> char {
+        match self {
+            Paired::Brace => '{',
+            Paired::Paren => '(',
+            Paired::Bracket => '[',
+        }
+    }
+
+    #[must_use]
+    pub fn as_close(self) -> char {
+        match self {
+            Paired::Brace => '}',
+            Paired::Paren => ')',
+            Paired::Bracket => ']',
+        }
+    }
 }
 
 struct Chars<'a> {
@@ -679,6 +700,34 @@ pub enum Error {
     MissingEndQuote,
     MissingRegexEnd,
     InvalidEscapeSequence,
+}
+
+impl crate::Error for Error {
+    fn kind(&self) -> &'static str {
+        match self {
+            Error::UnexpectedChar(_) => "unexpected char",
+            Error::IntegerParse(_) => "invalid integer literal",
+            Error::FloatParse(_) => "invalid float literal",
+            Error::MissingEndQuote => "missing end quote",
+            Error::MissingRegexEnd => "missing regex end",
+            Error::InvalidEscapeSequence => "invalid escape sequence",
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::UnexpectedChar(ch) => write!(f, "unexpected character: {ch}"),
+            Error::IntegerParse(err) => write!(f, "invalid integer literal: {err}"),
+            Error::FloatParse(err) => write!(f, "invalid floating point literal: {err}"),
+            Error::MissingEndQuote => f.write_str("missing end quote (\")"),
+            Error::MissingRegexEnd => f.write_str("missing regular expression end (/)"),
+            Error::InvalidEscapeSequence => f.write_str("invalid escape sequence"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, Hash, PartialEq)]

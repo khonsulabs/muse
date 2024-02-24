@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::ops::{BitOr, BitOrAssign};
 
 use kempt::{Map, Set};
@@ -1602,7 +1603,6 @@ impl BitOrAssign for Refutability {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Error {
-    UnknownVariable,
     VariableNotMutable,
     TooManyArguments,
     UsizeTooLarge,
@@ -1615,6 +1615,56 @@ pub enum Error {
     ElseOnIrrefutablePattern,
     LetElseMustDiverge,
     Syntax(syntax::Error),
+}
+
+impl crate::Error for Error {
+    fn kind(&self) -> &'static str {
+        match self {
+            Error::VariableNotMutable => "variable not mutable",
+            Error::TooManyArguments => "too many arguments",
+            Error::UsizeTooLarge => "usize too large",
+            Error::InvalidDeclaration => "invalid declaration",
+            Error::InvalidLabel => "invalid label",
+            Error::PubOnlyInModules => "pub only in modules",
+            Error::ExpectedBlock => "expected block",
+            Error::NameAlreadyBound => "name already bound",
+            Error::OrPatternBindingsMismatch => "or pattern bindings mismatch",
+            Error::ElseOnIrrefutablePattern => "else on irrefutable pattern",
+            Error::LetElseMustDiverge => "let else must diverge",
+            Error::Syntax(err) => err.kind(),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::VariableNotMutable => f.write_str("declaration cannot be reassigned"),
+            Error::TooManyArguments => f.write_str("no more than 256 arguments may be passed"),
+            Error::UsizeTooLarge => {
+                f.write_str("integer too large for the architecture's index type")
+            }
+            Error::InvalidDeclaration => f.write_str("invalid declaration"),
+            Error::InvalidLabel => f.write_str("invalid label"),
+            Error::PubOnlyInModules => {
+                f.write_str("declarations may only be published within modules")
+            }
+            Error::ExpectedBlock => f.write_str("expected a block"),
+            Error::NameAlreadyBound => {
+                f.write_str("this name is already bound within the same pattern match")
+            }
+            Error::OrPatternBindingsMismatch => {
+                f.write_str("all options must contain the same named bindings")
+            }
+            Error::ElseOnIrrefutablePattern => {
+                f.write_str("this else block is unreachable, because the pattern is irrefutable")
+            }
+            Error::LetElseMustDiverge => f.write_str("all code paths must diverge"),
+            Error::Syntax(err) => Display::fmt(err, f),
+        }
+    }
 }
 
 impl From<Ranged<syntax::Error>> for Ranged<Error> {

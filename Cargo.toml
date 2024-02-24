@@ -16,7 +16,7 @@ license = "MIT OR Apache-2.0"
 [features]
 default = ["repl"]
 dispatched = []
-repl = ["dep:rustyline"]
+repl = ["dep:rustyline", "dep:ariadne"]
 
 [[bin]]
 name = "muse"
@@ -26,6 +26,7 @@ required-features = ["repl"]
 [dependencies]
 ahash = "0.8.7"
 alot = "0.3.1"
+ariadne = { version = "0.4.0", optional = true }
 crossbeam-utils = "0.8.19"
 interner = "0.2.1"
 kempt = { version = "0.2.3", features = ["serde"] }
