@@ -35,7 +35,7 @@ pub struct Sources(Vec<String>);
 
 impl Sources {
     pub fn push(&mut self, source: impl Into<String>) -> SourceCode<'_> {
-        let id = SourceId::new(NonZeroUsize::new(self.0.len() + 1).expect("always > 0"));
+        let id = self.next_id();
         self.0.push(source.into());
         SourceCode::new(self.0.last().expect("just pushed"), id)
     }
@@ -44,6 +44,11 @@ impl Sources {
     pub fn get(&self, id: SourceId) -> Option<&String> {
         let index = id.0?.get() - 1;
         self.0.get(index)
+    }
+
+    #[must_use]
+    pub fn next_id(&self) -> SourceId {
+        SourceId::new(NonZeroUsize::new(self.0.len() + 1).expect("always > 0"))
     }
 }
 

@@ -16,7 +16,7 @@ license = "MIT OR Apache-2.0"
 [features]
 default = ["repl"]
 dispatched = []
-repl = ["dep:rustyline", "dep:ariadne"]
+repl = ["dep:rustyline", "dep:ariadne", "dep:dirs"]
 
 [[bin]]
 name = "muse"
@@ -28,6 +28,7 @@ ahash = "0.8.7"
 alot = "0.3.1"
 ariadne = { version = "0.4.0", optional = true }
 crossbeam-utils = "0.8.19"
+dirs = { version = "5.0.1", optional = true }
 interner = "0.2.1"
 kempt = { version = "0.2.3", features = ["serde"] }
 regex = "1.10.3"

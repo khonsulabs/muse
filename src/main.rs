@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::path::PathBuf;
 
 use ariadne::{Cache, Label, Span};
 use muse::compiler::Compiler;
@@ -7,6 +8,7 @@ use muse::syntax::{parse, Ranged, SourceId, SourceRange, Sources};
 use muse::vm::Vm;
 use muse::Error;
 use rustyline::completion::Completer;
+use rustyline::config::Configurer;
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
@@ -16,13 +18,23 @@ use rustyline::{Editor, ExternalPrinter, Helper};
 
 fn main() {
     let mut editor: Editor<Muse, DefaultHistory> = Editor::new().unwrap();
+    let config_dir =
+        dirs::config_local_dir().map_or_else(|| PathBuf::from(".muse"), |dir| dir.join("muse"));
+    let _err = std::fs::create_dir_all(&config_dir);
+    let history_path = config_dir.join("history");
+    let _err = editor.load_history(&history_path);
+    editor.set_auto_add_history(true);
     editor.set_helper(Some(Muse));
     let mut vm = Vm::default();
     let mut sources = Sources::default();
     let mut compiler = Compiler::default();
     loop {
-        match editor.readline("> ") {
+        match editor.readline(&format!(
+            "{}> ",
+            sources.next_id().get().map_or(0, NonZeroUsize::get)
+        )) {
             Ok(line) => {
+                let _err = editor.append_history(&history_path);
                 let source = sources.push(line);
                 compiler.push(&source);
                 match compiler.build() {
