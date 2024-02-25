@@ -4,8 +4,9 @@ use std::path::PathBuf;
 
 use ariadne::{Cache, Label, Span};
 use muse::compiler::Compiler;
+use muse::exception::Exception;
 use muse::syntax::{parse, Ranged, SourceId, SourceRange, Sources};
-use muse::vm::Vm;
+use muse::vm::{ExecutionError, StackFrame, Vm};
 use muse::Error;
 use rustyline::completion::Completer;
 use rustyline::config::Configurer;
@@ -49,9 +50,20 @@ fn main() {
                                 println!("{value:?}");
                             }
                         }
-                        Err(err) => {
-                            eprintln!("Execution error: {err:?}");
-                        }
+                        Err(err) => match err {
+                            ExecutionError::Exception(exception) => {
+                                let Some(exception) = exception.as_downcast_ref::<Exception>()
+                                else {
+                                    unreachable!()
+                                };
+
+                                let mut printer = editor
+                                    .create_external_printer()
+                                    .expect("can't create printer");
+                                printer.print(print_exception(exception, &sources)).unwrap();
+                            }
+                            other => eprintln!("Execution error: {other:?}"),
+                        },
                     },
                     Err(err) => {
                         let errors = print_errors(err, &sources);
@@ -67,6 +79,38 @@ fn main() {
             Err(other) => unreachable!("unexpected error: {other}"),
         }
     }
+}
+
+fn print_exception(exception: &Exception, sources: &Sources) -> String {
+    let mut text = Vec::new();
+
+    let last_range = exception
+        .backtrace()
+        .iter()
+        .rev()
+        .find_map(StackFrame::source_range)
+        .expect("missing instruction range");
+    let mut report = ariadne::Report::<MuseSpan>::build(
+        ariadne::ReportKind::Error,
+        last_range.source_id,
+        last_range.start,
+    )
+    .with_message(format!("Exception: {:?}", exception.value()));
+
+    for range in exception
+        .backtrace()
+        .iter()
+        .rev()
+        .filter_map(StackFrame::source_range)
+    {
+        report = report.with_label(Label::new(MuseSpan(range)).with_message("while executing"));
+    }
+    report
+        .finish()
+        .write_for_stdout(SourceCache(sources, HashMap::default()), &mut text)
+        .expect("error building report");
+
+    String::from_utf8(text).expect("invalid utf-8 in error report")
 }
 
 fn print_errors(errs: Vec<Ranged<muse::compiler::Error>>, sources: &Sources) -> String {
