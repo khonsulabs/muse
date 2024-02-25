@@ -131,7 +131,7 @@ impl SourceId {
     }
 }
 
-#[derive(Default, Clone, Copy, Eq, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Default, Clone, Copy, Eq, PartialEq, Debug, Serialize, Deserialize, Hash)]
 pub struct SourceRange {
     #[serde(default)]
     pub source_id: SourceId,
@@ -2273,6 +2273,8 @@ fn parse_pattern_kind(
             tokens.next()?;
             let mut pattern =
                 parse_tuple_destructure_pattern(indicator.range().start, *kind, tokens)?;
+            // TODO move this to pattern compilation, checking to see if the
+            // argument is a tuple or not
             if top_level && *kind == Paired::Bracket {
                 pattern = Ranged::new(
                     pattern.range(),

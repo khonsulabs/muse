@@ -16,6 +16,7 @@ pub mod syntax;
 pub mod value;
 pub mod vm;
 
+pub mod exception;
 pub mod list;
 pub mod regex;
 #[cfg(test)]

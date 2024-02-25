@@ -1,5 +1,6 @@
 use std::fmt::Display;
-use std::ops::{BitOr, BitOrAssign};
+use std::ops::{BitOr, BitOrAssign, Range};
+use std::sync::Arc;
 
 use kempt::{Map, Set};
 use regex::Regex;
@@ -188,6 +189,7 @@ impl<'a> Scope<'a> {
 
     #[allow(clippy::too_many_lines)]
     fn compile_expression(&mut self, expr: &Ranged<Expression>, dest: OpDestination) {
+        self.compiler.code.set_current_source_range(expr.range());
         match &**expr {
             Expression::Literal(literal) => self.compile_literal(literal, dest),
             Expression::Lookup(lookup) => {
@@ -202,6 +204,7 @@ impl<'a> Scope<'a> {
                             .set_exception_handler(exception_error, previous_handler);
 
                         let base = self.compile_source(&try_op.body);
+                        self.compiler.code.set_current_source_range(expr.range());
                         self.compiler.code.copy((), dest);
                         self.compiler
                             .code
@@ -220,6 +223,7 @@ impl<'a> Scope<'a> {
                     } else {
                         (self.compile_source(base), None)
                     };
+                    self.compiler.code.set_current_source_range(expr.range());
                     self.compiler.code.copy(lookup.name.clone(), Register(0));
                     self.compiler
                         .code
@@ -249,6 +253,7 @@ impl<'a> Scope<'a> {
                     eprintln!("TODO Ignoring more than 127 elements in map");
                 }
 
+                self.compiler.code.set_current_source_range(expr.range());
                 for (index, (key, value)) in (0..=num_elements).zip(elements) {
                     self.compiler.code.copy(key, Register(index * 2));
                     self.compiler.code.copy(value, Register(index * 2 + 1));
@@ -269,6 +274,7 @@ impl<'a> Scope<'a> {
                     255
                 };
 
+                self.compiler.code.set_current_source_range(expr.range());
                 for (index, value) in (0..=num_elements).zip(elements) {
                     self.compiler.code.copy(value, Register(index));
                 }
@@ -277,10 +283,12 @@ impl<'a> Scope<'a> {
             Expression::If(if_expr) => {
                 let condition = self.compile_source(&if_expr.condition);
                 let if_true = self.compiler.code.new_label();
+                self.compiler.code.set_current_source_range(expr.range());
                 self.compiler.code.jump_if(if_true, condition, ());
                 let after_true = self.compiler.code.new_label();
                 if let Some(when_false) = &if_expr.when_false {
                     self.compile_expression(when_false, dest);
+                    self.compiler.code.set_current_source_range(expr.range());
                 }
                 self.compiler.code.jump(after_true, ());
                 self.compiler.code.label(if_true);
@@ -289,7 +297,7 @@ impl<'a> Scope<'a> {
             }
             Expression::Match(match_expr) => self.compile_match_expression(match_expr, dest),
             Expression::Loop(loop_expr) => {
-                self.compile_loop(loop_expr, dest);
+                self.compile_loop(loop_expr, expr.range(), dest);
             }
             Expression::Break(break_expr) => {
                 self.compile_break(break_expr, expr.1);
@@ -299,6 +307,7 @@ impl<'a> Scope<'a> {
             }
             Expression::Return(result) => {
                 self.compile_expression(result, OpDestination::Register(Register(0)));
+                self.compiler.code.set_current_source_range(expr.range());
                 self.compiler.code.return_early();
             }
             Expression::Assign(assign) => match &assign.target.0 {
@@ -309,14 +318,17 @@ impl<'a> Scope<'a> {
                             &assign.value,
                             OpDestination::Register(Register(1)),
                         );
+                        self.compiler.code.set_current_source_range(expr.range());
                         self.compiler.code.copy(target.name.clone(), Register(0));
                         self.compiler
                             .code
                             .invoke(target_source, Symbol::set_symbol().clone(), 2);
+                        self.compiler.code.copy(Register(0), dest);
                     } else if let Some(var) = self.compiler.declarations.get(&target.name) {
                         if var.mutable {
                             let var = var.stack;
                             self.compile_expression(&assign.value, OpDestination::Stack(var));
+                            self.compiler.code.set_current_source_range(expr.range());
                             self.compiler.code.copy(var, dest);
                         } else {
                             self.compiler
@@ -325,9 +337,9 @@ impl<'a> Scope<'a> {
                         }
                     } else {
                         let value = self.compile_source(&assign.value);
+                        self.compiler.code.set_current_source_range(expr.range());
                         self.compiler.code.assign(target.name.clone(), value, dest);
                     }
-                    self.compiler.code.copy(Register(0), dest);
                 }
                 AssignTarget::Index(index) => {
                     let target_source = self.compile_source(&index.target);
@@ -346,6 +358,7 @@ impl<'a> Scope<'a> {
                         u8::MAX
                     };
                     self.compile_function_args(&index.parameters, arity - 1);
+                    self.compiler.code.set_current_source_range(expr.range());
                     self.compiler
                         .code
                         .copy(value, OpDestination::Register(Register(arity - 1)));
@@ -354,9 +367,9 @@ impl<'a> Scope<'a> {
                         .invoke(target_source, Symbol::set_symbol().clone(), arity);
                 }
             },
-            Expression::Unary(unary) => self.compile_unary(unary, dest),
+            Expression::Unary(unary) => self.compile_unary(unary, expr.range(), dest),
             Expression::Binary(binop) => {
-                self.compile_binop(binop, dest);
+                self.compile_binop(binop, expr.range(), dest);
             }
             Expression::Block(block) => {
                 let break_label = self.compiler.code.new_label();
@@ -367,18 +380,20 @@ impl<'a> Scope<'a> {
                         .map(|name| (name.clone(), break_label, dest)),
                 );
                 scope.compile_expression(&block.body, dest);
+                scope.compiler.code.set_current_source_range(expr.range());
                 scope.compiler.code.label(break_label);
             }
-            Expression::Try(try_expr) => self.compile_try(try_expr, dest),
+            Expression::Try(try_expr) => self.compile_try(try_expr, expr.range(), dest),
             Expression::TryOrNil(try_expr) => self.compile_try_catch(
+                expr.range(),
                 |this| this.compile_expression(&try_expr.body, dest),
                 |this| this.compiler.code.copy((), dest),
             ),
-            Expression::Throw(value) => self.compile_throw(value),
+            Expression::Throw(value) => self.compile_throw(value, expr.range()),
             Expression::Call(call) => self.compile_function_call(call, expr.range(), dest),
             Expression::Index(index) => self.compile_index(index, expr.range(), dest),
             Expression::Variable(decl) => {
-                self.declare_variable(decl, dest);
+                self.declare_variable(decl, expr.range(), dest);
             }
             Expression::Function(decl) => {
                 self.compile_function(decl, expr.range(), dest);
@@ -395,6 +410,7 @@ impl<'a> Scope<'a> {
 
                 mod_scope.compile_expression(&block.body, OpDestination::Void);
                 drop(mod_scope);
+                self.compiler.code.set_current_source_range(expr.range());
                 let name = &module.name.0;
                 let instance = BitcodeModule {
                     name: name.clone(),
@@ -495,6 +511,7 @@ impl<'a> Scope<'a> {
 
                 if let Some(guard) = &body.pattern.guard {
                     let guard = body_block.compile_source(guard);
+                    body_block.compiler.code.set_current_source_range(range);
                     body_block.compiler.code.jump_if_not(next_body, guard, ());
                 }
                 body_block
@@ -503,6 +520,7 @@ impl<'a> Scope<'a> {
                     .set_exception_handler(previous_handler, ());
 
                 body_block.compile_expression(&body.body, OpDestination::Register(Register(0)));
+                body_block.compiler.code.set_current_source_range(range);
                 body_block.compiler.code.return_early();
                 drop(body_block);
                 fn_scope.compiler.code.label(next_body);
@@ -648,6 +666,7 @@ impl<'a> Scope<'a> {
         doesnt_match: Label,
         bindings: &mut PatternBindings,
     ) -> Refutability {
+        self.compiler.code.set_current_source_range(pattern.range());
         match &pattern.0 {
             PatternKind::Any(name) => {
                 if let Some(name) = name {
@@ -685,6 +704,7 @@ impl<'a> Scope<'a> {
 
                 let mut refutable =
                     self.compile_pattern_binding(a, source.clone(), b_label, bindings);
+                self.compiler.code.set_current_source_range(pattern.range());
                 self.compiler.code.jump(body_label, ());
 
                 self.compiler.code.label(b_label);
@@ -724,6 +744,7 @@ impl<'a> Scope<'a> {
 
                 let element = self.new_temporary();
                 for (i, index) in (0..expected_count).zip(0_usize..) {
+                    self.compiler.code.set_current_source_range(pattern.range());
                     self.compiler.code.copy(i, Register(0));
                     self.compiler
                         .code
@@ -758,9 +779,10 @@ impl<'a> Scope<'a> {
     fn compile_match(
         &mut self,
         conditions: &[ValueOrSource],
-        matches: &Matches,
+        matches: &Ranged<Matches>,
         dest: OpDestination,
     ) {
+        self.compiler.code.set_current_source_range(matches.range());
         let mut refutable = Refutability::Irrefutable;
         let previous_handler = self.new_temporary();
         let mut stored_previous_handler = false;
@@ -798,6 +820,10 @@ impl<'a> Scope<'a> {
                             &mut PatternBindings::default(),
                         );
                     }
+                    pattern_block
+                        .compiler
+                        .code
+                        .set_current_source_range(matches.range());
                 } else {
                     // TODO once we support vararg style bindings this will need
                     // to be updated.
@@ -810,6 +836,10 @@ impl<'a> Scope<'a> {
                 pattern_block
                     .compiler
                     .code
+                    .set_current_source_range(matches.range());
+                pattern_block
+                    .compiler
+                    .code
                     .jump_if_not(next_pattern, guard, ());
             }
 
@@ -819,6 +849,11 @@ impl<'a> Scope<'a> {
                 .set_exception_handler(previous_handler, ());
 
             pattern_block.compile_expression(&matches.body, dest);
+
+            pattern_block
+                .compiler
+                .code
+                .set_current_source_range(matches.range());
             pattern_block.compiler.code.return_early();
             drop(pattern_block);
 
@@ -836,14 +871,17 @@ impl<'a> Scope<'a> {
         }
     }
 
-    fn compile_throw(&mut self, value: &Ranged<Expression>) {
+    fn compile_throw(&mut self, value: &Ranged<Expression>, range: SourceRange) {
         let value = self.compile_source(value);
+
+        self.compiler.code.set_current_source_range(range);
         self.compiler.code.copy(value, Register(0));
         self.compiler.code.throw(FaultKind::Exception);
     }
 
-    fn compile_try(&mut self, try_expr: &TryExpression, dest: OpDestination) {
+    fn compile_try(&mut self, try_expr: &TryExpression, range: SourceRange, dest: OpDestination) {
         self.compile_try_catch(
+            range,
             |this| this.compile_expression(&try_expr.body, dest),
             |this| {
                 if let Some(matches) = &try_expr.catch {
@@ -857,7 +895,12 @@ impl<'a> Scope<'a> {
         );
     }
 
-    fn compile_try_catch(&mut self, tried: impl FnOnce(&mut Self), catch: impl FnOnce(&mut Self)) {
+    fn compile_try_catch(
+        &mut self,
+        range: SourceRange,
+        tried: impl FnOnce(&mut Self),
+        catch: impl FnOnce(&mut Self),
+    ) {
         let exception_error = self.compiler.code.new_label();
         let after_handler = self.compiler.code.new_label();
         let previous_handler = self.new_temporary();
@@ -866,10 +909,12 @@ impl<'a> Scope<'a> {
             .code
             .set_exception_handler(exception_error, previous_handler);
         tried(self);
+        self.compiler.code.set_current_source_range(range);
         self.compiler.code.jump(after_handler, ());
 
         self.compiler.code.label(exception_error);
         catch(self);
+        self.compiler.code.set_current_source_range(range);
         self.compiler.code.label(after_handler);
         self.compiler
             .code
@@ -899,6 +944,7 @@ impl<'a> Scope<'a> {
 
         if let Some((label, dest)) = break_info {
             self.compile_expression(&break_expr.value, dest);
+            self.compiler.code.set_current_source_range(from);
             self.compiler.code.jump(label, ());
         } else {
             self.compiler
@@ -929,6 +975,7 @@ impl<'a> Scope<'a> {
         }
 
         if let Some(label) = label {
+            self.compiler.code.set_current_source_range(from);
             self.compiler.code.jump(label, ());
         } else {
             self.compiler
@@ -938,7 +985,7 @@ impl<'a> Scope<'a> {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn compile_loop(&mut self, expr: &LoopExpression, dest: OpDestination) {
+    fn compile_loop(&mut self, expr: &LoopExpression, range: SourceRange, dest: OpDestination) {
         let continue_label = self.compiler.code.new_label();
         let break_label = self.compiler.code.new_label();
 
@@ -951,6 +998,7 @@ impl<'a> Scope<'a> {
             LoopKind::While(condition) => {
                 outer_scope.compiler.code.label(continue_label);
                 let condition = outer_scope.compile_source(condition);
+                outer_scope.compiler.code.set_current_source_range(range);
                 outer_scope
                     .compiler
                     .code
@@ -964,6 +1012,7 @@ impl<'a> Scope<'a> {
             }
             LoopKind::For { pattern, source } => {
                 let source = outer_scope.compile_expression_into_temporary(source);
+                outer_scope.compiler.code.set_current_source_range(range);
 
                 // We try to call :iterate on source. If this throws an
                 // exception, we switch to trying to iterate by calling `nth()`
@@ -1072,9 +1121,11 @@ impl<'a> Scope<'a> {
                     pattern_mismatch,
                     &mut PatternBindings::default(),
                 );
+                outer_scope.compiler.code.set_current_source_range(range);
 
                 if let Some(guard) = &pattern.guard {
                     let guard = outer_scope.compile_source(guard);
+                    outer_scope.compiler.code.set_current_source_range(range);
                     outer_scope
                         .compiler
                         .code
@@ -1109,11 +1160,14 @@ impl<'a> Scope<'a> {
         loop_scope.compile_expression(&expr.block.body, dest);
         drop(loop_scope);
 
+        outer_scope.compiler.code.set_current_source_range(range);
+
         match &expr.kind {
             LoopKind::Infinite | LoopKind::While(_) | LoopKind::For { .. } => {}
             LoopKind::TailWhile(condition) => {
                 outer_scope.compiler.code.label(continue_label);
                 let condition = outer_scope.compile_source(condition);
+                outer_scope.compiler.code.set_current_source_range(range);
                 outer_scope
                     .compiler
                     .code
@@ -1133,7 +1187,7 @@ impl<'a> Scope<'a> {
         drop(outer_scope);
     }
 
-    fn declare_variable(&mut self, decl: &Variable, dest: OpDestination) {
+    fn declare_variable(&mut self, decl: &Variable, range: SourceRange, dest: OpDestination) {
         let value = self.compile_source(&decl.value);
 
         let pattern_mismatch = self.compiler.code.new_label();
@@ -1149,9 +1203,12 @@ impl<'a> Scope<'a> {
             },
         );
 
+        self.compiler.code.set_current_source_range(range);
+
         if let Some(guard) = &decl.pattern.guard {
             refutable = Refutability::Refutable;
             let guard = self.compile_source(guard);
+            self.compiler.code.set_current_source_range(range);
             self.compiler.code.jump_if(pattern_mismatch, guard, ());
         }
 
@@ -1161,6 +1218,7 @@ impl<'a> Scope<'a> {
 
         if let Some(r#else) = &decl.r#else {
             self.compile_expression(r#else, OpDestination::Void);
+            self.compiler.code.set_current_source_range(range);
             match refutable {
                 Refutability::Refutable => {
                     if let Err(range) = Self::check_all_branches_diverge(r#else) {
@@ -1279,7 +1337,7 @@ impl<'a> Scope<'a> {
         }
     }
 
-    fn compile_unary(&mut self, unary: &UnaryExpression, dest: OpDestination) {
+    fn compile_unary(&mut self, unary: &UnaryExpression, range: SourceRange, dest: OpDestination) {
         let op = self.compile_source(&unary.operand);
         let kind = match unary.kind {
             syntax::UnaryKind::LogicalNot => UnaryKind::LogicalNot,
@@ -1287,12 +1345,14 @@ impl<'a> Scope<'a> {
             syntax::UnaryKind::Negate => UnaryKind::Negate,
             syntax::UnaryKind::Copy => UnaryKind::Copy,
         };
+        self.compiler.code.set_current_source_range(range);
         self.compiler.code.push(Op::Unary { op, dest, kind });
     }
 
     fn try_compile_chain_compare(
         &mut self,
         binop: &BinaryExpression,
+        range: SourceRange,
         kind: CompareKind,
         dest: OpDestination,
     ) -> bool {
@@ -1318,6 +1378,7 @@ impl<'a> Scope<'a> {
                 let mut left = self.compile_source(&left_binop.left);
                 while let Some((kind, right)) = stack.pop() {
                     let right = self.compile_source(right);
+                    self.compiler.code.set_current_source_range(range);
 
                     if stack.is_empty() {
                         self.compiler.code.push(Op::BinOp {
@@ -1353,7 +1414,7 @@ impl<'a> Scope<'a> {
         false
     }
 
-    fn compile_binop(&mut self, binop: &BinaryExpression, dest: OpDestination) {
+    fn compile_binop(&mut self, binop: &BinaryExpression, range: SourceRange, dest: OpDestination) {
         let kind = match binop.kind {
             syntax::BinaryKind::Add => BinaryKind::Add,
             syntax::BinaryKind::Subtract => BinaryKind::Subtract,
@@ -1364,7 +1425,7 @@ impl<'a> Scope<'a> {
             syntax::BinaryKind::Power => BinaryKind::Power,
             syntax::BinaryKind::Bitwise(kind) => BinaryKind::Bitwise(kind),
             syntax::BinaryKind::Compare(kind) => {
-                if self.try_compile_chain_compare(binop, kind, dest) {
+                if self.try_compile_chain_compare(binop, range, kind, dest) {
                     return;
                 }
 
@@ -1377,6 +1438,7 @@ impl<'a> Scope<'a> {
             }
             syntax::BinaryKind::NilCoalesce => {
                 let source = self.compile_source(&binop.left);
+                self.compiler.code.set_current_source_range(range);
                 let when_nil = self.compiler.code.new_label();
                 let after_expression = self.compiler.code.new_label();
 
@@ -1401,9 +1463,11 @@ impl<'a> Scope<'a> {
             syntax::BinaryKind::Logical(LogicalKind::And) => {
                 let after = self.compiler.code.new_label();
                 self.compile_expression(&binop.left, dest);
+                self.compiler.code.set_current_source_range(range);
                 self.compiler.code.jump_if_not(after, dest, ());
 
                 self.compile_expression(&binop.right, dest);
+                self.compiler.code.set_current_source_range(range);
                 self.compiler.code.truthy(dest, dest);
 
                 self.compiler.code.label(after);
@@ -1413,9 +1477,11 @@ impl<'a> Scope<'a> {
             syntax::BinaryKind::Logical(LogicalKind::Or) => {
                 let after = self.compiler.code.new_label();
                 self.compile_expression(&binop.left, dest);
+                self.compiler.code.set_current_source_range(range);
                 self.compiler.code.jump_if(after, dest, ());
 
                 self.compile_expression(&binop.right, dest);
+                self.compiler.code.set_current_source_range(range);
                 self.compiler.code.truthy(dest, dest);
 
                 self.compiler.code.label(after);
@@ -1426,6 +1492,7 @@ impl<'a> Scope<'a> {
         };
         let left = self.compile_source(&binop.left);
         let right = self.compile_source(&binop.right);
+        self.compiler.code.set_current_source_range(range);
         self.compiler.code.push(Op::BinOp {
             op1: left,
             op2: right,
@@ -1522,6 +1589,7 @@ impl<'a> Scope<'a> {
         };
 
         self.compile_function_args(&call.parameters, arity);
+        self.compiler.code.set_current_source_range(range);
         self.compiler.code.call(function, arity);
         self.compiler.code.copy(Register(0), dest);
     }
@@ -1538,6 +1606,7 @@ impl<'a> Scope<'a> {
 
         let target = self.compile_source(&index.target);
         self.compile_function_args(&index.parameters, arity);
+        self.compiler.code.set_current_source_range(range);
         self.compiler
             .code
             .invoke(target, Symbol::get_symbol().clone(), arity);
@@ -1698,4 +1767,52 @@ struct PatternBindings {
     publish: bool,
     mutable: bool,
     bound_names: Set<Symbol>,
+}
+
+#[derive(Default, Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct SourceMap(Arc<SourceMapData>);
+
+#[derive(Default, Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+struct SourceMapData {
+    instructions: Vec<InstructionRange>,
+}
+
+impl SourceMap {
+    pub fn push(&mut self, range: SourceRange) {
+        let map = Arc::make_mut(&mut self.0);
+        if let Some(inst) = map
+            .instructions
+            .last_mut()
+            .filter(|inst| inst.range == range)
+        {
+            inst.instructions.end += 1;
+        } else {
+            let instruction = map
+                .instructions
+                .last()
+                .map_or(0, |inst| inst.instructions.end);
+
+            #[allow(clippy::range_plus_one)]
+            map.instructions.push(InstructionRange {
+                range,
+                instructions: instruction..instruction + 1,
+            });
+        }
+    }
+
+    #[must_use]
+    pub fn get(&self, instruction: usize) -> Option<SourceRange> {
+        self.0.instructions.iter().find_map(|probe| {
+            probe
+                .instructions
+                .contains(&instruction)
+                .then_some(probe.range)
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+struct InstructionRange {
+    range: SourceRange,
+    instructions: Range<usize>,
 }

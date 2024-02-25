@@ -1,7 +1,7 @@
 use crate::compiler::Compiler;
 use crate::syntax::SourceCode;
 use crate::vm::bitcode::BitcodeBlock;
-use crate::vm::{Code, Fault, Register, Vm};
+use crate::vm::{Code, ExecutionError, Register, Vm};
 
 #[test]
 fn budgeting() {
@@ -14,11 +14,11 @@ fn budgeting() {
     let mut vm = Vm::default();
     // Turn on budgeting, but don't give any budget.
     vm.increase_budget(0);
-    assert_eq!(vm.execute(&code).unwrap_err(), Fault::NoBudget);
+    assert_eq!(vm.execute(&code).unwrap_err(), ExecutionError::NoBudget);
     for value in 0..=COUNT_TO {
         // Step through by allowing one op at a time.
         vm.increase_budget(1);
-        assert_eq!(vm.resume().unwrap_err(), Fault::NoBudget);
+        assert_eq!(vm.resume().unwrap_err(), ExecutionError::NoBudget);
         assert_eq!(vm[Register(0)].as_i64(), Some(value));
     }
     vm.increase_budget(1);
@@ -45,7 +45,7 @@ fn module_budgeting() {
     let mut vm = Vm::default();
     // Turn on budgeting, but don't give any budget.
     vm.increase_budget(0);
-    assert_eq!(vm.execute(&code).unwrap_err(), Fault::NoBudget);
+    assert_eq!(vm.execute(&code).unwrap_err(), ExecutionError::NoBudget);
     let mut ops = 0;
     for _ in 0..MAX_OPS {
         ops += 1;
@@ -56,7 +56,7 @@ fn module_budgeting() {
                 assert_eq!(value.as_i64(), Some(5));
                 break;
             }
-            Err(err) => assert_eq!(err, Fault::NoBudget),
+            Err(err) => assert_eq!(err, ExecutionError::NoBudget),
         }
     }
     println!("Executed in {ops} steps");

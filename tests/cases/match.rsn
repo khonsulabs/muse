@@ -61,7 +61,7 @@ mismatch: {
     src: r#"match true {
         false => 0,
     }"#,
-    output: Fault(PatternMismatch),
+    output: Fault(Exception(Exception { value: Symbol("mismatch"), backtrace: [SourceRange { source_id: SourceId(None), start: 21, length: 10 }] })),
 }
 
 try_mismatch: {

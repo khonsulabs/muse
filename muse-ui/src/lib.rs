@@ -125,7 +125,7 @@ impl CustomType for DynamicValue {
                 ))),
             }
         } else {
-            Err(Fault::UnknownSymbol(name.clone()))
+            Err(Fault::UnknownSymbol)
         }
     }
 
@@ -248,7 +248,7 @@ impl CustomType for MuseWidget {
                 self.make_widget().expand(),
             )))
         } else {
-            Err(Fault::UnknownSymbol(name.clone()))
+            Err(Fault::UnknownSymbol)
         }
     }
 }

@@ -15,7 +15,7 @@ private_in_block: {
         };
         a
     "#,
-    output: Fault(UnknownSymbol("a")),
+    output: Fault(Exception(Exception { value: Symbol("undefined"), backtrace: [SourceRange { source_id: SourceId(None), start: 54, length: 1 }] })),
 }
 
 publish_fn_from_block: {
@@ -35,5 +35,5 @@ private_fn_in_block: {
         };
         a()
     "#,
-    output: Fault(UnknownSymbol("a")),
+    output: Fault(Exception(Exception { value: Symbol("undefined"), backtrace: [SourceRange { source_id: SourceId(None), start: 54, length: 1 }] })),
 }

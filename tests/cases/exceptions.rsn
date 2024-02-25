@@ -5,7 +5,7 @@ try_operator: {
 
 div_by_zero: {
     src: r#"1/0"#,
-    output: Fault(DivideByZero),
+    output: Fault(Exception(Exception { value: Symbol("divided_by_zero"), backtrace: [SourceRange { source_id: SourceId(None), start: 0, length: 3 }] })),
 }
 
 try_operator_dot: {
@@ -20,12 +20,22 @@ try: {
 
 try_catch: {
     src: r#"try { 1/0 } catch err { err }"#,
-    output: Symbol("divided_by_zero"),
+    output: Exception {
+        value: Symbol("divided_by_zero"),
+        backtrace: [
+            SourceRange { source_id: SourceId(None), start: 6, length: 3 }
+        ]
+    },
 }
 
 try_catch_expr: {
     src: r#"try { 1/0 } catch => it"#,
-    output: Symbol("divided_by_zero"),
+    output: Exception {
+        value: Symbol("divided_by_zero"),
+        backtrace: [
+            SourceRange { source_id: SourceId(None), start: 6, length: 3 }
+        ]
+    },
 }
 
 
@@ -36,7 +46,7 @@ try_catch_pattern: {
 
 throw: {
     src: r#"throw true"#,
-    output: Fault(Exception(Bool(true))),
+    output: Fault(Exception(Exception { value: Bool(true), backtrace: [SourceRange { source_id: SourceId(None), start: 0, length: 10 }] })),
 }
 
 try_throw_catch: {

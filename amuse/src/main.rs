@@ -10,7 +10,7 @@ use cushy::{Open, PendingApp};
 use muse::compiler::Compiler;
 use muse::syntax::{SourceCode, SourceId, Sources};
 use muse::value::Value as MuseValue;
-use muse::vm::{Fault, Vm};
+use muse::vm::{ExecutionError, Vm};
 use muse_ui::VmUi;
 
 fn main() {
@@ -75,7 +75,7 @@ fn main() {
 
 struct History {
     source: SourceId,
-    result: Result<MuseValue, Fault>,
+    result: Result<MuseValue, ExecutionError>,
 }
 
 impl History {

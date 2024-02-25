@@ -19,11 +19,12 @@ use crate::string::MuseString;
 use crate::symbol::Symbol;
 use crate::syntax::{BitwiseKind, CompareKind};
 use crate::value::{Dynamic, Value};
-use crate::vm::{Fault, Vm};
+use crate::vm::{Fault, SourceRange, Vm};
 
 impl CodeData {
     #[allow(clippy::too_many_lines)]
-    pub(super) fn push_loaded(&mut self, loaded: LoadedOp) {
+    pub(super) fn push_loaded(&mut self, loaded: LoadedOp, range: SourceRange) {
+        self.map.push(range);
         match loaded {
             LoadedOp::Return => {
                 self.push_dispatched(Return);

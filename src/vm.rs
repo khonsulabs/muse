@@ -21,7 +21,9 @@ use self::bitcode::trusted_loaded_source_to_value;
 use self::bitcode::{
     BinaryKind, BitcodeFunction, FaultKind, Label, Op, OpDestination, ValueOrSource,
 };
-use crate::compiler::{BitcodeModule, BlockDeclaration, UnaryKind};
+use crate::compiler::{BitcodeModule, BlockDeclaration, SourceMap, UnaryKind};
+use crate::exception::Exception;
+#[cfg(not(feature = "dispatched"))]
 use crate::list::List;
 #[cfg(not(feature = "dispatched"))]
 use crate::map;
@@ -29,7 +31,7 @@ use crate::regex::MuseRegex;
 use crate::string::MuseString;
 use crate::symbol::{IntoOptionSymbol, Symbol};
 use crate::syntax::token::RegexLiteral;
-use crate::syntax::{BitwiseKind, CompareKind};
+use crate::syntax::{BitwiseKind, CompareKind, SourceRange};
 use crate::value::{CustomType, Dynamic, StaticRustFunctionTable, Value, WeakDynamic};
 
 pub mod bitcode;
@@ -139,46 +141,57 @@ impl Vm {
             })
     }
 
-    pub fn execute(&mut self, code: &Code) -> Result<Value, Fault> {
+    pub fn execute(&mut self, code: &Code) -> Result<Value, ExecutionError> {
         let code = self.push_code(code, None);
         self.execute_owned(code)
     }
 
-    pub fn execute_for(&mut self, code: &Code, duration: Duration) -> Result<Value, Fault> {
+    pub fn execute_for(
+        &mut self,
+        code: &Code,
+        duration: Duration,
+    ) -> Result<Value, ExecutionError> {
         self.execute_until(
             code,
-            Instant::now().checked_add(duration).ok_or(Fault::Timeout)?,
+            Instant::now()
+                .checked_add(duration)
+                .ok_or(ExecutionError::Timeout)?,
         )
     }
 
-    pub fn execute_until(&mut self, code: &Code, instant: Instant) -> Result<Value, Fault> {
+    pub fn execute_until(
+        &mut self,
+        code: &Code,
+        instant: Instant,
+    ) -> Result<Value, ExecutionError> {
         let code = self.push_code(code, None);
         self.execute_until = Some(instant);
         self.execute_owned(code)
     }
 
-    fn prepare_owned(&mut self, code: CodeIndex) -> Result<(), Fault> {
+    fn prepare_owned(&mut self, code: CodeIndex) -> Result<(), ExecutionError> {
         self.frames[self.current_frame].code = Some(code);
         self.frames[self.current_frame].instruction = 0;
 
-        self.allocate(self.code[code.0].code.data.stack_requirement)?;
+        self.allocate(self.code[code.0].code.data.stack_requirement)
+            .map_err(|err| ExecutionError::new(err, self))?;
         Ok(())
     }
 
-    fn execute_owned(&mut self, code: CodeIndex) -> Result<Value, Fault> {
+    fn execute_owned(&mut self, code: CodeIndex) -> Result<Value, ExecutionError> {
         self.prepare_owned(code)?;
 
         self.resume()
     }
 
-    pub fn execute_async(&mut self, code: &Code) -> Result<ExecuteAsync<'_>, Fault> {
+    pub fn execute_async(&mut self, code: &Code) -> Result<ExecuteAsync<'_>, ExecutionError> {
         let code = self.push_code(code, None);
         self.prepare_owned(code)?;
 
         Ok(ExecuteAsync(self))
     }
 
-    pub fn resume_async(&mut self) -> Result<ExecuteAsync<'_>, Fault> {
+    pub fn resume_async(&mut self) -> Result<ExecuteAsync<'_>, ExecutionError> {
         Ok(ExecuteAsync(self))
     }
 
@@ -202,15 +215,17 @@ impl Vm {
         self.budget.allocate(amount);
     }
 
-    pub fn resume(&mut self) -> Result<Value, Fault> {
+    pub fn resume(&mut self) -> Result<Value, ExecutionError> {
         loop {
             match self.resume_async_inner(0) {
                 Err(Fault::Waiting) => {
-                    self.check_timeout()?;
+                    self.check_timeout()
+                        .map_err(|err| ExecutionError::new(err, self))?;
 
                     self.parker.park();
                 }
-                other => return other,
+                Err(other) => return Err(ExecutionError::new(other, self)),
+                Ok(value) => return Ok(value),
             }
         }
     }
@@ -244,8 +259,10 @@ impl Vm {
                 }
                 Err(err) => {
                     if let Some(exception_target) = self.frames[code_frame].exception_handler {
-                        self[Register(0)] = err.as_value();
+                        self[Register(0)] = err.as_exception(self);
                         self.frames[code_frame].instruction = exception_target.get();
+                    } else if !err.is_execution_error() {
+                        return Err(Fault::Exception(err.as_exception(self)));
                     } else {
                         return Err(err);
                     }
@@ -425,7 +442,7 @@ impl Vm {
                     .and_then(|parent| parent.upgrade().map(Value::Dynamic))
                     .unwrap_or_default())
             } else {
-                Err(Fault::UnknownSymbol(name.clone()))
+                Err(Fault::UnknownSymbol)
             }
         }
     }
@@ -455,7 +472,7 @@ impl Vm {
                     Err(Fault::NotMutable)
                 }
             } else {
-                Err(Fault::UnknownSymbol(name.clone()))
+                Err(Fault::UnknownSymbol)
             }
         }
     }
@@ -557,6 +574,17 @@ impl Vm {
         self.registers.fill_with(|| Value::Nil);
         self.stack.fill_with(|| Value::Nil);
     }
+
+    #[must_use]
+    pub fn stack_trace(&self) -> Vec<StackFrame> {
+        self.frames[..=self.current_frame]
+            .iter()
+            .filter_map(|f| {
+                f.code
+                    .map(|index| StackFrame::new(self.code[index.0].code.clone(), f.instruction))
+            })
+            .collect()
+    }
 }
 
 #[cfg(not(feature = "dispatched"))]
@@ -587,8 +615,10 @@ impl Vm {
                 }
                 Err(err) => {
                     if let Some(exception_target) = self.frames[code_frame].exception_handler {
-                        self[Register(0)] = err.as_value();
+                        self[Register(0)] = err.as_exception(self);
                         self.frames[code_frame].instruction = exception_target.get();
+                    } else if !err.is_execution_error() {
+                        return Err(Fault::Exception(err.as_exception(self)));
                     } else {
                         return Err(err);
                     }
@@ -1350,8 +1380,28 @@ impl Frame {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub enum ExecutionError {
+    NoBudget,
+    Waiting,
+    Timeout,
+    Exception(Value),
+}
+
+impl ExecutionError {
+    fn new(fault: Fault, vm: &mut Vm) -> Self {
+        match fault {
+            Fault::NoBudget => Self::NoBudget,
+            Fault::Waiting => Self::Waiting,
+            Fault::Timeout => Self::Timeout,
+            Fault::Exception(exc) => Self::Exception(exc),
+            other => Self::Exception(other.as_exception(vm)),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum Fault {
-    UnknownSymbol(Symbol),
+    UnknownSymbol,
     IncorrectNumberOfArguments,
     PatternMismatch,
     OperationOnNil,
@@ -1379,13 +1429,17 @@ pub enum Fault {
 }
 
 impl Fault {
+    fn is_execution_error(&self) -> bool {
+        matches!(
+            self,
+            Fault::NoBudget | Fault::Waiting | Fault::Timeout | Fault::Exception(_)
+        )
+    }
+
     #[must_use]
-    pub fn as_value(&self) -> Value {
-        match self {
-            Fault::UnknownSymbol(sym) => Value::dynamic(List::from_iter([
-                Symbol::from("undefined").into(),
-                sym.into(),
-            ])),
+    pub fn as_exception(&self, vm: &mut Vm) -> Value {
+        let exception = match self {
+            Fault::UnknownSymbol => Symbol::from("undefined").into(),
             Fault::IncorrectNumberOfArguments => Symbol::from("args").into(),
             Fault::OperationOnNil => Symbol::from("nil").into(),
             Fault::NotAFunction => Symbol::from("not_invokable").into(),
@@ -1408,16 +1462,18 @@ impl Fault {
             Fault::Timeout => Symbol::from("timeout").into(),
             Fault::Waiting => Symbol::from("waiting").into(),
             Fault::FrameChanged => Symbol::from("frame_changed").into(),
-            Fault::Exception(value) => value.clone(),
+            Fault::Exception(value) => return value.clone(),
             Fault::PatternMismatch => Symbol::from("mismatch").into(),
-        }
+        };
+        Value::dynamic(Exception::new(exception, vm))
     }
 
     fn from_kind(kind: FaultKind, vm: &mut Vm) -> Self {
-        match kind {
-            FaultKind::Exception => Self::Exception(vm[Register(0)].take()),
-            FaultKind::PatternMismatch => Self::PatternMismatch,
-        }
+        let exception = match kind {
+            FaultKind::Exception => Value::dynamic(Exception::new(vm[Register(0)].take(), vm)),
+            FaultKind::PatternMismatch => Self::PatternMismatch.as_exception(vm),
+        };
+        Self::Exception(exception)
     }
 }
 
@@ -1508,8 +1564,8 @@ pub struct Code {
 }
 
 impl Code {
-    pub fn push(&mut self, op: &Op) {
-        Arc::make_mut(&mut self.data).push(op);
+    pub fn push(&mut self, op: &Op, range: SourceRange) {
+        Arc::make_mut(&mut self.data).push(op, range);
     }
 }
 
@@ -1521,6 +1577,12 @@ impl Default for Code {
                 data: Arc::default(),
             })
             .clone()
+    }
+}
+
+impl PartialEq for Code {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.data, &other.data)
     }
 }
 
@@ -1541,13 +1603,14 @@ struct CodeData {
     dynamics: Vec<Dynamic>,
     functions: Vec<BitcodeFunction>,
     modules: Vec<BitcodeModule>,
+    map: SourceMap,
 }
 
 impl CodeData {
     #[allow(clippy::too_many_lines)]
-    pub fn push(&mut self, op: &Op) {
+    pub fn push(&mut self, op: &Op, range: SourceRange) {
         match op {
-            Op::Return => self.push_loaded(LoadedOp::Return),
+            Op::Return => self.push_loaded(LoadedOp::Return, range),
             Op::Label(label) => {
                 if self.labels.len() <= label.0 {
                     self.labels.resize(label.0 + 1, usize::MAX);
@@ -1563,12 +1626,15 @@ impl CodeData {
                 let name = self.push_symbol(name.clone());
                 let value = self.load_source(value);
                 let dest = self.load_dest(dest);
-                self.push_loaded(LoadedOp::Declare {
-                    name,
-                    mutable: *mutable,
-                    value,
-                    dest,
-                });
+                self.push_loaded(
+                    LoadedOp::Declare {
+                        name,
+                        mutable: *mutable,
+                        value,
+                        dest,
+                    },
+                    range,
+                );
             }
             Op::Unary {
                 dest: OpDestination::Void,
@@ -1579,18 +1645,21 @@ impl CodeData {
                 let op = self.load_source(op);
                 let dest = self.load_dest(dest);
                 let unary = LoadedUnary { op, dest };
-                self.push_loaded(match kind {
-                    UnaryKind::Truthy => LoadedOp::Truthy(unary),
-                    UnaryKind::LogicalNot => LoadedOp::LogicalNot(unary),
-                    UnaryKind::BitwiseNot => LoadedOp::BitwiseNot(unary),
-                    UnaryKind::Negate => LoadedOp::Negate(unary),
-                    UnaryKind::Copy => LoadedOp::Copy(unary),
-                    UnaryKind::Resolve => LoadedOp::Resolve(unary),
-                    UnaryKind::Jump => LoadedOp::Jump(unary),
-                    UnaryKind::NewMap => LoadedOp::NewMap(unary),
-                    UnaryKind::NewList => LoadedOp::NewList(unary),
-                    UnaryKind::SetExceptionHandler => LoadedOp::SetExceptionHandler(unary),
-                });
+                self.push_loaded(
+                    match kind {
+                        UnaryKind::Truthy => LoadedOp::Truthy(unary),
+                        UnaryKind::LogicalNot => LoadedOp::LogicalNot(unary),
+                        UnaryKind::BitwiseNot => LoadedOp::BitwiseNot(unary),
+                        UnaryKind::Negate => LoadedOp::Negate(unary),
+                        UnaryKind::Copy => LoadedOp::Copy(unary),
+                        UnaryKind::Resolve => LoadedOp::Resolve(unary),
+                        UnaryKind::Jump => LoadedOp::Jump(unary),
+                        UnaryKind::NewMap => LoadedOp::NewMap(unary),
+                        UnaryKind::NewList => LoadedOp::NewList(unary),
+                        UnaryKind::SetExceptionHandler => LoadedOp::SetExceptionHandler(unary),
+                    },
+                    range,
+                );
             }
             Op::BinOp {
                 op1,
@@ -1602,40 +1671,43 @@ impl CodeData {
                 let op2 = self.load_source(op2);
                 let dest = self.load_dest(dest);
                 let binary = LoadedBinary { op1, op2, dest };
-                self.push_loaded(match kind {
-                    BinaryKind::Add => LoadedOp::Add(binary),
-                    BinaryKind::Subtract => LoadedOp::Subtract(binary),
-                    BinaryKind::Multiply => LoadedOp::Multiply(binary),
-                    BinaryKind::Divide => LoadedOp::Divide(binary),
-                    BinaryKind::IntegerDivide => LoadedOp::IntegerDivide(binary),
-                    BinaryKind::Remainder => LoadedOp::Remainder(binary),
-                    BinaryKind::Power => LoadedOp::Power(binary),
-                    BinaryKind::JumpIf => LoadedOp::JumpIf(binary),
-                    BinaryKind::JumpIfNot => LoadedOp::JumpIfNot(binary),
-                    BinaryKind::LogicalXor => LoadedOp::LogicalXor(binary),
-                    BinaryKind::Assign => LoadedOp::Assign(binary),
-                    BinaryKind::Matches => LoadedOp::Matches(binary),
-                    BinaryKind::Bitwise(kind) => match kind {
-                        BitwiseKind::And => LoadedOp::BitwiseAnd(binary),
-                        BitwiseKind::Or => LoadedOp::BitwiseOr(binary),
-                        BitwiseKind::Xor => LoadedOp::BitwiseXor(binary),
-                        BitwiseKind::ShiftLeft => LoadedOp::BitwiseShiftLeft(binary),
-                        BitwiseKind::ShiftRight => LoadedOp::BitwiseShiftRight(binary),
+                self.push_loaded(
+                    match kind {
+                        BinaryKind::Add => LoadedOp::Add(binary),
+                        BinaryKind::Subtract => LoadedOp::Subtract(binary),
+                        BinaryKind::Multiply => LoadedOp::Multiply(binary),
+                        BinaryKind::Divide => LoadedOp::Divide(binary),
+                        BinaryKind::IntegerDivide => LoadedOp::IntegerDivide(binary),
+                        BinaryKind::Remainder => LoadedOp::Remainder(binary),
+                        BinaryKind::Power => LoadedOp::Power(binary),
+                        BinaryKind::JumpIf => LoadedOp::JumpIf(binary),
+                        BinaryKind::JumpIfNot => LoadedOp::JumpIfNot(binary),
+                        BinaryKind::LogicalXor => LoadedOp::LogicalXor(binary),
+                        BinaryKind::Assign => LoadedOp::Assign(binary),
+                        BinaryKind::Matches => LoadedOp::Matches(binary),
+                        BinaryKind::Bitwise(kind) => match kind {
+                            BitwiseKind::And => LoadedOp::BitwiseAnd(binary),
+                            BitwiseKind::Or => LoadedOp::BitwiseOr(binary),
+                            BitwiseKind::Xor => LoadedOp::BitwiseXor(binary),
+                            BitwiseKind::ShiftLeft => LoadedOp::BitwiseShiftLeft(binary),
+                            BitwiseKind::ShiftRight => LoadedOp::BitwiseShiftRight(binary),
+                        },
+                        BinaryKind::Compare(kind) => match kind {
+                            CompareKind::LessThanOrEqual => LoadedOp::LessThanOrEqual(binary),
+                            CompareKind::LessThan => LoadedOp::LessThan(binary),
+                            CompareKind::Equal => LoadedOp::Equal(binary),
+                            CompareKind::NotEqual => LoadedOp::NotEqual(binary),
+                            CompareKind::GreaterThan => LoadedOp::GreaterThan(binary),
+                            CompareKind::GreaterThanOrEqual => LoadedOp::GreaterThanOrEqual(binary),
+                        },
                     },
-                    BinaryKind::Compare(kind) => match kind {
-                        CompareKind::LessThanOrEqual => LoadedOp::LessThanOrEqual(binary),
-                        CompareKind::LessThan => LoadedOp::LessThan(binary),
-                        CompareKind::Equal => LoadedOp::Equal(binary),
-                        CompareKind::NotEqual => LoadedOp::NotEqual(binary),
-                        CompareKind::GreaterThan => LoadedOp::GreaterThan(binary),
-                        CompareKind::GreaterThanOrEqual => LoadedOp::GreaterThanOrEqual(binary),
-                    },
-                });
+                    range,
+                );
             }
             Op::Call { name, arity } => {
                 let name = self.load_source(name);
                 let arity = self.load_source(arity);
-                self.push_loaded(LoadedOp::Call { name, arity });
+                self.push_loaded(LoadedOp::Call { name, arity }, range);
             }
             Op::Invoke {
                 target,
@@ -1645,24 +1717,28 @@ impl CodeData {
                 let target = self.load_source(target);
                 let name = self.push_symbol(name.clone());
                 let arity = self.load_source(arity);
-                self.push_loaded(LoadedOp::Invoke {
-                    target,
-                    name,
-                    arity,
-                });
+                self.push_loaded(
+                    LoadedOp::Invoke {
+                        target,
+                        name,
+                        arity,
+                    },
+                    range,
+                );
             }
             Op::LoadModule { module, dest } => {
                 let module = self.push_module(module);
                 let dest = self.load_dest(dest);
-                self.push_loaded(LoadedOp::LoadModule { module, dest });
+                self.push_loaded(LoadedOp::LoadModule { module, dest }, range);
             }
-            Op::Throw(kind) => self.push_loaded(LoadedOp::Throw(*kind)),
+            Op::Throw(kind) => self.push_loaded(LoadedOp::Throw(*kind), range),
         }
     }
 
     #[cfg(not(feature = "dispatched"))]
-    fn push_loaded(&mut self, loaded: LoadedOp) {
+    fn push_loaded(&mut self, loaded: LoadedOp, range: SourceRange) {
         self.instructions.push(loaded);
+        self.map.push(range);
     }
 
     fn push_function(&mut self, function: BitcodeFunction) -> usize {
@@ -1785,7 +1861,7 @@ impl CustomType for Module {
                     match this.declarations().get_mut(sym) {
                         Some(decl) if decl.mutable => Ok(std::mem::replace(&mut decl.value, value)),
                         Some(_) => Err(Fault::NotMutable),
-                        None => Err(Fault::UnknownSymbol(sym.clone())),
+                        None => Err(Fault::UnknownSymbol),
                     }
                 })
                 .with_fn(Symbol::get_symbol(), 1, |vm, this| {
@@ -1795,7 +1871,7 @@ impl CustomType for Module {
                     this.declarations()
                         .get(sym)
                         .map(|decl| decl.value.clone())
-                        .ok_or_else(|| Fault::UnknownSymbol(sym.clone()))
+                        .ok_or(Fault::UnknownSymbol)
                 })
         });
         let declarations = self.declarations();
@@ -1838,14 +1914,15 @@ impl Budget {
 pub struct ExecuteAsync<'a>(&'a mut Vm);
 
 impl Future for ExecuteAsync<'_> {
-    type Output = Result<Value, Fault>;
+    type Output = Result<Value, ExecutionError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         // Temporarily replace the VM's waker with this context's waker.
         let previous_waker = std::mem::replace(&mut self.0.waker, cx.waker().clone());
         let result = match self.0.resume_async_inner(0) {
             Err(Fault::Waiting) => Poll::Pending,
-            other => Poll::Ready(other),
+            Err(other) => Poll::Ready(Err(ExecutionError::new(other, self.0))),
+            Ok(value) => Poll::Ready(Ok(value)),
         };
         // Restore the VM's waker.
         self.0.waker = previous_waker;
@@ -1988,3 +2065,30 @@ fn precompiled_regex(regex: &RegexLiteral) -> PrecompiledRegex {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Stack(pub usize);
+
+#[derive(PartialEq, Clone)]
+pub struct StackFrame {
+    code: Code,
+    instruction: usize,
+}
+
+impl StackFrame {
+    #[must_use]
+    pub fn new(code: Code, instruction: usize) -> Self {
+        Self { code, instruction }
+    }
+
+    #[must_use]
+    pub fn source_range(&self) -> Option<SourceRange> {
+        self.code.data.map.get(self.instruction)
+    }
+}
+
+impl Debug for StackFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StackFrame")
+            .field("code", &Arc::as_ptr(&self.code.data))
+            .field("instruction", &self.instruction)
+            .finish()
+    }
+}

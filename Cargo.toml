@@ -35,7 +35,7 @@ regex = "1.10.3"
 rustyline = { version = "13.0.0", optional = true, default-features = false, features = [
     "with-file-history",
 ] }
-serde = { version = "1.0.195", features = ["derive"] }
+serde = { version = "1.0.195", features = ["derive", "rc"] }
 unicode-ident = "1.0.12"
 
 [dev-dependencies]

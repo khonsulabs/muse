@@ -7,11 +7,11 @@ use serde::{Deserialize, Serialize};
 #[cfg(not(feature = "dispatched"))]
 use super::LoadedOp;
 use super::{Arity, Code, CodeData, Function, LoadedSource, Register};
-use crate::compiler::{BitcodeModule, UnaryKind};
+use crate::compiler::{BitcodeModule, SourceMap, UnaryKind};
 use crate::string::MuseString;
 use crate::symbol::Symbol;
 use crate::syntax::token::RegexLiteral;
-use crate::syntax::{BitwiseKind, CompareKind, Literal};
+use crate::syntax::{BitwiseKind, CompareKind, Literal, SourceRange};
 use crate::vm::Stack;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -149,6 +149,8 @@ pub struct BitcodeBlock {
     ops: Vec<Op>,
     pub stack_requirement: usize,
     labels: usize,
+    current_location: SourceRange,
+    map: SourceMap,
 }
 
 impl BitcodeBlock {
@@ -164,8 +166,13 @@ impl BitcodeBlock {
         var
     }
 
+    pub fn set_current_source_range(&mut self, range: SourceRange) {
+        self.current_location = range;
+    }
+
     pub fn push(&mut self, op: Op) {
         self.ops.push(op);
+        self.map.push(self.current_location);
     }
 
     pub fn declare(
@@ -186,6 +193,8 @@ impl BitcodeBlock {
 
     pub fn clear(&mut self) {
         self.ops.clear();
+        self.map = SourceMap::default();
+        self.current_location = SourceRange::default();
         self.labels = 0;
     }
 
@@ -489,8 +498,15 @@ impl BitcodeBlock {
 impl From<&'_ BitcodeBlock> for Code {
     fn from(bitcode: &'_ BitcodeBlock) -> Self {
         let mut code = Code::default();
-        for op in &bitcode.ops {
-            code.push(op);
+        let mut previous_location = SourceRange::default();
+        for (index, op) in bitcode.ops.iter().enumerate() {
+            let location = if let Some(new_location) = bitcode.map.get(index) {
+                previous_location = new_location;
+                new_location
+            } else {
+                previous_location
+            };
+            code.push(op, location);
         }
         code
     }
@@ -529,14 +545,21 @@ impl From<&'_ Code> for BitcodeBlock {
         let mut ops = Vec::with_capacity(code.data.instructions.len() + code.data.labels.len());
         let mut label_addrs = code.data.labels.iter().copied().peekable();
         let mut labels = 0;
+        let mut map = SourceMap::default();
+        let mut current_location = map.get(0).unwrap_or_default();
 
         for (index, instruction) in code.data.instructions.iter().enumerate() {
             if label_addrs.peek().map_or(false, |label| label == &index) {
                 label_addrs.next();
                 let label = Label(labels);
                 labels += 1;
+                map.push(current_location);
                 ops.push(Op::Label(label));
             }
+
+            current_location = code.data.map.get(index).unwrap_or_default();
+            map.push(current_location);
+
             #[cfg(feature = "dispatched")]
             ops.push(instruction.as_op());
 
@@ -639,6 +662,8 @@ impl From<&'_ Code> for BitcodeBlock {
             ops,
             stack_requirement: code.data.stack_requirement,
             labels,
+            current_location: SourceRange::default(),
+            map,
         }
     }
 }

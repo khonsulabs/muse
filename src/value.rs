@@ -236,7 +236,7 @@ impl Value {
             }
             (Value::Dynamic(dynamic), _) => dynamic.0.invoke(vm, name, arity.into()),
             (Value::Nil, _) => Err(Fault::OperationOnNil),
-            _ => Err(Fault::UnknownSymbol(name.clone())),
+            _ => Err(Fault::UnknownSymbol),
         }
     }
 
@@ -1279,7 +1279,7 @@ pub trait CustomType: Send + Sync + Debug + 'static {
 
     #[allow(unused_variables)]
     fn invoke(&self, vm: &mut Vm, name: &Symbol, arity: Arity) -> Result<Value, Fault> {
-        Err(Fault::UnknownSymbol(name.clone()))
+        Err(Fault::UnknownSymbol)
     }
 
     #[allow(unused_variables)]
@@ -1402,7 +1402,7 @@ where
                 Err(Fault::IncorrectNumberOfArguments)
             }
         } else {
-            Err(Fault::UnknownSymbol(name.clone()))
+            Err(Fault::UnknownSymbol)
         }
     }
 }

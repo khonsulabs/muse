@@ -2,21 +2,22 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use muse::compiler::{Compiler, Error};
+use muse::exception::Exception;
 use muse::list::List;
 use muse::map::Map;
 use muse::regex::{MuseMatch, MuseRegex};
 use muse::string::MuseString;
 use muse::symbol::Symbol;
 use muse::syntax::token::RegexLiteral;
-use muse::syntax::{Ranged, SourceCode};
+use muse::syntax::{Ranged, SourceCode, SourceRange};
 use muse::value::Value;
-use muse::vm::{Code, Fault, Vm};
+use muse::vm::{Code, ExecutionError, StackFrame, Vm};
 use serde::de::Visitor;
 use serde::Deserialize;
 
 fn main() {
     let filter = std::env::args().nth(1).unwrap_or_default();
-    // let filter = String::from("let_irrefutable");
+    // let filter = String::from("private_in_block");
     for entry in std::fs::read_dir("tests/cases").unwrap() {
         let entry = entry.unwrap().path();
         if entry.extension().map_or(false, |ext| ext == "rsn") {
@@ -35,10 +36,17 @@ enum TestOutput {
     Symbol(Symbol),
     String(String),
     Regex(RegexLiteral),
-    RegexMatch { content: String, start: usize },
+    RegexMatch {
+        content: String,
+        start: usize,
+    },
     Map(TestMap),
     List(Vec<TestOutput>),
     Error(Vec<Ranged<Error>>),
+    Exception {
+        value: Box<TestOutput>,
+        backtrace: Vec<SourceRange>,
+    },
     Fault(VmFault),
 }
 
@@ -72,34 +80,13 @@ enum VmFault {
     Exception(Box<TestOutput>),
 }
 
-impl From<Fault> for VmFault {
-    fn from(value: Fault) -> Self {
+impl From<ExecutionError> for VmFault {
+    fn from(value: ExecutionError) -> Self {
         match value {
-            Fault::UnknownSymbol(sym) => Self::UnknownSymbol(sym),
-            Fault::IncorrectNumberOfArguments => Self::IncorrectNumberOfArguments,
-            Fault::OperationOnNil => Self::OperationOnNil,
-            Fault::MissingModule => Self::MissingModule,
-            Fault::NotAFunction => Self::NotAFunction,
-            Fault::StackOverflow => Self::StackOverflow,
-            Fault::StackUnderflow => Self::StackUnderflow,
-            Fault::UnsupportedOperation => Self::UnsupportedOperation,
-            Fault::OutOfMemory => Self::OutOfMemory,
-            Fault::OutOfBounds => Self::OutOfBounds,
-            Fault::NotMutable => Self::NotMutable,
-            Fault::DivideByZero => Self::DivideByZero,
-            Fault::InvalidInstructionAddress => Self::InvalidInstructionAddress,
-            Fault::ExpectedSymbol => Self::ExpectedSymbol,
-            Fault::ExpectedInteger => Self::ExpectedInteger,
-            Fault::ExpectedString => Self::ExpectedString,
-            Fault::InvalidArity => Self::InvalidArity,
-            Fault::InvalidLabel => Self::InvalidLabel,
-            Fault::InvalidOpcode => Self::InvalidOpcode,
-            Fault::NoBudget => Self::NoBudget,
-            Fault::Timeout => Self::Timeout,
-            Fault::Waiting => Self::Waiting,
-            Fault::FrameChanged => Self::FrameChanged,
-            Fault::PatternMismatch => Self::PatternMismatch,
-            Fault::Exception(value) => Self::Exception(Box::new(TestOutput::from(value))),
+            ExecutionError::NoBudget => VmFault::NoBudget,
+            ExecutionError::Waiting => VmFault::Waiting,
+            ExecutionError::Timeout => VmFault::Timeout,
+            ExecutionError::Exception(value) => Self::Exception(Box::new(TestOutput::from(value))),
         }
     }
 }
@@ -158,6 +145,15 @@ impl From<Value> for TestOutput {
                             .expect("capture is string")
                             .to_string(),
                         start: m.start,
+                    }
+                } else if let Some(m) = v.downcast_ref::<Exception>() {
+                    TestOutput::Exception {
+                        value: Box::new(Self::from(m.value().clone())),
+                        backtrace: m
+                            .backtrace()
+                            .iter()
+                            .filter_map(StackFrame::source_range)
+                            .collect(),
                     }
                 } else {
                     unreachable!("test returned dynamic {v:?}, but the harness doesn't support it")

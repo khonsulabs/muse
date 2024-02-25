@@ -136,7 +136,10 @@ impl Validator for Muse {
         let source = sources.push(ctx.input().to_string());
         match parse(&source) {
             Ok(_) => Ok(ValidationResult::Valid(None)),
-            Err(Ranged(muse::syntax::Error::UnexpectedEof, _)) => Ok(ValidationResult::Incomplete),
+            Err(Ranged(
+                muse::syntax::Error::UnexpectedEof | muse::syntax::Error::MissingEnd(_),
+                _,
+            )) => Ok(ValidationResult::Incomplete),
             Err(err) => {
                 let mut errors = print_errors(vec![err.into()], &sources);
                 errors.insert(0, '\n');

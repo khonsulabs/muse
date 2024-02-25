@@ -20,7 +20,16 @@ false_and_nonsense: {
 
 true_and_nonsense: {
     src: r#"true and nonsense"#,
-    output: Fault(UnknownSymbol("nonsense")),
+    output: Fault(
+        Exception(
+            Exception {
+                value: Symbol("undefined"),
+                backtrace: [
+                    SourceRange { source_id: SourceId(None), start: 9, length: 8 }
+                ]
+            }
+        )
+    ),
 }
 
 true_or_true: {
@@ -45,7 +54,16 @@ false_or_true: {
 
 false_or_nonsense: {
     src: r#"false or nonsense"#,
-    output: Fault(UnknownSymbol("nonsense")),
+    output: Fault(
+        Exception(
+            Exception {
+                value: Symbol("undefined"),
+                backtrace: [
+                    SourceRange { source_id: SourceId(None), start: 9, length: 8 }
+                ]
+            }
+        )
+    ),
 }
 
 true_or_nonsense: {
@@ -75,10 +93,28 @@ false_xor_false: {
 
 false_xor_nonsense: {
     src: r#"false xor nonsense"#,
-    output: Fault(UnknownSymbol("nonsense")),
+    output: Fault(
+        Exception(
+            Exception {
+                value: Symbol("undefined"),
+                backtrace: [
+                    SourceRange { source_id: SourceId(None), start: 10, length: 8 }
+                ]
+            }
+        )
+    ),
 }
 
 true_xor_nonsense: {
     src: r#"true xor nonsense"#,
-    output: Fault(UnknownSymbol("nonsense")),
+    output: Fault(
+        Exception(
+            Exception {
+                value: Symbol("undefined"),
+                backtrace: [
+                    SourceRange { source_id: SourceId(None), start: 9, length: 8 }
+                ]
+            }
+        )
+    ),
 }
