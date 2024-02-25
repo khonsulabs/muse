@@ -559,6 +559,7 @@ pub enum Error {
     ExpectedCatchBlock,
     InvalidAssignmentTarget,
     InvalidLabelTarget,
+    InvalidMapKeyPattern,
 }
 
 impl crate::Error for Error {
@@ -586,6 +587,7 @@ impl crate::Error for Error {
             Error::ExpectedCatchBlock => "expected catch block",
             Error::InvalidAssignmentTarget => "invalid assignment target",
             Error::InvalidLabelTarget => "invalid label target",
+            Error::InvalidMapKeyPattern => "invalid map key pattern",
         }
     }
 }
@@ -619,6 +621,7 @@ impl Display for Error {
             Error::ExpectedCatchBlock => f.write_str("expected catch block"),
             Error::InvalidAssignmentTarget => f.write_str("invalid assignment target"),
             Error::InvalidLabelTarget => f.write_str("invalid label target"),
+            Error::InvalidMapKeyPattern => f.write_str("invalid map key pattern"),
         }
     }
 }
@@ -2134,9 +2137,10 @@ impl MatchPattern {
     pub(crate) fn arity(&self) -> Option<(u8, bool)> {
         match &self.pattern.kind.0 {
             PatternKind::Any(None) => Some((0, true)),
-            PatternKind::Any(_) | PatternKind::Literal(_) | PatternKind::Or(_, _) => {
-                Some((1, false))
-            }
+            PatternKind::Any(_)
+            | PatternKind::Literal(_)
+            | PatternKind::Or(_, _)
+            | PatternKind::DestructureMap(_) => Some((1, false)),
             PatternKind::DestructureTuple(fields) => {
                 fields.len().try_into().ok().map(|count| (count, false))
             }
@@ -2167,8 +2171,27 @@ pub enum PatternKind {
     Any(Option<Symbol>),
     Literal(Literal),
     DestructureTuple(Vec<Ranged<PatternKind>>),
+    DestructureMap(Vec<Ranged<EntryPattern>>),
     Or(Box<Ranged<PatternKind>>, Box<Ranged<PatternKind>>),
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntryPattern {
+    pub key: Ranged<EntryKeyPattern>,
+    pub value: Ranged<PatternKind>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum EntryKeyPattern {
+    Nil,
+    Bool(bool),
+    Int(i64),
+    UInt(u64),
+    Float(f64),
+    String(String),
+    Identifier(Symbol),
+}
+
 fn parse_pattern(
     tokens: &mut TokenReader<'_>,
     config: &ParserConfig<'_>,
@@ -2192,6 +2215,7 @@ fn parse_pattern(
     ))
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_pattern_kind(
     tokens: &mut TokenReader<'_>,
     top_level: bool,
@@ -2283,6 +2307,11 @@ fn parse_pattern_kind(
             }
             pattern
         }
+        Token::Open(Paired::Brace) => {
+            tokens.next()?;
+
+            parse_map_destructure_pattern(indicator.range().start, tokens)?
+        }
         _ => return Ok(None),
     };
 
@@ -2328,6 +2357,58 @@ fn parse_tuple_destructure_pattern(
     } else {
         Err(closing_brace.map(|_| Error::ExpectedPatternOr(kind)))
     }
+}
+
+fn parse_map_destructure_pattern(
+    start: usize,
+    tokens: &mut TokenReader<'_>,
+) -> Result<Ranged<PatternKind>, Ranged<Error>> {
+    let mut entries = Vec::new();
+
+    if tokens.peek_token() == Some(Token::Char(',')) {
+        // Empty map
+        tokens.next()?;
+    } else {
+        while tokens
+            .peek_token()
+            .map_or(false, |token| token != Token::Close(Paired::Brace))
+        {
+            let token = tokens.next()?;
+            let key = match token.0 {
+                Token::Int(value) => Ranged::new(token.1, EntryKeyPattern::Int(value)),
+                Token::UInt(value) => Ranged::new(token.1, EntryKeyPattern::UInt(value)),
+                Token::Float(value) => Ranged::new(token.1, EntryKeyPattern::Float(value)),
+                Token::String(string) => Ranged::new(token.1, EntryKeyPattern::String(string)),
+                Token::Identifier(sym) | Token::Symbol(sym) => {
+                    Ranged::new(token.1, EntryKeyPattern::Identifier(sym))
+                }
+                _ => return Err(Ranged::new(token.1, Error::InvalidMapKeyPattern)),
+            };
+
+            let colon = tokens.next()?;
+            if colon.0 != Token::Char(':') {
+                return Err(colon.map(|_| Error::ExpectedColon));
+            }
+
+            let Some(value) = parse_pattern_kind(tokens, false)? else {
+                return Err(tokens.ranged(tokens.last_index.., Error::ExpectedPattern));
+            };
+            entries.push(tokens.ranged(key.range().start.., EntryPattern { key, value }));
+
+            if tokens.peek_token() == Some(Token::Char(',')) {
+                tokens.next()?;
+            } else {
+                break;
+            }
+        }
+    }
+
+    let end_brace = tokens.next()?;
+    if end_brace.0 != Token::Close(Paired::Brace) {
+        return Err(end_brace.map(|_| Error::MissingEnd(Paired::Brace)));
+    }
+
+    Ok(tokens.ranged(start.., PatternKind::DestructureMap(entries)))
 }
 
 fn parse_match_block_body(

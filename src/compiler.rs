@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 use crate::symbol::Symbol;
 use crate::syntax::{
     self, AssignTarget, BinaryExpression, BreakExpression, Chain, CompareKind, ContinueExpression,
-    Expression, FunctionCall, FunctionDefinition, Index, Literal, LogicalKind, LoopExpression,
-    LoopKind, MatchExpression, MatchPattern, Matches, PatternKind, Ranged, SourceCode, SourceRange,
-    TryExpression, UnaryExpression, Variable,
+    EntryKeyPattern, Expression, FunctionCall, FunctionDefinition, Index, Literal, LogicalKind,
+    LoopExpression, LoopKind, MatchExpression, MatchPattern, Matches, PatternKind, Ranged,
+    SourceCode, SourceRange, TryExpression, UnaryExpression, Variable,
 };
 use crate::vm::bitcode::{
     BinaryKind, BitcodeBlock, BitcodeFunction, FaultKind, Label, Op, OpDestination, ValueOrSource,
@@ -449,6 +449,7 @@ impl<'a> Scope<'a> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn compile_function(
         &mut self,
         decl: &FunctionDefinition,
@@ -499,7 +500,10 @@ impl<'a> Scope<'a> {
 
                 let parameters = match &body.pattern.kind.0 {
                     PatternKind::Any(None) => None,
-                    PatternKind::Any(_) | PatternKind::Literal(_) | PatternKind::Or(_, _) => {
+                    PatternKind::Any(_)
+                    | PatternKind::Literal(_)
+                    | PatternKind::Or(_, _)
+                    | PatternKind::DestructureMap(_) => {
                         Some(std::slice::from_ref(&body.pattern.kind))
                     }
                     PatternKind::DestructureTuple(patterns) => Some(&**patterns),
@@ -659,6 +663,7 @@ impl<'a> Scope<'a> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn compile_pattern_binding(
         &mut self,
         pattern: &Ranged<PatternKind>,
@@ -760,6 +765,54 @@ impl<'a> Scope<'a> {
 
                 Refutability::Refutable
             }
+            PatternKind::DestructureMap(entries) => {
+                let expected_count = u64::try_from(entries.len()).unwrap_or_else(|_| {
+                    self.compiler
+                        .errors
+                        .push(Ranged::new(pattern.range(), Error::UsizeTooLarge));
+                    u64::MAX
+                });
+
+                self.compiler
+                    .code
+                    .invoke(source.clone(), Symbol::len_symbol(), 0);
+                self.compiler.code.compare(
+                    CompareKind::Equal,
+                    Register(0),
+                    expected_count,
+                    Register(0),
+                );
+                self.compiler
+                    .code
+                    .jump_if_not(doesnt_match, Register(0), ());
+
+                let element = self.new_temporary();
+                for entry in entries {
+                    self.compiler.code.set_current_source_range(pattern.range());
+                    let key = match &entry.key.0 {
+                        EntryKeyPattern::Nil => ValueOrSource::Nil,
+                        EntryKeyPattern::Bool(value) => ValueOrSource::Bool(*value),
+                        EntryKeyPattern::Int(value) => ValueOrSource::Int(*value),
+                        EntryKeyPattern::UInt(value) => ValueOrSource::UInt(*value),
+                        EntryKeyPattern::Float(value) => ValueOrSource::Float(*value),
+                        EntryKeyPattern::String(value) => ValueOrSource::String(value.clone()),
+                        EntryKeyPattern::Identifier(value) => ValueOrSource::Symbol(value.clone()),
+                    };
+                    self.compiler.code.copy(key, Register(0));
+                    self.compiler
+                        .code
+                        .invoke(source.clone(), Symbol::get_symbol(), 1);
+                    self.compiler.code.copy(Register(0), element);
+                    self.compile_pattern_binding(
+                        &entry.value,
+                        ValueOrSource::Stack(element),
+                        doesnt_match,
+                        bindings,
+                    );
+                }
+
+                Refutability::Refutable
+            }
         }
     }
 
@@ -804,7 +857,10 @@ impl<'a> Scope<'a> {
 
             let parameters = match &matches.pattern.kind.0 {
                 PatternKind::Any(None) => None,
-                PatternKind::Any(_) | PatternKind::Literal(_) | PatternKind::Or(_, _) => {
+                PatternKind::Any(_)
+                | PatternKind::Literal(_)
+                | PatternKind::Or(_, _)
+                | PatternKind::DestructureMap(_) => {
                     Some(std::slice::from_ref(&matches.pattern.kind))
                 }
                 PatternKind::DestructureTuple(patterns) => Some(&**patterns),
@@ -910,15 +966,18 @@ impl<'a> Scope<'a> {
             .set_exception_handler(exception_error, previous_handler);
         tried(self);
         self.compiler.code.set_current_source_range(range);
-        self.compiler.code.jump(after_handler, ());
-
-        self.compiler.code.label(exception_error);
-        catch(self);
-        self.compiler.code.set_current_source_range(range);
-        self.compiler.code.label(after_handler);
         self.compiler
             .code
             .set_exception_handler(previous_handler, ());
+        self.compiler.code.jump(after_handler, ());
+
+        self.compiler.code.label(exception_error);
+        self.compiler
+            .code
+            .set_exception_handler(previous_handler, ());
+        catch(self);
+        self.compiler.code.set_current_source_range(range);
+        self.compiler.code.label(after_handler);
     }
 
     fn compile_break(&mut self, break_expr: &BreakExpression, from: SourceRange) {
@@ -1189,9 +1248,15 @@ impl<'a> Scope<'a> {
 
     fn declare_variable(&mut self, decl: &Variable, range: SourceRange, dest: OpDestination) {
         let value = self.compile_source(&decl.value);
+        self.compiler.code.set_current_source_range(range);
 
         let pattern_mismatch = self.compiler.code.new_label();
         let after_declare = self.compiler.code.new_label();
+        let previous_handler = self.new_temporary();
+        self.compiler
+            .code
+            .set_exception_handler(pattern_mismatch, previous_handler);
+
         let mut refutable = self.compile_pattern_binding(
             &decl.pattern.kind,
             value,
@@ -1209,12 +1274,18 @@ impl<'a> Scope<'a> {
             refutable = Refutability::Refutable;
             let guard = self.compile_source(guard);
             self.compiler.code.set_current_source_range(range);
-            self.compiler.code.jump_if(pattern_mismatch, guard, ());
+            self.compiler.code.jump_if_not(pattern_mismatch, guard, ());
         }
 
+        self.compiler
+            .code
+            .set_exception_handler(previous_handler, ());
         self.compiler.code.jump(after_declare, ());
 
         self.compiler.code.label(pattern_mismatch);
+        self.compiler
+            .code
+            .set_exception_handler(previous_handler, ());
 
         if let Some(r#else) = &decl.r#else {
             self.compile_expression(r#else, OpDestination::Void);

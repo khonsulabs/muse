@@ -70,6 +70,19 @@ super_public: {
     output: Int(42),
 }
 
+super_private_then_public: {
+    src: r#"
+        let a = 42;
+        mod foo {
+            pub fn test => super.a;
+        };
+        try { foo.test() };
+        pub let a = 43;
+        foo.test()
+    "#,
+    output: Int(43),
+}
+
 mutate_module_var: {
     src: r#"
         mod foo {

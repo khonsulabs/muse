@@ -258,14 +258,7 @@ impl Vm {
                     }
                 }
                 Err(err) => {
-                    if let Some(exception_target) = self.frames[code_frame].exception_handler {
-                        self[Register(0)] = err.as_exception(self);
-                        self.frames[code_frame].instruction = exception_target.get();
-                    } else if !err.is_execution_error() {
-                        return Err(Fault::Exception(err.as_exception(self)));
-                    } else {
-                        return Err(err);
-                    }
+                    self.handle_fault(err, base_frame)?;
                 }
             }
 
@@ -585,6 +578,34 @@ impl Vm {
             })
             .collect()
     }
+
+    fn handle_fault(&mut self, err: Fault, base_frame: usize) -> Result<(), Fault> {
+        if err.is_execution_error() {
+            return Err(err);
+        }
+        let exception = err.as_exception(self);
+        let mut handled = false;
+        while self.current_frame >= base_frame {
+            if let Some(exception_target) = self.frames[self.current_frame].exception_handler {
+                self[Register(0)] = err.as_exception(self);
+                self.frames[self.current_frame].instruction = exception_target.get();
+                handled = true;
+                break;
+            }
+
+            if self.current_frame == 0 {
+                break;
+            }
+
+            self.current_frame -= 1;
+        }
+
+        if handled {
+            Ok(())
+        } else {
+            Err(Fault::Exception(exception))
+        }
+    }
 }
 
 #[cfg(not(feature = "dispatched"))]
@@ -614,14 +635,7 @@ impl Vm {
                     }
                 }
                 Err(err) => {
-                    if let Some(exception_target) = self.frames[code_frame].exception_handler {
-                        self[Register(0)] = err.as_exception(self);
-                        self.frames[code_frame].instruction = exception_target.get();
-                    } else if !err.is_execution_error() {
-                        return Err(Fault::Exception(err.as_exception(self)));
-                    } else {
-                        return Err(err);
-                    }
+                    self.handle_fault(err, base_frame)?;
                 }
             }
 
@@ -649,7 +663,7 @@ impl Vm {
             Ordering::Equal => return Ok(StepResult::Complete),
             Ordering::Greater => return Err(Fault::InvalidInstructionAddress),
         };
-        // println!("Executing {instruction:?}");
+        println!("Executing {instruction:?}");
         let next_instruction = StepResult::from(address.checked_add(1));
         let result = match instruction {
             LoadedOp::Return => return Ok(StepResult::Complete),
@@ -1430,10 +1444,7 @@ pub enum Fault {
 
 impl Fault {
     fn is_execution_error(&self) -> bool {
-        matches!(
-            self,
-            Fault::NoBudget | Fault::Waiting | Fault::Timeout | Fault::Exception(_)
-        )
+        matches!(self, Fault::NoBudget | Fault::Waiting | Fault::Timeout)
     }
 
     #[must_use]

@@ -27,7 +27,7 @@ fn budgeting() {
 
 #[test]
 fn module_budgeting() {
-    const MAX_OPS: usize = 22;
+    const MAX_OPS: usize = 24;
     let code = Compiler::compile(&SourceCode::anonymous(
         r"
             mod foo {

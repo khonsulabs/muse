@@ -85,3 +85,27 @@ map_tuple_destructure: {
     src: r#"let ["a", 1] = {"a": 1}"#,
     output: Bool(true),
 }
+
+tuple_mismatch: {
+    src: r#"let (a, 1) = 1"#,
+    output: Fault(
+        Exception(
+            Exception {
+                value: Symbol("mismatch"),
+                backtrace: [
+                    SourceRange { source_id: SourceId(None), start: 0, length: 14 }
+                ]
+            }
+        )
+    ),
+}
+
+map_match: {
+    src: r#"let {"a": a} = {"a": 1}; a"#,
+    output: Int(1),
+}
+
+map_mismatch: {
+    src: r#"let {"a": a} = {"b": 1}; a"#,
+    output: Fault(Exception(Exception { value: Symbol("mismatch"), backtrace: [SourceRange { source_id: SourceId(None), start: 0, length: 23 }] })),
+}
