@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::fmt::{Debug, Write};
 use std::future::Future;
 use std::hash::Hash;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroUsize, TryFromIntError};
 use std::ops::{Deref, Index, IndexMut};
 use std::pin::{pin, Pin};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -227,6 +227,36 @@ impl Vm {
                 Err(other) => return Err(ExecutionError::new(other, self)),
                 Ok(value) => return Ok(value),
             }
+        }
+    }
+
+    pub fn invoke(
+        &mut self,
+        name: &Symbol,
+        params: impl InvokeArgs,
+    ) -> Result<Value, ExecutionError> {
+        let arity = params.load(self)?;
+
+        let module_dynamic = self.modules[0].clone();
+        let module_declarations = module_dynamic
+            .downcast_ref::<Module>()
+            .expect("always a module")
+            .declarations();
+        let function = module_declarations
+            .get(name)
+            .ok_or_else(|| ExecutionError::new(Fault::UnknownSymbol, self))?
+            .value
+            .clone();
+        drop(module_declarations);
+
+        let Some(function) = function.as_downcast_ref::<Function>() else {
+            return Err(ExecutionError::new(Fault::NotAFunction, self));
+        };
+
+        match function.call(self, &module_dynamic, arity) {
+            Ok(value) => Ok(value),
+            Err(Fault::FrameChanged) => self.resume(),
+            Err(other) => Err(ExecutionError::new(other, self)),
         }
     }
 
@@ -663,7 +693,7 @@ impl Vm {
             Ordering::Equal => return Ok(StepResult::Complete),
             Ordering::Greater => return Err(Fault::InvalidInstructionAddress),
         };
-        println!("Executing {instruction:?}");
+        // println!("Executing {instruction:?}");
         let next_instruction = StepResult::from(address.checked_add(1));
         let result = match instruction {
             LoadedOp::Return => return Ok(StepResult::Complete),
@@ -1569,6 +1599,14 @@ impl PartialEq<u8> for Arity {
     }
 }
 
+impl TryFrom<usize> for Arity {
+    type Error = TryFromIntError;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        u8::try_from(value).map(Self)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Code {
     data: Arc<CodeData>,
@@ -2101,5 +2139,22 @@ impl Debug for StackFrame {
             .field("code", &Arc::as_ptr(&self.code.data))
             .field("instruction", &self.instruction)
             .finish()
+    }
+}
+
+pub trait InvokeArgs {
+    fn load(self, vm: &mut Vm) -> Result<Arity, ExecutionError>;
+}
+
+impl<const N: usize> InvokeArgs for [Value; N] {
+    fn load(self, vm: &mut Vm) -> Result<Arity, ExecutionError> {
+        let arity = Arity::try_from(N)
+            .map_err(|_| ExecutionError::Exception(Fault::InvalidArity.as_exception(vm)))?;
+
+        for (arg, register) in self.iter().zip(0..arity.0) {
+            vm[Register(register)] = arg.clone();
+        }
+
+        Ok(arity)
     }
 }

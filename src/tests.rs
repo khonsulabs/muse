@@ -1,5 +1,8 @@
 use crate::compiler::Compiler;
+use crate::exception::Exception;
+use crate::symbol::Symbol;
 use crate::syntax::SourceCode;
+use crate::value::Value;
 use crate::vm::bitcode::BitcodeBlock;
 use crate::vm::{Code, ExecutionError, Register, Vm};
 
@@ -62,4 +65,37 @@ fn module_budgeting() {
     println!("Executed in {ops} steps");
     assert!(ops > 6);
     assert!(ops < MAX_OPS);
+}
+
+#[test]
+fn invoke() {
+    let code = Compiler::compile(&SourceCode::anonymous(
+        r"
+            pub fn test(n) => n * 2;
+            fn private(n) => n * 2;
+        ",
+    ))
+    .unwrap();
+    let mut vm = Vm::default();
+    vm.execute(&code).unwrap();
+
+    let Value::Int(result) = vm.invoke(&Symbol::from("test"), [Value::Int(3)]).unwrap() else {
+        unreachable!()
+    };
+    assert_eq!(result, 6);
+    let ExecutionError::Exception(exception) = vm
+        .invoke(&Symbol::from("private"), [Value::Int(3)])
+        .unwrap_err()
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        exception
+            .as_downcast_ref::<Exception>()
+            .expect("exception")
+            .value()
+            .as_symbol()
+            .expect("symbol"),
+        &Symbol::from("undefined"),
+    );
 }
