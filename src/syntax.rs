@@ -2136,13 +2136,16 @@ impl MatchPattern {
     #[must_use]
     pub(crate) fn arity(&self) -> Option<(u8, bool)> {
         match &self.pattern.kind.0 {
-            PatternKind::Any(None) => Some((0, true)),
+            PatternKind::Any(None) | PatternKind::AnyRemaining => Some((0, true)),
             PatternKind::Any(_)
             | PatternKind::Literal(_)
             | PatternKind::Or(_, _)
             | PatternKind::DestructureMap(_) => Some((1, false)),
             PatternKind::DestructureTuple(fields) => {
-                fields.len().try_into().ok().map(|count| (count, false))
+                let variable = fields
+                    .last()
+                    .map_or(false, |field| matches!(&field.0, PatternKind::AnyRemaining));
+                fields.len().try_into().ok().map(|count| (count, variable))
             }
         }
     }
@@ -2169,6 +2172,7 @@ impl From<Ranged<PatternKind>> for Ranged<Pattern> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PatternKind {
     Any(Option<Symbol>),
+    AnyRemaining,
     Literal(Literal),
     DestructureTuple(Vec<Ranged<PatternKind>>),
     DestructureMap(Vec<Ranged<EntryPattern>>),
@@ -2227,6 +2231,10 @@ fn parse_pattern_kind(
         Token::Char('_') => {
             tokens.next()?;
             indicator.map(|_| PatternKind::Any(None))
+        }
+        Token::Ellipses => {
+            tokens.next()?;
+            indicator.map(|_| PatternKind::AnyRemaining)
         }
         Token::Identifier(name) if name == Symbol::true_symbol() => {
             tokens.next()?;

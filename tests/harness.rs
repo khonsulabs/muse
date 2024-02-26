@@ -17,7 +17,7 @@ use serde::Deserialize;
 
 fn main() {
     let filter = std::env::args().nth(1).unwrap_or_default();
-    // let filter = String::from("try_throw_catch");
+    // let filter = String::from("tuple_remaining");
     for entry in std::fs::read_dir("tests/cases").unwrap() {
         let entry = entry.unwrap().path();
         if entry.extension().map_or(false, |ext| ext == "rsn") {

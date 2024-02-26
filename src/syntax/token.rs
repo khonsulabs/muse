@@ -41,6 +41,7 @@ pub enum Token {
     NotEqual,
     Range,
     RangeInclusive,
+    Ellipses,
     SlimArrow,
     FatArrow,
     NilCoalesce,
@@ -103,6 +104,7 @@ impl Hash for Token {
             | Token::NotEqual
             | Token::Range
             | Token::RangeInclusive
+            | Token::Ellipses
             | Token::SlimArrow
             | Token::FatArrow => {}
         }
@@ -229,11 +231,16 @@ impl Iterator for Tokens<'_> {
                 }
                 (start, '.') if self.chars.peek() == Some('.') => {
                     self.chars.next();
-                    if self.chars.peek() == Some('=') {
-                        self.chars.next();
-                        Ok(self.chars.ranged(start.., Token::RangeInclusive))
-                    } else {
-                        Ok(self.chars.ranged(start.., Token::Range))
+                    match self.chars.peek() {
+                        Some('=') => {
+                            self.chars.next();
+                            Ok(self.chars.ranged(start.., Token::RangeInclusive))
+                        }
+                        Some('.') => {
+                            self.chars.next();
+                            Ok(self.chars.ranged(start.., Token::Ellipses))
+                        }
+                        _ => Ok(self.chars.ranged(start.., Token::Range)),
                     }
                 }
                 (start, '*') if self.chars.peek() == Some('*') => {

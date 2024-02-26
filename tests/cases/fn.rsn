@@ -129,3 +129,14 @@ fn_any_params: {
     "#,
     output: Int(84),
 }
+
+fn_match_vararg: {
+    src: r#"
+        fn answer {
+            (1, ...) => 42,
+        };
+
+        answer(1,2,3)
+    "#,
+    output: Int(42),
+}

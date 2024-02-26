@@ -6,10 +6,14 @@ MatchBody: (<MatchPattern> (',' <MatchPattern>)*)?;
 MatchPattern: <GuardedPattern> '=>' <Expression>;
 GuardedPattern: <Pattern> ('if' <Expression>)?;
 Pattern: <PatternKind> ('|' <PatternKind>)*;
-PatternKind: <IdentifierPattern | TuplePattern | ListPattern>;
-IdentifierPattern: '_' | <Identifier>;
+PatternKind: <IdentifierPattern | TuplePattern | ListPattern | MapPattern>;
+IdentifierPattern: '_' | '...' | <Identifier>;
 TuplePattern: '(' (<Pattern> (',' <Pattern>)*)? ')';
 ListPattern: '[' (<Pattern> (',' <Pattern>)*)? ']';
+
+MapPattern: '{' (<EntryPattern> (',' <EntryPattern>)*)? ','? '}';
+EntryPattern: <EntryKeyPattern> ':' <Pattern>;
+EntryKeyPattern: <Identifier | Number | String | Symbol>;
 ```
 
 ## `match` expression
@@ -37,8 +41,9 @@ pattern is considered a match.
 
 A pattern can one one of four kinds:
 
-- Wildcard: `_` will match any value
+- Wildcard: `_` will match any value.
 - Named wildcard: Any identifier
+- Remaining Wildcard: `...` will match all remaining elements in a collection/
 - Tuple pattern: A comma separated list of patterns enclosed in parentheses.
 - List pattern: A comma separated list of patterns enclosed in square brackets.
 

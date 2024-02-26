@@ -144,15 +144,19 @@ Continue: 'continue' <Label>?;
 Break: 'break' <Label>? <Expression>?;
 Return: 'return' <Expression>?;
 
-Match: 'match' <Expression> <MatchBlock>;
-MatchBlock: '{' <MatchBody> '}';
+Match: 'match' <Expression> '{' <MatchBody> '}';
 MatchBody: (<MatchPattern> (',' <MatchPattern>)*)?;
 MatchPattern: <GuardedPattern> '=>' <Expression>;
 GuardedPattern: <Pattern> ('if' <Expression>)?;
-Pattern: <IdentifierPattern | TuplePattern | ListPattern>;
-IdentifierPattern: '_' | <Identifier>;
+Pattern: <PatternKind> ('|' <PatternKind>)*;
+PatternKind: <IdentifierPattern | TuplePattern | ListPattern | MapPattern>;
+IdentifierPattern: '_' | '...' | <Identifier>;
 TuplePattern: '(' (<Pattern> (',' <Pattern>)*)? ')';
 ListPattern: '[' (<Pattern> (',' <Pattern>)*)? ']';
+
+MapPattern: '{' (<EntryPattern> (',' <EntryPattern>)*)? ','? '}';
+EntryPattern: <EntryKeyPattern> ':' <Pattern>;
+EntryKeyPattern: <Identifier | Number | String | Symbol>;
 
 Try: 'try' <Expression> ('catch' <MatchBlock | SingleCatch | ArrowCatch>)?;
 SingleCatch: <GuardedPattern> <Block>;

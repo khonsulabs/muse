@@ -109,3 +109,11 @@ map_mismatch: {
     src: r#"let {"a": a} = {"b": 1}; a"#,
     output: Fault(Exception(Exception { value: Symbol("mismatch"), backtrace: [SourceRange { source_id: SourceId(None), start: 0, length: 23 }] })),
 }
+
+tuple_remaining: {
+    src: r#"match (1, 2, 3, 4) {
+        (1, 2) => false,
+        (1, ...) => true,
+    }"#,
+    output: Bool(true),
+}

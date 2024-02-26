@@ -499,7 +499,7 @@ impl<'a> Scope<'a> {
                     .set_exception_handler(next_body, previous_handler);
 
                 let parameters = match &body.pattern.kind.0 {
-                    PatternKind::Any(None) => None,
+                    PatternKind::Any(None) | PatternKind::AnyRemaining => None,
                     PatternKind::Any(_)
                     | PatternKind::Literal(_)
                     | PatternKind::Or(_, _)
@@ -694,6 +694,7 @@ impl<'a> Scope<'a> {
                 }
                 Refutability::Irrefutable
             }
+            PatternKind::AnyRemaining => Refutability::Irrefutable,
             PatternKind::Literal(literal) => self.compile_literal_binding(
                 literal,
                 pattern.range(),
@@ -749,6 +750,9 @@ impl<'a> Scope<'a> {
 
                 let element = self.new_temporary();
                 for (i, index) in (0..expected_count).zip(0_usize..) {
+                    if i == expected_count - 1 && matches!(&pattern.0, PatternKind::AnyRemaining) {
+                        break;
+                    }
                     self.compiler.code.set_current_source_range(pattern.range());
                     self.compiler.code.copy(i, Register(0));
                     self.compiler
@@ -856,7 +860,7 @@ impl<'a> Scope<'a> {
                 .set_exception_handler(next_pattern, previous_handler);
 
             let parameters = match &matches.pattern.kind.0 {
-                PatternKind::Any(None) => None,
+                PatternKind::Any(None) | PatternKind::AnyRemaining => None,
                 PatternKind::Any(_)
                 | PatternKind::Literal(_)
                 | PatternKind::Or(_, _)
@@ -867,7 +871,11 @@ impl<'a> Scope<'a> {
             };
 
             if let Some(parameters) = parameters {
-                if parameters.len() == conditions.len() {
+                if parameters.len() == conditions.len()
+                    || parameters
+                        .last()
+                        .map_or(false, |param| matches!(&param.0, PatternKind::AnyRemaining))
+                {
                     for (parameter, condition) in parameters.iter().zip(conditions) {
                         refutable |= pattern_block.compile_pattern_binding(
                             parameter,
@@ -881,8 +889,6 @@ impl<'a> Scope<'a> {
                         .code
                         .set_current_source_range(matches.range());
                 } else {
-                    // TODO once we support vararg style bindings this will need
-                    // to be updated.
                     pattern_block.compiler.code.jump(next_pattern, ());
                 }
             }
