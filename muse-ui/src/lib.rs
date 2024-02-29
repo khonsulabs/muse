@@ -62,7 +62,7 @@ impl CustomType for DynamicValue {
     fn call(
         &self,
         _vm: &mut Vm,
-        _this: &muse::value::Dynamic,
+        _this: &muse::value::AnyDynamic,
         arity: Arity,
     ) -> Result<Value, Fault> {
         if arity == 0 {
@@ -131,10 +131,10 @@ impl CustomType for DynamicValue {
 
     // All functions below are pass-throughs to the values contained.
 
-    fn deep_clone(&self) -> Option<muse::value::Dynamic> {
+    fn deep_clone(&self) -> Option<muse::value::AnyDynamic> {
         self.0
             .map_ref(|value| value.deep_clone())
-            .map(|value| muse::value::Dynamic::new(Self(Dynamic::new(value))))
+            .map(|value| muse::value::AnyDynamic::new(Self(Dynamic::new(value))))
     }
 }
 
@@ -147,10 +147,8 @@ fn numeric_kind(value: &Value) -> NumericKind {
 }
 
 fn map_dynamic_value<R>(value: &Value, map: impl FnOnce(&Value) -> R) -> R {
-    if let Some(dynamic) = value.as_dynamic() {
-        if let Some(dynamic) = dynamic.downcast_ref::<DynamicValue>() {
-            return dynamic.0.map_ref(map);
-        }
+    if let Some(dynamic) = value.as_downcast_ref::<DynamicValue>() {
+        return dynamic.0.map_ref(map);
     }
     map(value)
 }
@@ -163,10 +161,8 @@ fn linked_dynamic_value<R>(
 where
     R: PartialEq + Send + 'static,
 {
-    if let Some(dynamic) = value.as_dynamic() {
-        if let Some(dynamic) = dynamic.downcast_ref::<DynamicValue>() {
-            return dynamic.0.linked(map_to, map_from).into_value();
-        }
+    if let Some(dynamic) = value.as_downcast_ref::<DynamicValue>() {
+        return dynamic.0.linked(map_to, map_from).into_value();
     }
 
     CushyValue::Constant(map_to(value))

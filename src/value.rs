@@ -3,7 +3,8 @@ use std::cmp::Ordering;
 use std::fmt::Debug;
 use std::future::Future;
 use std::hash::{Hash, Hasher};
-use std::ops::Deref;
+use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::task::{Context, Poll};
@@ -25,7 +26,7 @@ pub enum Value {
     UInt(u64),
     Float(f64),
     Symbol(Symbol),
-    Dynamic(Dynamic),
+    Dynamic(AnyDynamic),
 }
 
 impl Value {
@@ -33,7 +34,7 @@ impl Value {
     where
         T: DynamicValue,
     {
-        Self::Dynamic(Dynamic::new(value))
+        Self::Dynamic(AnyDynamic::new(value))
     }
 
     #[must_use]
@@ -170,7 +171,7 @@ impl Value {
     }
 
     #[must_use]
-    pub fn as_dynamic(&self) -> Option<&Dynamic> {
+    pub fn as_dynamic(&self) -> Option<&AnyDynamic> {
         match self {
             Value::Dynamic(value) => Some(value),
             _ => None,
@@ -1025,14 +1026,39 @@ impl_try_from!(Value, isize, Int);
 impl_try_from!(Value, i128, UInt);
 
 #[derive(Clone)]
-pub struct Dynamic(Arc<Box<dyn DynamicValue>>);
+pub struct AnyDynamic(Arc<Box<dyn DynamicValue>>);
 
-impl Dynamic {
+impl AnyDynamic {
     pub fn new<T>(value: T) -> Self
     where
         T: DynamicValue,
     {
         Self(Arc::new(Box::new(value)))
+    }
+
+    #[must_use]
+    pub fn as_type<T>(&self) -> Option<Dynamic<T>>
+    where
+        T: DynamicValue,
+    {
+        self.downcast_ref::<T>().map(|_| Dynamic {
+            dynamic: self.clone(),
+            _t: PhantomData,
+        })
+    }
+
+    pub fn try_into_type<T>(self) -> Result<Dynamic<T>, Self>
+    where
+        T: DynamicValue,
+    {
+        let Some(_) = self.downcast_ref::<T>() else {
+            return Err(self);
+        };
+
+        Ok(Dynamic {
+            dynamic: self.clone(),
+            _t: PhantomData,
+        })
     }
 
     #[must_use]
@@ -1057,17 +1083,17 @@ impl Dynamic {
     }
 
     #[must_use]
-    pub fn downgrade(&self) -> WeakDynamic {
-        WeakDynamic(Arc::downgrade(&self.0))
+    pub fn downgrade(&self) -> WeakAnyDynamic {
+        WeakAnyDynamic(Arc::downgrade(&self.0))
     }
 
     #[must_use]
-    pub fn ptr_eq(a: &Dynamic, b: &Dynamic) -> bool {
+    pub fn ptr_eq(a: &AnyDynamic, b: &AnyDynamic) -> bool {
         Arc::ptr_eq(&a.0, &b.0)
     }
 
     #[must_use]
-    pub fn deep_clone(&self) -> Option<Dynamic> {
+    pub fn deep_clone(&self) -> Option<AnyDynamic> {
         self.0.deep_clone()
     }
 
@@ -1195,15 +1221,100 @@ impl Dynamic {
     }
 }
 
-impl Debug for Dynamic {
+impl Debug for AnyDynamic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         Debug::fmt(&**self.0, f)
     }
 }
 
+pub struct Dynamic<T>
+where
+    T: CustomType,
+{
+    dynamic: AnyDynamic,
+    _t: PhantomData<T>,
+}
+
+impl<T> Dynamic<T>
+where
+    T: CustomType,
+{
+    #[must_use]
+    pub fn new(value: T) -> Self {
+        Self {
+            dynamic: AnyDynamic::new(value),
+            _t: PhantomData,
+        }
+    }
+
+    #[must_use]
+    pub fn as_any_dynamic(&self) -> &AnyDynamic {
+        &self.dynamic
+    }
+
+    #[must_use]
+    pub fn downgrade(&self) -> WeakDynamic<T> {
+        WeakDynamic {
+            weak: self.dynamic.downgrade(),
+            _t: PhantomData,
+        }
+    }
+
+    #[must_use]
+    pub fn to_value(&self) -> Value {
+        Value::Dynamic(self.dynamic.clone())
+    }
+
+    #[must_use]
+    pub fn into_any_dynamic(self) -> AnyDynamic {
+        self.dynamic
+    }
+}
+
+impl<T> Debug for Dynamic<T>
+where
+    T: CustomType,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(&self.dynamic, f)
+    }
+}
+
+impl<T> Deref for Dynamic<T>
+where
+    T: CustomType,
+{
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.dynamic.downcast_ref().expect("type checked")
+    }
+}
+
+impl<T> DerefMut for Dynamic<T>
+where
+    T: CustomType,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.dynamic.downcast_mut().expect("type checked")
+    }
+}
+
+impl<T> Clone for Dynamic<T>
+where
+    T: CustomType,
+{
+    fn clone(&self) -> Self {
+        Self {
+            dynamic: self.dynamic.clone(),
+            _t: PhantomData,
+        }
+    }
+}
+
 pub trait CustomType: Send + Sync + Debug + 'static {
     #[allow(unused_variables)]
-    fn call(&self, vm: &mut Vm, this: &Dynamic, arity: Arity) -> Result<Value, Fault> {
+    fn call(&self, vm: &mut Vm, this: &AnyDynamic, arity: Arity) -> Result<Value, Fault> {
         Err(Fault::NotAFunction)
     }
 
@@ -1352,7 +1463,7 @@ pub trait CustomType: Send + Sync + Debug + 'static {
         Err(Fault::UnsupportedOperation)
     }
 
-    fn deep_clone(&self) -> Option<Dynamic> {
+    fn deep_clone(&self) -> Option<AnyDynamic> {
         None
     }
 }
@@ -1463,7 +1574,7 @@ impl<F> CustomType for RustFunction<F>
 where
     F: Fn(&mut Vm, Arity) -> Result<Value, Fault> + Send + Sync + 'static,
 {
-    fn call(&self, vm: &mut Vm, _this: &Dynamic, arity: Arity) -> Result<Value, Fault> {
+    fn call(&self, vm: &mut Vm, _this: &AnyDynamic, arity: Arity) -> Result<Value, Fault> {
         vm.enter_anonymous_frame()?;
         let result = self.0(vm, arity)?;
         vm.exit_frame()?;
@@ -1493,7 +1604,7 @@ where
     F: Fn(&mut Vm, Arity) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<Value, Fault>> + Send + Sync + 'static,
 {
-    fn call(&self, vm: &mut Vm, _this: &Dynamic, arity: Arity) -> Result<Value, Fault> {
+    fn call(&self, vm: &mut Vm, _this: &AnyDynamic, arity: Arity) -> Result<Value, Fault> {
         vm.enter_anonymous_frame()?;
         if vm.current_instruction() == 0 {
             let future = self.0(vm, arity);
@@ -1559,35 +1670,54 @@ where
 }
 
 #[derive(Debug, Clone)]
-pub struct WeakDynamic(Weak<Box<dyn DynamicValue>>);
+pub struct WeakAnyDynamic(Weak<Box<dyn DynamicValue>>);
 
-impl WeakDynamic {
-    pub fn upgrade(&self) -> Option<Dynamic> {
-        self.0.upgrade().map(Dynamic)
+impl WeakAnyDynamic {
+    pub fn upgrade(&self) -> Option<AnyDynamic> {
+        self.0.upgrade().map(AnyDynamic)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WeakDynamic<T> {
+    weak: WeakAnyDynamic,
+    _t: PhantomData<T>,
+}
+
+impl<T> WeakDynamic<T>
+where
+    T: CustomType,
+{
+    #[must_use]
+    pub fn upgrade(&self) -> Option<Dynamic<T>> {
+        self.weak.upgrade().map(|dynamic| Dynamic {
+            dynamic,
+            _t: PhantomData,
+        })
     }
 }
 
 #[test]
 fn dynamic() {
     impl CustomType for usize {
-        fn deep_clone(&self) -> Option<Dynamic> {
-            Some(Dynamic::new(*self))
+        fn deep_clone(&self) -> Option<AnyDynamic> {
+            Some(AnyDynamic::new(*self))
         }
     }
-    let mut dynamic = Dynamic::new(1_usize);
+    let mut dynamic = AnyDynamic::new(1_usize);
     assert_eq!(dynamic.downcast_ref::<usize>(), Some(&1));
     let dynamic2 = dynamic.clone();
-    assert!(Dynamic::ptr_eq(&dynamic, &dynamic2));
+    assert!(AnyDynamic::ptr_eq(&dynamic, &dynamic2));
     *dynamic.downcast_mut::<usize>().unwrap() = 2;
-    assert!(!Dynamic::ptr_eq(&dynamic, &dynamic2));
+    assert!(!AnyDynamic::ptr_eq(&dynamic, &dynamic2));
     assert_eq!(dynamic2.downcast_ref::<usize>(), Some(&1));
 }
 
 #[test]
 fn functions() {
-    let func = Value::Dynamic(Dynamic::new(RustFunction::new(|_vm: &mut Vm, _arity| {
-        Ok(Value::Int(1))
-    })));
+    let func = Value::Dynamic(AnyDynamic::new(RustFunction::new(
+        |_vm: &mut Vm, _arity| Ok(Value::Int(1)),
+    )));
     let mut runtime = Vm::default();
     let Value::Int(i) = func.call(&mut runtime, 0).unwrap() else {
         unreachable!()

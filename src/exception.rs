@@ -1,5 +1,5 @@
 use crate::symbol::Symbol;
-use crate::value::{CustomType, Dynamic, Value};
+use crate::value::{AnyDynamic, CustomType, Value};
 use crate::vm::{Fault, StackFrame, Vm};
 
 #[derive(Debug)]
@@ -50,9 +50,9 @@ impl CustomType for Exception {
         self.value.to_string(vm)
     }
 
-    fn deep_clone(&self) -> Option<Dynamic> {
+    fn deep_clone(&self) -> Option<AnyDynamic> {
         self.value.deep_clone().map(|value| {
-            Dynamic::new(Self {
+            AnyDynamic::new(Self {
                 value,
                 stack_trace: self.stack_trace.clone(),
             })

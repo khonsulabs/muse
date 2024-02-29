@@ -8,7 +8,7 @@ use regex::{Captures, Regex};
 use crate::string::MuseString;
 use crate::symbol::Symbol;
 use crate::syntax::token::RegexLiteral;
-use crate::value::{CustomType, Dynamic, StaticRustFunctionTable, Value, ValueHasher};
+use crate::value::{AnyDynamic, CustomType, StaticRustFunctionTable, Value, ValueHasher};
 use crate::vm::{Arity, Fault, Register, Vm};
 
 #[derive(Debug, Clone)]
@@ -122,8 +122,8 @@ impl CustomType for MuseRegex {
         Ok(Symbol::from(self.expr.as_str().to_string()))
     }
 
-    fn deep_clone(&self) -> Option<Dynamic> {
-        Some(Dynamic::new(self.clone()))
+    fn deep_clone(&self) -> Option<AnyDynamic> {
+        Some(AnyDynamic::new(self.clone()))
     }
 
     fn matches(&self, vm: &mut Vm, rhs: &Value) -> Result<bool, Fault> {
@@ -166,7 +166,7 @@ impl MuseCaptures {
                 capture
                     .map(|capture| {
                         Value::dynamic(MuseMatch {
-                            content: Dynamic::new(MuseString::from(&haystack[capture.range()])),
+                            content: AnyDynamic::new(MuseString::from(&haystack[capture.range()])),
                             start: capture.start(),
                         })
                     })
@@ -216,7 +216,7 @@ impl CustomType for MuseCaptures {
 
 #[derive(Clone, Debug)]
 pub struct MuseMatch {
-    pub content: Dynamic,
+    pub content: AnyDynamic,
     pub start: usize,
 }
 

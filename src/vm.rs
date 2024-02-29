@@ -32,7 +32,7 @@ use crate::string::MuseString;
 use crate::symbol::{IntoOptionSymbol, Symbol};
 use crate::syntax::token::RegexLiteral;
 use crate::syntax::{BitwiseKind, CompareKind, SourceRange};
-use crate::value::{CustomType, Dynamic, StaticRustFunctionTable, Value, WeakDynamic};
+use crate::value::{AnyDynamic, CustomType, Dynamic, StaticRustFunctionTable, Value, WeakDynamic};
 
 pub mod bitcode;
 
@@ -64,7 +64,7 @@ pub struct Vm {
     max_depth: usize,
     budget: Budget,
     execute_until: Option<Instant>,
-    modules: Vec<Dynamic>,
+    modules: Vec<Dynamic<Module>>,
     waker: Waker,
     parker: Parker,
     code: Vec<RegisteredCode>,
@@ -120,14 +120,14 @@ impl Clone for Vm {
 #[derive(Clone)]
 struct RegisteredCode {
     code: Code,
-    owner: Option<Dynamic>,
+    owner: Option<AnyDynamic>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 struct CodeIndex(usize);
 
 impl Vm {
-    fn push_code(&mut self, code: &Code, owner: Option<&Dynamic>) -> CodeIndex {
+    fn push_code(&mut self, code: &Code, owner: Option<&AnyDynamic>) -> CodeIndex {
         *self
             .code_map
             .entry(Arc::as_ptr(&code.data) as usize)
@@ -238,10 +238,7 @@ impl Vm {
         let arity = params.load(self)?;
 
         let module_dynamic = self.modules[0].clone();
-        let module_declarations = module_dynamic
-            .downcast_ref::<Module>()
-            .expect("always a module")
-            .declarations();
+        let module_declarations = module_dynamic.declarations();
         let function = module_declarations
             .get(name)
             .ok_or_else(|| ExecutionError::new(Fault::UnknownSymbol, self))?
@@ -253,7 +250,7 @@ impl Vm {
             return Err(ExecutionError::new(Fault::NotAFunction, self));
         };
 
-        match function.call(self, &module_dynamic, arity) {
+        match function.call(self, module_dynamic.as_any_dynamic(), arity) {
             Ok(value) => Ok(value),
             Err(Fault::FrameChanged) => self.resume(),
             Err(other) => Err(ExecutionError::new(other, self)),
@@ -351,7 +348,7 @@ impl Vm {
     fn execute_function(
         &mut self,
         body: &Code,
-        function: &Dynamic,
+        function: &AnyDynamic,
         module: usize,
     ) -> Result<Value, Fault> {
         let body_index = self.push_code(body, Some(function));
@@ -417,8 +414,6 @@ impl Vm {
         mutable: bool,
     ) -> Result<Option<Value>, Fault> {
         match self.modules[self.frames[self.current_frame].module]
-            .downcast_ref::<Module>()
-            .expect("always a module")
             .declarations()
             .entry(name.into())
         {
@@ -449,9 +444,7 @@ impl Vm {
                 .cloned()
                 .ok_or(Fault::OutOfBounds)
         } else {
-            let module = self.modules[self.frames[self.current_frame].module]
-                .downcast_ref::<Module>()
-                .expect("always a module");
+            let module = &self.modules[self.frames[self.current_frame].module];
             if let Some(value) = module
                 .declarations()
                 .get(name)
@@ -462,7 +455,7 @@ impl Vm {
                 Ok(module
                     .parent
                     .as_ref()
-                    .and_then(|parent| parent.upgrade().map(Value::Dynamic))
+                    .and_then(|parent| parent.upgrade().map(|parent| parent.to_value()))
                     .unwrap_or_default())
             } else {
                 Err(Fault::UnknownSymbol)
@@ -484,9 +477,7 @@ impl Vm {
                 Err(Fault::NotMutable)
             }
         } else {
-            let module = self.modules[self.frames[self.current_frame].module]
-                .downcast_ref::<Module>()
-                .expect("always a module");
+            let module = &self.modules[self.frames[self.current_frame].module];
             if let Some(decl) = module.declarations().get_mut(name) {
                 if decl.mutable {
                     decl.value = value;
@@ -908,7 +899,7 @@ impl Vm {
 
         self.op_store(
             code_index,
-            Value::Dynamic(self.modules[loading_module.get()].clone()),
+            self.modules[loading_module.get()].to_value(),
             dest,
         )?;
         Ok(())
@@ -1559,7 +1550,7 @@ impl Function {
 }
 
 impl CustomType for Function {
-    fn call(&self, vm: &mut Vm, this: &Dynamic, arity: Arity) -> Result<Value, Fault> {
+    fn call(&self, vm: &mut Vm, this: &AnyDynamic, arity: Arity) -> Result<Value, Fault> {
         if let Some(body) = self.bodies.get(&arity).or_else(|| {
             self.varg_bodies
                 .iter()
@@ -1573,8 +1564,8 @@ impl CustomType for Function {
         }
     }
 
-    fn deep_clone(&self) -> Option<Dynamic> {
-        Some(Dynamic::new(self.clone()))
+    fn deep_clone(&self) -> Option<AnyDynamic> {
+        Some(AnyDynamic::new(self.clone()))
     }
 }
 
@@ -1649,7 +1640,7 @@ struct CodeData {
     stack_requirement: usize,
     symbols: Vec<Symbol>,
     known_symbols: AHashMap<Symbol, usize>,
-    dynamics: Vec<Dynamic>,
+    dynamics: Vec<AnyDynamic>,
     functions: Vec<BitcodeFunction>,
     modules: Vec<BitcodeModule>,
     map: SourceMap,
@@ -1796,7 +1787,7 @@ impl CodeData {
         index
     }
 
-    fn push_dynamic(&mut self, dynamic: Dynamic) -> usize {
+    fn push_dynamic(&mut self, dynamic: AnyDynamic) -> usize {
         let index = self.dynamics.len();
         self.dynamics.push(dynamic);
         index
@@ -1832,7 +1823,7 @@ impl CodeData {
             ValueOrSource::Float(float) => LoadedSource::Float(*float),
             ValueOrSource::Symbol(sym) => LoadedSource::Symbol(self.push_symbol(sym.clone())),
             ValueOrSource::String(string) => LoadedSource::Dynamic(
-                self.push_dynamic(Dynamic::new(MuseString::from(string.as_str()))),
+                self.push_dynamic(AnyDynamic::new(MuseString::from(string.as_str()))),
             ),
             ValueOrSource::Regex(regex) => LoadedSource::Regex(self.push_regex(regex)),
             ValueOrSource::Register(reg) => LoadedSource::Register(*reg),
@@ -1888,7 +1879,7 @@ impl From<Option<usize>> for StepResult {
 
 #[derive(Default, Debug)]
 pub struct Module {
-    parent: Option<WeakDynamic>,
+    parent: Option<WeakDynamic<Module>>,
     declarations: Mutex<Map<Symbol, ModuleDeclaration>>,
 }
 

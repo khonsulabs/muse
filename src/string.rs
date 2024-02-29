@@ -5,7 +5,7 @@ use std::sync::{Mutex, MutexGuard};
 use crate::list::List;
 use crate::regex::MuseRegex;
 use crate::symbol::Symbol;
-use crate::value::{CustomType, Dynamic, StaticRustFunctionTable, Value, ValueHasher};
+use crate::value::{AnyDynamic, CustomType, StaticRustFunctionTable, Value, ValueHasher};
 use crate::vm::{Arity, Fault, Register, Vm};
 
 #[derive(Debug)]
@@ -162,8 +162,8 @@ impl CustomType for MuseString {
         Ok(Symbol::from(&*self.0.lock().expect("poisoned")))
     }
 
-    fn deep_clone(&self) -> Option<Dynamic> {
-        Some(Dynamic::new(Self(Mutex::new(
+    fn deep_clone(&self) -> Option<AnyDynamic> {
+        Some(AnyDynamic::new(Self(Mutex::new(
             self.0.lock().expect("poisoned").clone(),
         ))))
     }
