@@ -16,6 +16,7 @@ pub enum Token {
     Comment,
     Identifier(Symbol),
     Symbol(Symbol),
+    Sigil(Symbol),
     Label(Symbol),
     Int(i64),
     UInt(u64),
@@ -75,7 +76,9 @@ impl Hash for Token {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         core::mem::discriminant(self).hash(state);
         match self {
-            Token::Identifier(t) | Token::Label(t) | Token::Symbol(t) => t.hash(state),
+            Token::Identifier(t) | Token::Label(t) | Token::Symbol(t) | Token::Sigil(t) => {
+                t.hash(state);
+            }
             Token::Int(t) => t.hash(state),
             Token::UInt(t) => t.hash(state),
             Token::Float(t) => t.to_bits().hash(state),
@@ -206,6 +209,7 @@ impl Iterator for Tokens<'_> {
                 }
 
                 (start, '"') => self.tokenize_string(start),
+                (start, '$') => Ok(self.tokenize_sigil(start)),
                 (start, '@') if self.chars.peek().map_or(false, unicode_ident::is_xid_start) => {
                     let ch = self.chars.next().expect("just peekend").1;
                     Ok(self.tokenize_label(start, ch))
@@ -229,20 +233,7 @@ impl Iterator for Tokens<'_> {
                 (start, '.') if self.chars.peek().map_or(false, |ch| ch.is_ascii_digit()) => {
                     self.tokenize_number(start, '.')
                 }
-                (start, '.') if self.chars.peek() == Some('.') => {
-                    self.chars.next();
-                    match self.chars.peek() {
-                        Some('=') => {
-                            self.chars.next();
-                            Ok(self.chars.ranged(start.., Token::RangeInclusive))
-                        }
-                        Some('.') => {
-                            self.chars.next();
-                            Ok(self.chars.ranged(start.., Token::Ellipses))
-                        }
-                        _ => Ok(self.chars.ranged(start.., Token::Range)),
-                    }
-                }
+                (start, '.') if self.chars.peek() == Some('.') => Ok(self.tokenize_range(start)),
                 (start, '*') if self.chars.peek() == Some('*') => {
                     self.chars.next();
                     Ok(self.chars.ranged(start.., Token::Power))
@@ -318,6 +309,38 @@ impl<'a> Tokens<'a> {
     pub fn excluding_comments(mut self) -> Self {
         self.include_comments = false;
         self
+    }
+
+    fn tokenize_sigil(&mut self, start: usize) -> Ranged<Token> {
+        let symbol = if let Some(ch) = self
+            .chars
+            .peek()
+            .filter(|ch| unicode_ident::is_xid_start(*ch))
+        {
+            self.chars.next();
+            self.tokenize_identifier_symbol(start, ch)
+        } else {
+            self.chars.ranged(start.., Symbol::sigil_symbol().clone())
+        };
+
+        symbol.map(Token::Sigil)
+    }
+
+    fn tokenize_range(&mut self, start: usize) -> Ranged<Token> {
+        let second_dot = self.chars.next();
+        debug_assert!(matches!(second_dot, Some((_, '.'))));
+
+        match self.chars.peek() {
+            Some('=') => {
+                self.chars.next();
+                self.chars.ranged(start.., Token::RangeInclusive)
+            }
+            Some('.') => {
+                self.chars.next();
+                self.chars.ranged(start.., Token::Ellipses)
+            }
+            _ => self.chars.ranged(start.., Token::Range),
+        }
     }
 
     fn tokenize_number(

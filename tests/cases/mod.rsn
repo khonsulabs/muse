@@ -117,3 +117,16 @@ child_mod_private: {
     "#,
     output: Fault(Exception(Exception { value: Symbol("undefined"), backtrace: [SourceRange { source_id: SourceId(None), start: 106, length: 7 }] })),
 }
+
+sigil_root: {
+    src: r#"
+        mod foo {
+            pub mod bar {
+                pub fn baz() => $.value;
+            }
+        };
+        pub let value = 42;
+        foo.bar.baz()
+    "#,
+    output: Int(42),
+}

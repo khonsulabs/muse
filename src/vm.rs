@@ -435,34 +435,39 @@ impl Vm {
     }
 
     pub fn resolve(&mut self, name: &Symbol) -> Result<Value, Fault> {
-        if let Some(path) = name.strip_prefix("$.") {
+        if let Some(path) = name.strip_prefix('$') {
             let mut module = self.modules[0].clone();
             let mut path = path.split('.').peekable();
-            let name = loop {
-                let Some(name) = path.next() else {
-                    return Err(Fault::UnknownSymbol);
-                };
-                let name = Symbol::from(name);
-                if path.peek().is_some() {
-                    let declarations = module.declarations();
-                    let value = &declarations.get(&name).ok_or(Fault::UnknownSymbol)?.value;
-                    let Some(inner) = value.as_dynamic::<Module>() else {
-                        return Err(Fault::MissingModule);
+            path.next();
+            return if path.peek().is_none() {
+                Ok(module.to_value())
+            } else {
+                let name = loop {
+                    let Some(name) = path.next() else {
+                        return Err(Fault::UnknownSymbol);
                     };
-                    drop(declarations);
-                    module = inner;
-                } else {
-                    // Final path component
-                    break name;
-                }
-            };
+                    let name = Symbol::from(name);
+                    if path.peek().is_some() {
+                        let declarations = module.declarations();
+                        let value = &declarations.get(&name).ok_or(Fault::UnknownSymbol)?.value;
+                        let Some(inner) = value.as_dynamic::<Module>() else {
+                            return Err(Fault::MissingModule);
+                        };
+                        drop(declarations);
+                        module = inner;
+                    } else {
+                        // Final path component
+                        break name;
+                    }
+                };
 
-            return Ok(module
-                .declarations()
-                .get(&name)
-                .ok_or(Fault::UnknownSymbol)?
-                .value
-                .clone());
+                Ok(module
+                    .declarations()
+                    .get(&name)
+                    .ok_or(Fault::UnknownSymbol)?
+                    .value
+                    .clone())
+            };
         }
 
         let current_frame = &self.frames[self.current_frame];
@@ -712,7 +717,7 @@ impl Vm {
             Ordering::Equal => return Ok(StepResult::Complete),
             Ordering::Greater => return Err(Fault::InvalidInstructionAddress),
         };
-        // println!("Executing {instruction:?}");
+        println!("Executing {instruction:?}");
         let next_instruction = StepResult::from(address.checked_add(1));
         let result = match instruction {
             LoadedOp::Return => return Ok(StepResult::Complete),

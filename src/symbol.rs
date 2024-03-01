@@ -53,6 +53,7 @@ static_symbols!(
     pub_symbol => "pub",
     return_symbol => "return",
     set_symbol => "set",
+    sigil_symbol => "$",
     super_symbol => "super",
     then_symbol => "then",
     throw_symbol => "throw",

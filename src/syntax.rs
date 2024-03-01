@@ -180,6 +180,7 @@ impl From<(SourceId, RangeInclusive<usize>)> for SourceRange {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
+    RootModule,
     Literal(Literal),
     Lookup(Box<Lookup>),
     If(Box<IfExpression>),
@@ -971,6 +972,7 @@ impl Parselet for Term {
                 | Token::Regex(_)
                 | Token::String(_)
                 | Token::Symbol(_)
+                | Token::Sigil(_)
         )
     }
 }
@@ -1011,6 +1013,13 @@ impl PrefixParselet for Term {
                 token.1,
                 Expression::Literal(Literal::Symbol(sym)),
             )),
+            Token::Sigil(sym) => {
+                if &sym == Symbol::sigil_symbol() {
+                    Ok(Ranged::new(token.1, Expression::RootModule))
+                } else {
+                    todo!("macro!!!!!")
+                }
+            }
             _ => unreachable!("parse called with invalid token"),
         }
     }

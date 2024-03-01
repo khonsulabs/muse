@@ -191,6 +191,11 @@ impl<'a> Scope<'a> {
     fn compile_expression(&mut self, expr: &Ranged<Expression>, dest: OpDestination) {
         self.compiler.code.set_current_source_range(expr.range());
         match &**expr {
+            Expression::RootModule => {
+                self.compiler
+                    .code
+                    .resolve(Symbol::sigil_symbol().clone(), dest);
+            }
             Expression::Literal(literal) => self.compile_literal(literal, dest),
             Expression::Lookup(lookup) => {
                 if let Some(base) = &lookup.base {
@@ -1371,7 +1376,8 @@ impl<'a> Scope<'a> {
             | Expression::Binary(_)
             | Expression::Module(_)
             | Expression::Function(_)
-            | Expression::Variable(_) => Err(expr.1),
+            | Expression::Variable(_)
+            | Expression::RootModule => Err(expr.1),
         }
     }
 
@@ -1617,6 +1623,7 @@ impl<'a> Scope<'a> {
             | Expression::Loop(_)
             | Expression::Break(_)
             | Expression::Continue(_)
+            | Expression::RootModule
             | Expression::Return(_) => {
                 ValueOrSource::Stack(self.compile_expression_into_temporary(source))
             }
