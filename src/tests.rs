@@ -1,7 +1,8 @@
 use crate::compiler::Compiler;
 use crate::exception::Exception;
 use crate::symbol::Symbol;
-use crate::syntax::SourceCode;
+use crate::syntax::token::Token;
+use crate::syntax::{Ranged, SourceCode, SourceRange};
 use crate::value::Value;
 use crate::vm::bitcode::BitcodeBlock;
 use crate::vm::{Code, ExecutionError, Register, Vm};
@@ -98,4 +99,25 @@ fn invoke() {
             .expect("symbol"),
         &Symbol::from("undefined"),
     );
+}
+
+#[test]
+fn macros() {
+    let code = Compiler::default()
+        .with_macro("$test", |mut tokens: Vec<Ranged<Token>>| {
+            tokens.insert(1, Ranged::new(SourceRange::default(), Token::Char('+')));
+            tokens
+        })
+        .with(&SourceCode::anonymous(
+            r"
+                let hello = 5;
+                let world = 3;
+                $test(hello world)
+            ",
+        ))
+        .build()
+        .unwrap();
+    let mut vm = Vm::default();
+    let result = vm.execute(&code).unwrap().as_u64();
+    assert_eq!(result, Some(8));
 }

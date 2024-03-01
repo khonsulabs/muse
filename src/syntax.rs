@@ -204,6 +204,7 @@ pub enum Expression {
     Module(Box<ModuleDefinition>),
     Function(Box<FunctionDefinition>),
     Variable(Box<Variable>),
+    Macro(Box<MacroInvocation>),
 }
 
 impl Default for Expression {
@@ -261,7 +262,7 @@ pub struct Block {
 
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct MapExpression {
-    pub values: Vec<MapField>,
+    pub fields: Vec<MapField>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -373,6 +374,12 @@ pub enum AssignTarget {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct MacroInvocation {
+    pub name: Symbol,
+    pub tokens: Vec<Ranged<Token>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct UnaryExpression {
     pub kind: UnaryKind,
     pub operand: Ranged<Expression>,
@@ -444,9 +451,15 @@ pub struct Variable {
     pub r#else: Option<Ranged<Expression>>,
 }
 
-pub fn parse(source: &SourceCode<'_>) -> Result<Ranged<Expression>, Ranged<Error>> {
-    let mut tokens = TokenReader::new(source);
+pub fn parse_tokens(source: Vec<Ranged<Token>>) -> Result<Ranged<Expression>, Ranged<Error>> {
+    parse_from_reader(TokenReader::from(source))
+}
 
+pub fn parse(source: &SourceCode<'_>) -> Result<Ranged<Expression>, Ranged<Error>> {
+    parse_from_reader(TokenReader::new(source))
+}
+
+fn parse_from_reader(mut tokens: TokenReader<'_>) -> Result<Ranged<Expression>, Ranged<Error>> {
     let parselets = parselets();
     let config = ParserConfig {
         parselets: &parselets,
@@ -482,8 +495,36 @@ pub fn parse(source: &SourceCode<'_>) -> Result<Ranged<Expression>, Ranged<Error
     Ok(Chain::from_expressions(results))
 }
 
+enum TokenStream<'a> {
+    List {
+        tokens: VecDeque<Ranged<Token>>,
+        range: SourceRange,
+    },
+    Tokens(Tokens<'a>),
+}
+
+impl TokenStream<'_> {
+    fn source(&self) -> SourceId {
+        match self {
+            TokenStream::List { range, .. } => range.source_id,
+            TokenStream::Tokens(tokens) => tokens.source(),
+        }
+    }
+}
+
+impl Iterator for TokenStream<'_> {
+    type Item = Result<Ranged<Token>, Ranged<token::Error>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            TokenStream::List { tokens, .. } => tokens.pop_front().map(Ok),
+            TokenStream::Tokens(tokens) => tokens.next(),
+        }
+    }
+}
+
 struct TokenReader<'a> {
-    tokens: Tokens<'a>,
+    tokens: TokenStream<'a>,
     peeked: VecDeque<Result<Ranged<Token>, Ranged<Error>>>,
     last_index: usize,
 }
@@ -491,9 +532,11 @@ struct TokenReader<'a> {
 impl<'a> TokenReader<'a> {
     pub fn new(source: &SourceCode<'a>) -> Self {
         Self {
-            tokens: Tokens::new(source)
-                .excluding_comments()
-                .excluding_whitespace(),
+            tokens: TokenStream::Tokens(
+                Tokens::new(source)
+                    .excluding_comments()
+                    .excluding_whitespace(),
+            ),
             peeked: VecDeque::with_capacity(2),
             last_index: 0,
         }
@@ -527,12 +570,45 @@ impl<'a> TokenReader<'a> {
                 self.ranged(self.last_index..self.last_index, Error::UnexpectedEof)
             })??
         };
+        // TODO this should only track if the source matches, which only will
+        // differ when macros are involved
         self.last_index = token.1.start + token.1.length;
         Ok(token)
     }
 
     fn ranged<T>(&self, range: impl RangeBounds<usize>, value: T) -> Ranged<T> {
         Ranged::bounded(self.tokens.source(), range, self.last_index, value)
+    }
+}
+
+impl From<Vec<Ranged<Token>>> for TokenReader<'_> {
+    fn from(tokens: Vec<Ranged<Token>>) -> Self {
+        let mut iter = tokens.iter().map(|t| t.1);
+        let range = iter
+            .next()
+            .map(|first| {
+                let start = first.start;
+                let end = first.end();
+                let (start, end) = iter
+                    .filter(|t| t.source_id == first.source_id)
+                    .fold((start, end), |(start, end), range| {
+                        (start.min(range.start), end.max(range.end()))
+                    });
+                SourceRange {
+                    source_id: first.source_id,
+                    start,
+                    length: end - start,
+                }
+            })
+            .unwrap_or_default();
+        Self {
+            tokens: TokenStream::List {
+                tokens: VecDeque::from(tokens),
+                range,
+            },
+            peeked: VecDeque::new(),
+            last_index: 0,
+        }
     }
 }
 
@@ -981,7 +1057,7 @@ impl PrefixParselet for Term {
     fn parse_prefix(
         &self,
         token: Ranged<Token>,
-        _tokens: &mut TokenReader<'_>,
+        tokens: &mut TokenReader<'_>,
         _config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
         match token.0 {
@@ -1017,12 +1093,51 @@ impl PrefixParselet for Term {
                 if &sym == Symbol::sigil_symbol() {
                     Ok(Ranged::new(token.1, Expression::RootModule))
                 } else {
-                    todo!("macro!!!!!")
+                    let contents = gather_macro_tokens(tokens)?;
+                    Ok(tokens.ranged(
+                        token.1.start..,
+                        Expression::Macro(Box::new(MacroInvocation {
+                            name: sym,
+                            tokens: contents,
+                        })),
+                    ))
                 }
             }
             _ => unreachable!("parse called with invalid token"),
         }
     }
+}
+
+fn gather_macro_tokens(tokens: &mut TokenReader<'_>) -> Result<Vec<Ranged<Token>>, Ranged<Error>> {
+    let Some(Token::Open(paired)) = tokens.peek_token() else {
+        return Ok(Vec::new());
+    };
+    tokens.next()?;
+
+    let mut stack = vec![paired];
+    let mut contents = Vec::new();
+
+    loop {
+        let token = tokens.next()?;
+        match &token.0 {
+            Token::Open(next) => stack.push(*next),
+            Token::Close(kind) => {
+                let last_open = stack[stack.len() - 1];
+                if *kind == last_open {
+                    stack.pop();
+                    if stack.is_empty() {
+                        break;
+                    }
+                } else {
+                    return Err(token.map(|_| Error::MissingEnd(last_open)));
+                }
+            }
+            _ => {}
+        }
+        contents.push(token);
+    }
+
+    Ok(contents)
 }
 
 macro_rules! impl_prefix_unary_parselet {
@@ -1229,9 +1344,10 @@ impl Braces {
         }
 
         match tokens.next() {
-            Ok(Ranged(Token::Close(Paired::Brace), _)) => {
-                Ok(tokens.ranged(start.., Expression::Map(Box::new(MapExpression { values }))))
-            }
+            Ok(Ranged(Token::Close(Paired::Brace), _)) => Ok(tokens.ranged(
+                start..,
+                Expression::Map(Box::new(MapExpression { fields: values })),
+            )),
             Ok(Ranged(_, range)) | Err(Ranged(_, range)) => {
                 Err(Ranged::new(range, Error::MissingEnd(Paired::Brace)))
             }
@@ -1267,9 +1383,10 @@ impl Braces {
         }
 
         match tokens.next() {
-            Ok(Ranged(Token::Close(Paired::Brace), _)) => {
-                Ok(tokens.ranged(start.., Expression::Map(Box::new(MapExpression { values }))))
-            }
+            Ok(Ranged(Token::Close(Paired::Brace), _)) => Ok(tokens.ranged(
+                start..,
+                Expression::Map(Box::new(MapExpression { fields: values })),
+            )),
             Ok(Ranged(_, range)) | Err(Ranged(_, range)) => {
                 Err(Ranged::new(range, Error::MissingEnd(Paired::Brace)))
             }

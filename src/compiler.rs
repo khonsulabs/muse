@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 use std::ops::{BitOr, BitOrAssign, Range};
 use std::sync::Arc;
 
@@ -7,10 +7,11 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::symbol::Symbol;
+use crate::syntax::token::Token;
 use crate::syntax::{
     self, AssignTarget, BinaryExpression, BreakExpression, Chain, CompareKind, ContinueExpression,
     EntryKeyPattern, Expression, FunctionCall, FunctionDefinition, Index, Literal, LogicalKind,
-    LoopExpression, LoopKind, MatchExpression, MatchPattern, Matches, PatternKind, Ranged,
+    Lookup, LoopExpression, LoopKind, MatchExpression, MatchPattern, Matches, PatternKind, Ranged,
     SourceCode, SourceRange, TryExpression, UnaryExpression, Variable,
 };
 use crate::vm::bitcode::{
@@ -26,16 +27,37 @@ pub struct Compiler {
     code: BitcodeBlock,
     declarations: Map<Symbol, BlockDeclaration>,
     scopes: Vec<ScopeInfo>,
+    macros: Map<Symbol, Macro>,
 }
 
 impl Compiler {
     pub fn push(&mut self, source: &SourceCode<'_>) {
-        self.parsed.push(syntax::parse(source));
+        let mut parsed = syntax::parse(source);
+        if let Ok(parsed) = &mut parsed {
+            self.expand_macros(parsed);
+        }
+        self.parsed.push(parsed);
     }
 
     #[must_use]
     pub fn with(mut self, source: &SourceCode<'_>) -> Self {
         self.push(source);
+        self
+    }
+
+    pub fn push_macro<M>(&mut self, name: impl Into<Symbol>, func: M)
+    where
+        M: MacroFn + 'static,
+    {
+        self.macros.insert(name.into(), Macro(Box::new(func)));
+    }
+
+    #[must_use]
+    pub fn with_macro<M>(mut self, name: impl Into<Symbol>, func: M) -> Self
+    where
+        M: MacroFn + 'static,
+    {
+        self.push_macro(name, func);
         self
     }
 
@@ -70,6 +92,168 @@ impl Compiler {
         let id = self.code.stack_requirement;
         self.code.stack_requirement += 1;
         Stack(id)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub fn expand_macros(&mut self, expr: &mut Ranged<Expression>) {
+        match &mut expr.0 {
+            Expression::Macro(e) => {
+                if let Some(m) = self.macros.get_mut(dbg!(&e.name)) {
+                    let tokens = std::mem::take(&mut e.tokens);
+                    match syntax::parse_tokens(m.0.transform(tokens)) {
+                        Ok(mut expanded) => {
+                            self.expand_macros(&mut expanded);
+                            *expr = expanded;
+                        }
+                        Err(err) => {
+                            // TODO: different error message since it's caused
+                            // inside of a macro expansion?
+                            self.errors.push(err.map(Error::Syntax));
+                            expr.0 = Expression::Literal(Literal::Nil);
+                        }
+                    }
+                } else {
+                    todo!("unknown macro")
+                }
+            }
+            Expression::RootModule | Expression::Literal(_) | Expression::Continue(_) => {}
+            Expression::Lookup(e) => {
+                self.expand_macros_in_lookup(e);
+            }
+            Expression::If(e) => {
+                self.expand_macros(&mut e.condition);
+                self.expand_macros(&mut e.when_true);
+                if let Some(when_false) = &mut e.when_false {
+                    self.expand_macros(when_false);
+                }
+            }
+            Expression::Match(e) => {
+                self.expand_macros(&mut e.condition);
+
+                self.expand_macros_in_matches(&mut e.matches);
+            }
+            Expression::Try(e) => {
+                self.expand_macros(&mut e.body);
+                if let Some(matches) = &mut e.catch {
+                    self.expand_macros_in_matches(matches);
+                }
+            }
+            Expression::TryOrNil(e) => {
+                self.expand_macros(&mut e.body);
+            }
+            Expression::Throw(e) => {
+                self.expand_macros(e);
+            }
+            Expression::Map(e) => {
+                for field in &mut e.fields {
+                    self.expand_macros(&mut field.key);
+                    self.expand_macros(&mut field.value);
+                }
+            }
+            Expression::Tuple(e) | Expression::List(e) => {
+                for value in e {
+                    self.expand_macros(value);
+                }
+            }
+            Expression::Call(e) => {
+                for value in &mut e.parameters {
+                    self.expand_macros(value);
+                }
+            }
+            Expression::Index(e) => {
+                self.expand_macros_in_index(e);
+            }
+            Expression::Assign(e) => {
+                match &mut e.target.0 {
+                    AssignTarget::Index(index) => self.expand_macros_in_index(index),
+                    AssignTarget::Lookup(lookup) => self.expand_macros_in_lookup(lookup),
+                }
+                self.expand_macros(&mut e.value);
+            }
+            Expression::Unary(e) => self.expand_macros(&mut e.operand),
+            Expression::Binary(e) => {
+                self.expand_macros(&mut e.left);
+                self.expand_macros(&mut e.right);
+            }
+            Expression::Block(e) => {
+                self.expand_macros(&mut e.body);
+            }
+            Expression::Loop(e) => {
+                match &mut e.kind {
+                    LoopKind::Infinite => {}
+                    LoopKind::While(condition) | LoopKind::TailWhile(condition) => {
+                        self.expand_macros(condition);
+                    }
+                    LoopKind::For { pattern, source } => {
+                        if let Some(guard) = &mut pattern.guard {
+                            self.expand_macros(guard);
+                        }
+                        self.expand_macros(source);
+                    }
+                }
+                self.expand_macros(&mut e.block.body);
+            }
+            Expression::Break(e) => self.expand_macros(&mut e.value),
+            Expression::Return(e) => self.expand_macros(e),
+            Expression::Module(e) => {
+                self.expand_macros(&mut e.contents);
+            }
+            Expression::Function(e) => {
+                self.expand_macros_in_matches(&mut e.body);
+            }
+            Expression::Variable(e) => {
+                self.expand_macros(&mut e.value);
+                if let Some(guard) = &mut e.pattern.guard {
+                    self.expand_macros(guard);
+                }
+                if let Some(else_expr) = &mut e.r#else {
+                    self.expand_macros(else_expr);
+                }
+            }
+        }
+    }
+
+    fn expand_macros_in_lookup(&mut self, e: &mut Lookup) {
+        if let Some(base) = &mut e.base {
+            self.expand_macros(base);
+        }
+    }
+
+    fn expand_macros_in_index(&mut self, e: &mut Index) {
+        self.expand_macros(&mut e.target);
+        for value in &mut e.parameters {
+            self.expand_macros(value);
+        }
+    }
+
+    fn expand_macros_in_matches(&mut self, matches: &mut Matches) {
+        for pattern in &mut matches.patterns {
+            if let Some(guard) = &mut pattern.pattern.guard {
+                self.expand_macros(guard);
+            }
+            self.expand_macros(&mut pattern.body);
+        }
+    }
+}
+
+pub trait MacroFn: Send + Sync {
+    fn transform(&mut self, tokens: Vec<Ranged<Token>>) -> Vec<Ranged<Token>>;
+}
+
+impl<F> MacroFn for F
+where
+    F: FnMut(Vec<Ranged<Token>>) -> Vec<Ranged<Token>> + Send + Sync,
+{
+    fn transform(&mut self, tokens: Vec<Ranged<Token>>) -> Vec<Ranged<Token>> {
+        self(tokens)
+    }
+}
+
+pub struct Macro(Box<dyn MacroFn>);
+
+impl Debug for Macro {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Macro").finish_non_exhaustive()
     }
 }
 
@@ -245,8 +429,8 @@ impl<'a> Scope<'a> {
                 }
             }
             Expression::Map(map) => {
-                let mut elements = Vec::with_capacity(map.values.len());
-                for field in &map.values {
+                let mut elements = Vec::with_capacity(map.fields.len());
+                for field in &map.fields {
                     let key = self.compile_expression_into_temporary(&field.key);
                     let value = self.compile_expression_into_temporary(&field.value);
                     elements.push((key, value));
@@ -435,6 +619,7 @@ impl<'a> Scope<'a> {
 
                 self.compiler.errors.append(&mut mod_compiler.errors);
             }
+            Expression::Macro(_) => unreachable!("macros should be expanded already"),
         }
     }
 
@@ -1378,6 +1563,7 @@ impl<'a> Scope<'a> {
             | Expression::Function(_)
             | Expression::Variable(_)
             | Expression::RootModule => Err(expr.1),
+            Expression::Macro(_) => unreachable!("macros should be expanded already"),
         }
     }
 
@@ -1627,6 +1813,7 @@ impl<'a> Scope<'a> {
             | Expression::Return(_) => {
                 ValueOrSource::Stack(self.compile_expression_into_temporary(source))
             }
+            Expression::Macro(_) => unreachable!("macros should be expanded already"),
         }
     }
 

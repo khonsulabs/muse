@@ -312,13 +312,8 @@ impl<'a> Tokens<'a> {
     }
 
     fn tokenize_sigil(&mut self, start: usize) -> Ranged<Token> {
-        let symbol = if let Some(ch) = self
-            .chars
-            .peek()
-            .filter(|ch| unicode_ident::is_xid_start(*ch))
-        {
-            self.chars.next();
-            self.tokenize_identifier_symbol(start, ch)
+        let symbol = if self.chars.peek().map_or(false, unicode_ident::is_xid_start) {
+            self.tokenize_identifier_symbol(start, '$')
         } else {
             self.chars.ranged(start.., Symbol::sigil_symbol().clone())
         };
