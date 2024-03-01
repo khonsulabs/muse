@@ -1828,8 +1828,6 @@ pub enum UnaryKind {
     Copy,
     Resolve,
     Jump,
-    NewMap,
-    NewList,
     SetExceptionHandler,
 }
 

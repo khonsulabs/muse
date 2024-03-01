@@ -23,16 +23,14 @@ use self::bitcode::{
 };
 use crate::compiler::{BitcodeModule, BlockDeclaration, SourceMap, UnaryKind};
 use crate::exception::Exception;
-#[cfg(not(feature = "dispatched"))]
-use crate::list::List;
-#[cfg(not(feature = "dispatched"))]
-use crate::map;
 use crate::regex::MuseRegex;
 use crate::string::MuseString;
 use crate::symbol::{IntoOptionSymbol, Symbol};
 use crate::syntax::token::RegexLiteral;
 use crate::syntax::{BitwiseKind, CompareKind, SourceRange};
-use crate::value::{AnyDynamic, CustomType, Dynamic, StaticRustFunctionTable, Value, WeakDynamic};
+use crate::value::{
+    AnyDynamic, CustomType, Dynamic, RustType, StaticRustFunctionTable, Value, WeakDynamic,
+};
 
 pub mod bitcode;
 
@@ -85,7 +83,7 @@ impl Default for Vm {
             max_depth: usize::MAX,
             budget: Budget::default(),
             execute_until: None,
-            modules: vec![Dynamic::new(Module::default())],
+            modules: vec![Module::with_core()],
             waker: Waker::from(Arc::new(VmWaker(unparker))),
             parker,
             code: Vec::new(),
@@ -246,11 +244,11 @@ impl Vm {
             .clone();
         drop(module_declarations);
 
-        let Some(function) = function.as_downcast_ref::<Function>() else {
+        let Some(function) = function.as_dynamic::<Function>() else {
             return Err(ExecutionError::new(Fault::NotAFunction, self));
         };
 
-        match function.call(self, module_dynamic.as_any_dynamic(), arity) {
+        match function.as_any_dynamic().call(self, arity) {
             Ok(value) => Ok(value),
             Err(Fault::FrameChanged) => self.resume(),
             Err(other) => Err(ExecutionError::new(other, self)),
@@ -436,7 +434,37 @@ impl Vm {
         self.declare_inner(name, Value::dynamic(function), true)
     }
 
-    pub fn resolve(&self, name: &Symbol) -> Result<Value, Fault> {
+    pub fn resolve(&mut self, name: &Symbol) -> Result<Value, Fault> {
+        if let Some(path) = name.strip_prefix("$.") {
+            let mut module = self.modules[0].clone();
+            let mut path = path.split('.').peekable();
+            let name = loop {
+                let Some(name) = path.next() else {
+                    return Err(Fault::UnknownSymbol);
+                };
+                let name = Symbol::from(name);
+                if path.peek().is_some() {
+                    let declarations = module.declarations();
+                    let value = &declarations.get(&name).ok_or(Fault::UnknownSymbol)?.value;
+                    let Some(inner) = value.as_dynamic::<Module>() else {
+                        return Err(Fault::MissingModule);
+                    };
+                    drop(declarations);
+                    module = inner;
+                } else {
+                    // Final path component
+                    break name;
+                }
+            };
+
+            return Ok(module
+                .declarations()
+                .get(&name)
+                .ok_or(Fault::UnknownSymbol)?
+                .value
+                .clone());
+        }
+
         let current_frame = &self.frames[self.current_frame];
         if let Some(decl) = current_frame.variables.get(name) {
             self.current_frame()
@@ -707,8 +735,6 @@ impl Vm {
             LoadedOp::Copy(loaded) => self.op_copy(code_index, loaded.op, loaded.dest),
             LoadedOp::Resolve(loaded) => self.op_resolve(code_index, loaded.op, loaded.dest),
             LoadedOp::Jump(loaded) => self.op_jump(code_index, loaded.op, loaded.dest),
-            LoadedOp::NewMap(loaded) => self.op_new_map(code_index, loaded.op, loaded.dest),
-            LoadedOp::NewList(loaded) => self.op_new_list(code_index, loaded.op, loaded.dest),
             LoadedOp::SetExceptionHandler(loaded) => {
                 self.op_set_exception_handler(code_index, loaded.op, loaded.dest)
             }
@@ -1132,50 +1158,6 @@ impl Vm {
         }
     }
 
-    fn op_new_map(
-        &mut self,
-        code_index: usize,
-        element_count: LoadedSource,
-        dest: OpDestination,
-    ) -> Result<(), Fault> {
-        let element_count = self.op_load(code_index, element_count)?;
-        if let Some(element_count) = element_count
-            .as_u64()
-            .and_then(|c| u8::try_from(c).ok())
-            .filter(|count| count < &128)
-        {
-            let map = map::Map::new();
-            for reg_index in (0..element_count * 2).step_by(2) {
-                let key = self[Register(reg_index)].take();
-                let value = self[Register(reg_index + 1)].take();
-                map.insert(self, key, value)?;
-            }
-            self.op_store(code_index, Value::dynamic(map), dest)
-        } else {
-            // TODO handle large map initialization
-            Err(Fault::InvalidArity)
-        }
-    }
-
-    fn op_new_list(
-        &mut self,
-        code_index: usize,
-        element_count: LoadedSource,
-        dest: OpDestination,
-    ) -> Result<(), Fault> {
-        let element_count = self.op_load(code_index, element_count)?;
-        if let Some(element_count) = element_count.as_u64().and_then(|c| u8::try_from(c).ok()) {
-            let list = List::new();
-            for reg_index in 0..element_count {
-                let value = self[Register(reg_index)].take();
-                list.push(value)?;
-            }
-            self.op_store(code_index, Value::dynamic(list), dest)
-        } else {
-            Err(Fault::InvalidArity)
-        }
-    }
-
     fn op_set_exception_handler(
         &mut self,
         code_index: usize,
@@ -1550,22 +1532,26 @@ impl Function {
 }
 
 impl CustomType for Function {
-    fn call(&self, vm: &mut Vm, this: &AnyDynamic, arity: Arity) -> Result<Value, Fault> {
-        if let Some(body) = self.bodies.get(&arity).or_else(|| {
-            self.varg_bodies
-                .iter()
-                .rev()
-                .find_map(|va| (va.key() <= &arity).then_some(&va.value))
-        }) {
-            let module = self.module.ok_or(Fault::MissingModule)?;
-            vm.execute_function(body, this, module)
-        } else {
-            Err(Fault::IncorrectNumberOfArguments)
-        }
-    }
-
-    fn deep_clone(&self) -> Option<AnyDynamic> {
-        Some(AnyDynamic::new(self.clone()))
+    fn muse_type(&self) -> &crate::value::TypeRef {
+        static TYPE: RustType<Function> = RustType::new("Function", |t| {
+            t.with_call(|_| {
+                |this, vm, arity| {
+                    if let Some(body) = this.bodies.get(&arity).or_else(|| {
+                        this.varg_bodies
+                            .iter()
+                            .rev()
+                            .find_map(|va| (va.key() <= &arity).then_some(&va.value))
+                    }) {
+                        let module = this.module.ok_or(Fault::MissingModule)?;
+                        vm.execute_function(body, this.as_any_dynamic(), module)
+                    } else {
+                        Err(Fault::IncorrectNumberOfArguments)
+                    }
+                }
+            })
+            .with_clone()
+        });
+        &TYPE
     }
 }
 
@@ -1694,8 +1680,6 @@ impl CodeData {
                         UnaryKind::Copy => LoadedOp::Copy(unary),
                         UnaryKind::Resolve => LoadedOp::Resolve(unary),
                         UnaryKind::Jump => LoadedOp::Jump(unary),
-                        UnaryKind::NewMap => LoadedOp::NewMap(unary),
-                        UnaryKind::NewList => LoadedOp::NewList(unary),
                         UnaryKind::SetExceptionHandler => LoadedOp::SetExceptionHandler(unary),
                     },
                     range,
@@ -1884,45 +1868,98 @@ pub struct Module {
 }
 
 impl Module {
+    #[must_use]
+    pub fn with_core() -> Dynamic<Self> {
+        let module = Dynamic::new(Self::default());
+
+        let core = Self {
+            parent: Some(module.downgrade()),
+            ..Self::core()
+        };
+
+        module.declarations().insert(
+            Symbol::from("core"),
+            ModuleDeclaration {
+                mutable: false,
+                value: Value::dynamic(core),
+            },
+        );
+
+        module
+    }
+
+    pub fn core() -> Self {
+        let core = Self::default();
+
+        let mut declarations = core.declarations();
+        declarations.insert(
+            Symbol::from("Map"),
+            ModuleDeclaration {
+                mutable: false,
+                value: Value::Dynamic(crate::map::MAP_TYPE.as_any_dynamic().clone()),
+            },
+        );
+        declarations.insert(
+            Symbol::from("List"),
+            ModuleDeclaration {
+                mutable: false,
+                value: Value::Dynamic(crate::list::LIST_TYPE.as_any_dynamic().clone()),
+            },
+        );
+        drop(declarations);
+
+        core
+    }
+
     fn declarations(&self) -> MutexGuard<'_, Map<Symbol, ModuleDeclaration>> {
         self.declarations.lock().expect("poisoned")
     }
 }
 
 impl CustomType for Module {
-    fn invoke(&self, vm: &mut Vm, name: &Symbol, arity: Arity) -> Result<Value, Fault> {
-        static FUNCTIONS: StaticRustFunctionTable<Module> = StaticRustFunctionTable::new(|table| {
-            table
-                .with_fn(Symbol::set_symbol(), 2, |vm, this| {
-                    let field = vm[Register(0)].take();
-                    let sym = field.as_symbol().ok_or(Fault::ExpectedSymbol)?;
-                    let value = vm[Register(1)].take();
+    fn muse_type(&self) -> &crate::value::TypeRef {
+        static TYPE: RustType<Module> = RustType::new("Module", |t| {
+            t.with_invoke(|_| {
+                |this, vm, name, arity| {
+                    static FUNCTIONS: StaticRustFunctionTable<Module> =
+                        StaticRustFunctionTable::new(|table| {
+                            table
+                                .with_fn(Symbol::set_symbol(), 2, |vm, this| {
+                                    let field = vm[Register(0)].take();
+                                    let sym = field.as_symbol().ok_or(Fault::ExpectedSymbol)?;
+                                    let value = vm[Register(1)].take();
 
-                    match this.declarations().get_mut(sym) {
-                        Some(decl) if decl.mutable => Ok(std::mem::replace(&mut decl.value, value)),
-                        Some(_) => Err(Fault::NotMutable),
-                        None => Err(Fault::UnknownSymbol),
+                                    match this.declarations().get_mut(sym) {
+                                        Some(decl) if decl.mutable => {
+                                            Ok(std::mem::replace(&mut decl.value, value))
+                                        }
+                                        Some(_) => Err(Fault::NotMutable),
+                                        None => Err(Fault::UnknownSymbol),
+                                    }
+                                })
+                                .with_fn(Symbol::get_symbol(), 1, |vm, this| {
+                                    let field = vm[Register(0)].take();
+                                    let sym = field.as_symbol().ok_or(Fault::ExpectedSymbol)?;
+
+                                    this.declarations()
+                                        .get(sym)
+                                        .map(|decl| decl.value.clone())
+                                        .ok_or(Fault::UnknownSymbol)
+                                })
+                        });
+                    let declarations = this.declarations();
+                    if let Some(decl) = declarations.get(name) {
+                        let possible_invoke = decl.value.clone();
+                        drop(declarations);
+                        possible_invoke.call(vm, arity)
+                    } else {
+                        drop(declarations);
+                        FUNCTIONS.invoke(vm, name, arity, &this)
                     }
-                })
-                .with_fn(Symbol::get_symbol(), 1, |vm, this| {
-                    let field = vm[Register(0)].take();
-                    let sym = field.as_symbol().ok_or(Fault::ExpectedSymbol)?;
-
-                    this.declarations()
-                        .get(sym)
-                        .map(|decl| decl.value.clone())
-                        .ok_or(Fault::UnknownSymbol)
-                })
+                }
+            })
         });
-        let declarations = self.declarations();
-        if let Some(decl) = declarations.get(name) {
-            let possible_invoke = decl.value.clone();
-            drop(declarations);
-            possible_invoke.call(vm, arity)
-        } else {
-            drop(declarations);
-            FUNCTIONS.invoke(vm, name, arity, self)
-        }
+        &TYPE
     }
 }
 
@@ -1994,8 +2031,6 @@ enum LoadedOp {
     Copy(LoadedUnary),
     Resolve(LoadedUnary),
     Jump(LoadedUnary),
-    NewMap(LoadedUnary),
-    NewList(LoadedUnary),
     SetExceptionHandler(LoadedUnary),
     LogicalXor(LoadedBinary),
     Assign(LoadedBinary),

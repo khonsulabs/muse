@@ -1,6 +1,5 @@
-use crate::symbol::Symbol;
-use crate::value::{AnyDynamic, CustomType, Value};
-use crate::vm::{Fault, StackFrame, Vm};
+use crate::value::{AnyDynamic, CustomType, RustType, TypeRef, Value};
+use crate::vm::{StackFrame, Vm};
 
 #[derive(Debug)]
 pub struct Exception {
@@ -26,36 +25,31 @@ impl Exception {
 }
 
 impl CustomType for Exception {
-    fn eq(&self, vm: Option<&mut Vm>, rhs: &Value) -> Result<bool, Fault> {
-        if let Some(rhs) = rhs.as_downcast_ref::<Self>() {
-            Ok(self.value.equals(vm, &rhs.value)? && self.stack_trace == rhs.stack_trace)
-        } else {
-            Ok(false)
-        }
-    }
-
-    fn matches(&self, vm: &mut Vm, rhs: &Value) -> Result<bool, Fault> {
-        self.value.matches(vm, rhs)
-    }
-
-    fn total_cmp(&self, vm: &mut Vm, rhs: &Value) -> Result<std::cmp::Ordering, Fault> {
-        self.value.total_cmp(vm, rhs)
-    }
-
-    fn invoke(&self, vm: &mut Vm, name: &Symbol, arity: crate::vm::Arity) -> Result<Value, Fault> {
-        self.value.invoke(vm, name, arity)
-    }
-
-    fn to_string(&self, vm: &mut Vm) -> Result<Symbol, Fault> {
-        self.value.to_string(vm)
-    }
-
-    fn deep_clone(&self) -> Option<AnyDynamic> {
-        self.value.deep_clone().map(|value| {
-            AnyDynamic::new(Self {
-                value,
-                stack_trace: self.stack_trace.clone(),
-            })
-        })
+    fn muse_type(&self) -> &TypeRef {
+        static EXCEPTION_TYPE: RustType<Exception> = RustType::new("Exception", |t| {
+            t.with_fallback(|this| this.value.clone())
+                .with_eq(|_| {
+                    |this, vm, rhs| {
+                        if let Some(rhs) = rhs.as_downcast_ref::<Exception>() {
+                            Ok(this.value.equals(vm, &rhs.value)?
+                                && this.stack_trace == rhs.stack_trace)
+                        } else {
+                            Ok(false)
+                        }
+                    }
+                })
+                .with_matches(|_| |this, vm, rhs| this.value.matches(vm, rhs))
+                .with_deep_clone(|_| {
+                    |this| {
+                        this.value.deep_clone().map(|value| {
+                            AnyDynamic::new(Exception {
+                                value,
+                                stack_trace: this.stack_trace.clone(),
+                            })
+                        })
+                    }
+                })
+        });
+        &EXCEPTION_TYPE
     }
 }

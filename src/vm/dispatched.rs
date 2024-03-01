@@ -13,8 +13,6 @@ use super::{
     Stack,
 };
 use crate::compiler::{BitcodeModule, UnaryKind};
-use crate::list::List;
-use crate::map::Map;
 use crate::string::MuseString;
 use crate::symbol::Symbol;
 use crate::syntax::{BitwiseKind, CompareKind};
@@ -75,16 +73,6 @@ impl CodeData {
                 self,
             ),
             LoadedOp::Jump(loaded) => match_jump(
-                &trusted_loaded_source_to_value(&loaded.op, self),
-                &loaded.dest,
-                self,
-            ),
-            LoadedOp::NewMap(loaded) => match_new_map(
-                &trusted_loaded_source_to_value(&loaded.op, self),
-                &loaded.dest,
-                self,
-            ),
-            LoadedOp::NewList(loaded) => match_new_list(
                 &trusted_loaded_source_to_value(&loaded.op, self),
                 &loaded.dest,
                 self,
@@ -524,83 +512,6 @@ where
             } else {
                 BinaryKind::JumpIf
             },
-        }
-    }
-}
-
-#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
-pub struct NewMap<Count, Dest> {
-    pub element_count: Count,
-    pub dest: Dest,
-}
-
-impl<From, Dest> Instruction for NewMap<From, Dest>
-where
-    From: Source,
-    Dest: Destination,
-{
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
-        let element_count = self.element_count.load(vm)?;
-        if let Some(element_count) = element_count
-            .as_u64()
-            .and_then(|c| u8::try_from(c).ok())
-            .filter(|count| count < &128)
-        {
-            let map = Map::new();
-            for reg_index in (0..element_count * 2).step_by(2) {
-                let key = vm[Register(reg_index)].take();
-                let value = vm[Register(reg_index + 1)].take();
-                map.insert(vm, key, value)?;
-            }
-            self.dest.store(vm, Value::dynamic(map))?;
-
-            Ok(ControlFlow::Continue(()))
-        } else {
-            Err(Fault::InvalidArity)
-        }
-    }
-
-    fn as_op(&self) -> Op {
-        Op::Unary {
-            op: self.element_count.as_source(),
-            dest: self.dest.as_dest(),
-            kind: UnaryKind::Copy,
-        }
-    }
-}
-
-#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
-pub struct NewList<Count, Dest> {
-    pub element_count: Count,
-    pub dest: Dest,
-}
-
-impl<From, Dest> Instruction for NewList<From, Dest>
-where
-    From: Source,
-    Dest: Destination,
-{
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
-        let element_count = self.element_count.load(vm)?;
-        if let Some(element_count) = element_count.as_u64().and_then(|c| u8::try_from(c).ok()) {
-            let list = List::new();
-            for reg_index in 0..element_count {
-                let value = vm[Register(reg_index)].take();
-                list.push(value)?;
-            }
-            self.dest.store(vm, Value::dynamic(list))?;
-
-            Ok(ControlFlow::Continue(()))
-        } else {
-            Err(Fault::InvalidArity)
-        }
-    }
-
-    fn as_op(&self) -> Op {
-        Op::Unary {
-            op: self.element_count.as_source(),
-            dest: self.dest.as_dest(),
-            kind: UnaryKind::Copy,
         }
     }
 }
@@ -1302,40 +1213,6 @@ where
     });
 }
 
-decode_sd!(match_new_map, compile_new_map);
-
-fn compile_new_map<Arity, Dest>(
-    _dest: &OpDestination,
-    code: &mut CodeData,
-    element_count: Arity,
-    dest: Dest,
-) where
-    Arity: Source,
-    Dest: Destination,
-{
-    code.push_dispatched(NewMap {
-        element_count,
-        dest,
-    });
-}
-
-decode_sd!(match_new_list, compile_new_list);
-
-fn compile_new_list<Arity, Dest>(
-    _dest: &OpDestination,
-    code: &mut CodeData,
-    element_count: Arity,
-    dest: Dest,
-) where
-    Arity: Source,
-    Dest: Destination,
-{
-    code.push_dispatched(NewList {
-        element_count,
-        dest,
-    });
-}
-
 decode_sd!(match_set_exception_handler, compile_set_exception_handler);
 
 fn compile_set_exception_handler<Handler, Dest>(
@@ -1570,8 +1447,10 @@ where
             module_index
         };
 
-        self.dest
-            .store(vm, Value::Dynamic(vm.modules[loading_module.get()].clone()))?;
+        self.dest.store(
+            vm,
+            Value::Dynamic(vm.modules[loading_module.get()].as_any_dynamic().clone()),
+        )?;
         Ok(ControlFlow::Continue(()))
     }
 

@@ -3,11 +3,58 @@ use std::sync::Mutex;
 
 use crate::list::List;
 use crate::symbol::Symbol;
-use crate::value::{CustomType, StaticRustFunctionTable, Value};
-use crate::vm::{Arity, Fault, Register, Vm};
+use crate::value::{CustomType, RustType, StaticRustFunctionTable, TypeRef, Value};
+use crate::vm::{Fault, Register, Vm};
 
 #[derive(Debug)]
 pub struct Map(Mutex<Vec<Field>>);
+
+pub static MAP_TYPE: RustType<Map> = RustType::new("Map", |t| {
+    t.with_construct(|_| {
+        |vm, arity| {
+            let map = Map::new();
+            for reg_index in (0..arity.0 * 2).step_by(2) {
+                let key = vm[Register(reg_index)].take();
+                let value = vm[Register(reg_index + 1)].take();
+                map.insert(vm, key, value)?;
+            }
+            Ok(map)
+        }
+    })
+    .with_invoke(|_| {
+        |this, vm, name, arity| {
+            static FUNCTIONS: StaticRustFunctionTable<Map> =
+                StaticRustFunctionTable::new(|table| {
+                    table
+                        .with_fn(Symbol::set_symbol(), 1, |vm, this| {
+                            let key = vm[Register(0)].take();
+                            let value = key.clone();
+                            this.insert(vm, key, value.clone())?;
+                            Ok(value)
+                        })
+                        .with_fn(Symbol::set_symbol(), 2, |vm, this| {
+                            let key = vm[Register(0)].take();
+                            let value = vm[Register(1)].take();
+                            this.insert(vm, key, value.clone())?;
+                            Ok(value)
+                        })
+                        .with_fn(Symbol::get_symbol(), 1, |vm, this| {
+                            let key = vm[Register(0)].take();
+                            this.get(vm, &key)?.ok_or(Fault::OutOfBounds)
+                        })
+                        .with_fn(Symbol::nth_symbol(), 1, |vm, this| {
+                            let index = vm[Register(0)].take();
+                            this.nth(&index)
+                        })
+                        .with_fn(Symbol::len_symbol(), 0, |_vm, this| {
+                            let contents = this.0.lock().expect("poisoned");
+                            Value::try_from(contents.len())
+                        })
+                });
+            FUNCTIONS.invoke(vm, name, arity, &this)
+        }
+    })
+});
 
 impl Map {
     #[must_use]
@@ -91,35 +138,8 @@ impl Map {
 }
 
 impl CustomType for Map {
-    fn invoke(&self, vm: &mut Vm, name: &Symbol, arity: Arity) -> Result<Value, Fault> {
-        static FUNCTIONS: StaticRustFunctionTable<Map> = StaticRustFunctionTable::new(|table| {
-            table
-                .with_fn(Symbol::set_symbol(), 1, |vm, this| {
-                    let key = vm[Register(0)].take();
-                    let value = key.clone();
-                    this.insert(vm, key, value.clone())?;
-                    Ok(value)
-                })
-                .with_fn(Symbol::set_symbol(), 2, |vm, this| {
-                    let key = vm[Register(0)].take();
-                    let value = vm[Register(1)].take();
-                    this.insert(vm, key, value.clone())?;
-                    Ok(value)
-                })
-                .with_fn(Symbol::get_symbol(), 1, |vm, this| {
-                    let key = vm[Register(0)].take();
-                    this.get(vm, &key)?.ok_or(Fault::OutOfBounds)
-                })
-                .with_fn(Symbol::nth_symbol(), 1, |vm, this| {
-                    let index = vm[Register(0)].take();
-                    this.nth(&index)
-                })
-                .with_fn(Symbol::len_symbol(), 0, |_vm, this| {
-                    let contents = this.0.lock().expect("poisoned");
-                    Value::try_from(contents.len())
-                })
-        });
-        FUNCTIONS.invoke(vm, name, arity, self)
+    fn muse_type(&self) -> &TypeRef {
+        &MAP_TYPE
     }
 }
 

@@ -8,8 +8,8 @@ use regex::{Captures, Regex};
 use crate::string::MuseString;
 use crate::symbol::Symbol;
 use crate::syntax::token::RegexLiteral;
-use crate::value::{AnyDynamic, CustomType, StaticRustFunctionTable, Value, ValueHasher};
-use crate::vm::{Arity, Fault, Register, Vm};
+use crate::value::{AnyDynamic, CustomType, RustType, StaticRustFunctionTable, TypeRef, Value};
+use crate::vm::{Fault, Register, Vm};
 
 #[derive(Debug, Clone)]
 pub struct MuseRegex {
@@ -56,82 +56,83 @@ impl Deref for MuseRegex {
 }
 
 impl CustomType for MuseRegex {
-    fn hash(&self, _vm: &mut Vm, hasher: &mut ValueHasher) {
-        self.expr.as_str().hash(hasher);
-    }
-
-    fn eq(&self, _vm: Option<&mut Vm>, rhs: &Value) -> Result<bool, Fault> {
-        if let Some(rhs) = rhs.as_downcast_ref::<Self>() {
-            Ok(self.expr.as_str() == rhs.expr.as_str())
-        } else {
-            Ok(false)
-        }
-    }
-
-    fn total_cmp(&self, _vm: &mut Vm, rhs: &Value) -> Result<std::cmp::Ordering, Fault> {
-        if let Some(rhs) = rhs.as_downcast_ref::<Self>() {
-            Ok(self.expr.as_str().cmp(rhs.expr.as_str()))
-        } else if rhs.as_dynamic().is_none() {
-            // Dynamics sort after primitive values
-            Ok(std::cmp::Ordering::Greater)
-        } else {
-            Err(Fault::UnsupportedOperation)
-        }
-    }
-
-    fn invoke(&self, vm: &mut Vm, name: &Symbol, arity: Arity) -> Result<Value, Fault> {
-        static FUNCTIONS: StaticRustFunctionTable<MuseRegex> =
-            StaticRustFunctionTable::new(|table| {
-                table
-                    .with_fn("total_captures", 0, |_vm: &mut Vm, this: &MuseRegex| {
-                        Value::try_from(this.captures_len())
-                    })
-                    .with_fn(
-                        "total_static_captures",
-                        0,
-                        |_vm: &mut Vm, this: &MuseRegex| {
-                            Ok(this
-                                .static_captures_len()
-                                .map(Value::try_from)
-                                .transpose()?
-                                .unwrap_or_default())
-                        },
-                    )
-                    .with_fn(
-                        Symbol::captures_symbol(),
-                        1,
-                        |vm: &mut Vm, this: &MuseRegex| {
-                            let haystack = vm[Register(0)].take();
-                            haystack.map_str(vm, |_vm, haystack| {
-                                this.captures(haystack)
-                                    .map(Value::dynamic)
-                                    .unwrap_or_default()
-                            })
-                        },
-                    )
-            });
-
-        FUNCTIONS.invoke(vm, name, arity, self)
-    }
-
-    fn truthy(&self, _vm: &mut Vm) -> bool {
-        !self.expr.as_str().is_empty()
-    }
-
-    fn to_string(&self, _vm: &mut Vm) -> Result<Symbol, Fault> {
-        Ok(Symbol::from(self.expr.as_str().to_string()))
-    }
-
-    fn deep_clone(&self) -> Option<AnyDynamic> {
-        Some(AnyDynamic::new(self.clone()))
-    }
-
-    fn matches(&self, vm: &mut Vm, rhs: &Value) -> Result<bool, Fault> {
-        if let Some(rhs) = rhs.as_downcast_ref::<MuseString>() {
-            Ok(self.is_match(&rhs.lock()))
-        } else {
-            rhs.map_str(vm, |_vm, rhs| self.is_match(rhs))
-        }
+    fn muse_type(&self) -> &TypeRef {
+        static TYPE: RustType<MuseRegex> = RustType::new("Regex", |t| {
+            t.with_invoke(|_| {
+                |this, vm, name, arity| {
+                    static FUNCTIONS: StaticRustFunctionTable<MuseRegex> =
+                        StaticRustFunctionTable::new(|table| {
+                            table
+                                .with_fn("total_captures", 0, |_vm: &mut Vm, this: &MuseRegex| {
+                                    Value::try_from(this.captures_len())
+                                })
+                                .with_fn(
+                                    "total_static_captures",
+                                    0,
+                                    |_vm: &mut Vm, this: &MuseRegex| {
+                                        Ok(this
+                                            .static_captures_len()
+                                            .map(Value::try_from)
+                                            .transpose()?
+                                            .unwrap_or_default())
+                                    },
+                                )
+                                .with_fn(
+                                    Symbol::captures_symbol(),
+                                    1,
+                                    |vm: &mut Vm, this: &MuseRegex| {
+                                        let haystack = vm[Register(0)].take();
+                                        haystack.map_str(vm, |_vm, haystack| {
+                                            this.captures(haystack)
+                                                .map(Value::dynamic)
+                                                .unwrap_or_default()
+                                        })
+                                    },
+                                )
+                        });
+                    FUNCTIONS.invoke(vm, name, arity, &this)
+                }
+            })
+            .with_hash(|_| {
+                |this, _vm, hasher| {
+                    this.expr.as_str().hash(hasher);
+                }
+            })
+            .with_eq(|_| {
+                |this, _vm, rhs| {
+                    if let Some(rhs) = rhs.as_downcast_ref::<MuseRegex>() {
+                        Ok(this.expr.as_str() == rhs.expr.as_str())
+                    } else {
+                        Ok(false)
+                    }
+                }
+            })
+            .with_total_cmp(|_| {
+                |this, _vm, rhs| {
+                    if let Some(rhs) = rhs.as_downcast_ref::<MuseRegex>() {
+                        Ok(this.expr.as_str().cmp(rhs.expr.as_str()))
+                    } else if rhs.as_any_dynamic().is_none() {
+                        // Dynamics sort after primitive values
+                        Ok(std::cmp::Ordering::Greater)
+                    } else {
+                        Err(Fault::UnsupportedOperation)
+                    }
+                }
+            })
+            .with_truthy(|_| |this, _vm| !this.expr.as_str().is_empty())
+            .with_to_string(|_| |this, _vm| Ok(Symbol::from(this.expr.as_str().to_string())))
+            .with_clone()
+            .with_matches(|_| {
+                |this, vm, rhs| {
+                    if let Some(rhs) = rhs.as_downcast_ref::<MuseString>() {
+                        Ok(this.is_match(&rhs.lock()))
+                    } else {
+                        rhs.map_str(vm, |_vm, rhs| this.is_match(rhs))
+                    }
+                }
+            })
+        });
+        &TYPE
     }
 }
 
@@ -179,38 +180,46 @@ impl MuseCaptures {
 }
 
 impl CustomType for MuseCaptures {
-    fn invoke(&self, vm: &mut Vm, name: &Symbol, arity: Arity) -> Result<Value, Fault> {
-        static FUNCTIONS: StaticRustFunctionTable<MuseCaptures> =
-            StaticRustFunctionTable::new(|table| {
-                table
-                    .with_fn(
-                        Symbol::get_symbol(),
-                        1,
-                        |vm: &mut Vm, this: &MuseCaptures| {
-                            let index = vm[Register(0)].take();
-                            let index = if let Some(index) = index.as_usize() {
-                                index
-                            } else {
-                                let name = index.to_string(vm)?;
-                                let Some(index) = this.by_name.get(&name).copied() else {
-                                    return Ok(Value::Nil);
-                                };
-                                index
-                            };
-                            this.matches.get(index).cloned().ok_or(Fault::OutOfBounds)
-                        },
-                    )
-                    .with_fn(
-                        Symbol::nth_symbol(),
-                        1,
-                        |vm: &mut Vm, this: &MuseCaptures| {
-                            let index = vm[Register(0)].as_usize().ok_or(Fault::OutOfBounds)?;
-                            this.matches.get(index).cloned().ok_or(Fault::OutOfBounds)
-                        },
-                    )
-            });
-
-        FUNCTIONS.invoke(vm, name, arity, self)
+    fn muse_type(&self) -> &TypeRef {
+        static TYPE: RustType<MuseCaptures> = RustType::new("RegexCaptures", |t| {
+            t.with_invoke(|_| {
+                |this, vm, name, arity| {
+                    static FUNCTIONS: StaticRustFunctionTable<MuseCaptures> =
+                        StaticRustFunctionTable::new(|table| {
+                            table
+                                .with_fn(
+                                    Symbol::get_symbol(),
+                                    1,
+                                    |vm: &mut Vm, this: &MuseCaptures| {
+                                        let index = vm[Register(0)].take();
+                                        let index = if let Some(index) = index.as_usize() {
+                                            index
+                                        } else {
+                                            let name = index.to_string(vm)?;
+                                            let Some(index) = this.by_name.get(&name).copied()
+                                            else {
+                                                return Ok(Value::Nil);
+                                            };
+                                            index
+                                        };
+                                        this.matches.get(index).cloned().ok_or(Fault::OutOfBounds)
+                                    },
+                                )
+                                .with_fn(
+                                    Symbol::nth_symbol(),
+                                    1,
+                                    |vm: &mut Vm, this: &MuseCaptures| {
+                                        let index =
+                                            vm[Register(0)].as_usize().ok_or(Fault::OutOfBounds)?;
+                                        this.matches.get(index).cloned().ok_or(Fault::OutOfBounds)
+                                    },
+                                )
+                        });
+                    FUNCTIONS.invoke(vm, name, arity, &this)
+                }
+            })
+        });
+        &TYPE
     }
 }
 
@@ -221,24 +230,25 @@ pub struct MuseMatch {
 }
 
 impl CustomType for MuseMatch {
-    fn invoke(&self, vm: &mut Vm, name: &Symbol, arity: Arity) -> Result<Value, Fault> {
-        static FUNCTIONS: StaticRustFunctionTable<MuseMatch> =
-            StaticRustFunctionTable::new(|table| {
-                table
-                    .with_fn("content", 0, |_vm: &mut Vm, this: &MuseMatch| {
-                        Ok(Value::Dynamic(this.content.clone()))
-                    })
-                    .with_fn("start", 0, |_vm: &mut Vm, this: &MuseMatch| {
-                        Value::try_from(this.start)
-                    })
-            });
-
-        FUNCTIONS
-            .invoke(vm, name, arity, self)
-            .or_else(|_| self.content.invoke(vm, name, arity))
-    }
-
-    fn to_string(&self, vm: &mut Vm) -> Result<Symbol, Fault> {
-        self.content.to_string(vm)
+    fn muse_type(&self) -> &TypeRef {
+        static TYPE: RustType<MuseMatch> = RustType::new("RegexMatch", |t| {
+            t.with_invoke(|_| {
+                |this, vm, name, arity| {
+                    static FUNCTIONS: StaticRustFunctionTable<MuseMatch> =
+                        StaticRustFunctionTable::new(|table| {
+                            table
+                                .with_fn("content", 0, |_vm: &mut Vm, this: &MuseMatch| {
+                                    Ok(Value::Dynamic(this.content.clone()))
+                                })
+                                .with_fn("start", 0, |_vm: &mut Vm, this: &MuseMatch| {
+                                    Value::try_from(this.start)
+                                })
+                        });
+                    FUNCTIONS.invoke(vm, name, arity, &this)
+                }
+            })
+            .with_to_string(|_| |this, vm| this.content.to_string(vm))
+        });
+        &TYPE
     }
 }

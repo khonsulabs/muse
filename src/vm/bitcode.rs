@@ -381,11 +381,8 @@ impl BitcodeBlock {
         element_count: impl Into<ValueOrSource>,
         dest: impl Into<OpDestination>,
     ) {
-        self.push(Op::Unary {
-            op: element_count.into(),
-            dest: dest.into(),
-            kind: UnaryKind::NewMap,
-        });
+        self.call(Symbol::from("$.core.Map"), element_count);
+        self.copy(Register(0), dest);
     }
 
     pub fn new_list(
@@ -393,11 +390,8 @@ impl BitcodeBlock {
         element_count: impl Into<ValueOrSource>,
         dest: impl Into<OpDestination>,
     ) {
-        self.push(Op::Unary {
-            op: element_count.into(),
-            dest: dest.into(),
-            kind: UnaryKind::NewList,
-        });
+        self.call(Symbol::from("$.core.List"), element_count);
+        self.copy(Register(0), dest);
     }
 
     pub fn resolve(&mut self, source: impl Into<ValueOrSource>, dest: impl Into<OpDestination>) {
@@ -584,8 +578,6 @@ impl From<&'_ Code> for BitcodeBlock {
                 LoadedOp::Copy(loaded) => loaded.as_op(UnaryKind::Copy, code),
                 LoadedOp::Resolve(loaded) => loaded.as_op(UnaryKind::Resolve, code),
                 LoadedOp::Jump(loaded) => loaded.as_op(UnaryKind::Jump, code),
-                LoadedOp::NewMap(loaded) => loaded.as_op(UnaryKind::NewMap, code),
-                LoadedOp::NewList(loaded) => loaded.as_op(UnaryKind::NewList, code),
                 LoadedOp::SetExceptionHandler(loaded) => {
                     loaded.as_op(UnaryKind::SetExceptionHandler, code)
                 }

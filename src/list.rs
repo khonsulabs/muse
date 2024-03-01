@@ -1,8 +1,47 @@
 use std::sync::Mutex;
 
 use crate::symbol::Symbol;
-use crate::value::{CustomType, StaticRustFunctionTable, Value};
-use crate::vm::{Arity, Fault, Register, Vm};
+use crate::value::{CustomType, RustType, StaticRustFunctionTable, TypeRef, Value};
+use crate::vm::{Fault, Register, Vm};
+
+pub static LIST_TYPE: RustType<List> = RustType::new("List", |t| {
+    t.with_construct(|_| {
+        |vm, arity| {
+            let list = List::new();
+            for reg_index in 0..arity.0 {
+                let value = vm[Register(reg_index)].take();
+                list.push(value)?;
+            }
+            Ok(list)
+        }
+    })
+    .with_invoke(|_| {
+        |this, vm, name, arity| {
+            static FUNCTIONS: StaticRustFunctionTable<List> =
+                StaticRustFunctionTable::new(|table| {
+                    table
+                        .with_fn(Symbol::len_symbol(), 0, |_vm: &mut Vm, this: &List| {
+                            Value::try_from(this.0.lock().expect("poisoned").len())
+                        })
+                        .with_fn(Symbol::set_symbol(), 2, |vm, this| {
+                            let index = vm[Register(0)].take();
+                            let value = vm[Register(1)].take();
+                            this.set(&index, value.clone())?;
+                            Ok(value)
+                        })
+                        .with_fn(
+                            [Symbol::nth_symbol(), Symbol::get_symbol()],
+                            1,
+                            |vm, this| {
+                                let key = vm[Register(0)].take();
+                                this.get(&key)
+                            },
+                        )
+                });
+            FUNCTIONS.invoke(vm, name, arity, &this)
+        }
+    })
+});
 
 #[derive(Debug)]
 pub struct List(Mutex<Vec<Value>>);
@@ -68,27 +107,7 @@ impl FromIterator<Value> for List {
 }
 
 impl CustomType for List {
-    fn invoke(&self, vm: &mut Vm, name: &Symbol, arity: Arity) -> Result<Value, Fault> {
-        static FUNCTIONS: StaticRustFunctionTable<List> = StaticRustFunctionTable::new(|table| {
-            table
-                .with_fn(Symbol::len_symbol(), 0, |_vm: &mut Vm, this: &List| {
-                    Value::try_from(this.0.lock().expect("poisoned").len())
-                })
-                .with_fn(Symbol::set_symbol(), 2, |vm, this| {
-                    let index = vm[Register(0)].take();
-                    let value = vm[Register(1)].take();
-                    this.set(&index, value.clone())?;
-                    Ok(value)
-                })
-                .with_fn(
-                    [Symbol::nth_symbol(), Symbol::get_symbol()],
-                    1,
-                    |vm, this| {
-                        let key = vm[Register(0)].take();
-                        this.get(&key)
-                    },
-                )
-        });
-        FUNCTIONS.invoke(vm, name, arity, self)
+    fn muse_type(&self) -> &TypeRef {
+        &LIST_TYPE
     }
 }

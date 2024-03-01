@@ -8,8 +8,8 @@ use cushy::widgets::{Expand, Slider};
 use cushy::window::WindowHandle;
 use cushy::{App, Application, Open, PendingApp};
 use muse::symbol::Symbol;
-use muse::value::{CustomType, RustFunction, Value};
-use muse::vm::{Arity, Fault, Register, Vm};
+use muse::value::{CustomType, RustFunction, RustType, TypeRef, Value};
+use muse::vm::{Fault, Register, Vm};
 
 pub fn install(vm: &mut Vm) {
     vm.declare(
@@ -59,82 +59,90 @@ impl DerefMut for DynamicValue {
 }
 
 impl CustomType for DynamicValue {
-    fn call(
-        &self,
-        _vm: &mut Vm,
-        _this: &muse::value::AnyDynamic,
-        arity: Arity,
-    ) -> Result<Value, Fault> {
-        if arity == 0 {
-            Ok(self.0.get())
-        } else {
-            Err(Fault::NotAFunction)
-        }
-    }
+    fn muse_type(&self) -> &TypeRef {
+        static TYPE: RustType<DynamicValue> = RustType::new("DynamicValue", |t| {
+            t.with_invoke(|_| {
+                |this, vm, name, arity| {
+                    if name == Symbol::set_symbol() && arity == 1 {
+                        let value = vm[Register(0)].take();
+                        if let Ok(mut contents) = this.0.try_lock() {
+                            if contents.equals(Some(vm), &value)? {
+                                Ok(value)
+                            } else {
+                                let old_value = std::mem::replace(&mut *contents, value);
+                                Ok(old_value)
+                            }
+                        } else {
+                            Ok(Value::Nil)
+                        }
+                    } else if name == &Symbol::from("slider_between") && arity == 2 {
+                        let start = vm[Register(0)].take();
+                        let end = vm[Register(1)].take();
 
-    fn invoke(&self, vm: &mut Vm, name: &Symbol, arity: Arity) -> Result<Value, Fault> {
-        if name == Symbol::set_symbol() && arity == 1 {
-            let value = vm[Register(0)].take();
-            if let Ok(mut contents) = self.0.try_lock() {
-                if contents.equals(Some(vm), &value)? {
-                    Ok(value)
-                } else {
-                    let old_value = std::mem::replace(&mut *contents, value);
-                    Ok(old_value)
+                        match this.0.map_ref(numeric_kind)
+                            | numeric_kind(&end)
+                            | numeric_kind(&start)
+                        {
+                            NumericKind::Unknown => Err(Fault::UnsupportedOperation),
+                            NumericKind::Float => Ok(Value::dynamic(MuseWidget::FloatSlider(
+                                this.0
+                                    .linked(
+                                        |v| v.as_f64().unwrap_or_default(),
+                                        |v| Value::Float(*v),
+                                    )
+                                    .slider_between(
+                                        linked_dynamic_value(
+                                            &start,
+                                            |value| value.as_f64().unwrap_or_default(),
+                                            |float| Value::Float(*float),
+                                        ),
+                                        linked_dynamic_value(
+                                            &end,
+                                            |value| value.as_f64().unwrap_or_default(),
+                                            |float| Value::Float(*float),
+                                        ),
+                                    ),
+                            ))),
+                            NumericKind::Int => Ok(Value::dynamic(MuseWidget::IntSlider(
+                                this.0
+                                    .linked(|v| v.as_i64().unwrap_or_default(), |v| Value::Int(*v))
+                                    .slider_between(
+                                        linked_dynamic_value(
+                                            &start,
+                                            |value| value.as_i64().unwrap_or_default(),
+                                            |int| Value::Int(*int),
+                                        ),
+                                        linked_dynamic_value(
+                                            &end,
+                                            |value| value.as_i64().unwrap_or_default(),
+                                            |int| Value::Int(*int),
+                                        ),
+                                    ),
+                            ))),
+                        }
+                    } else {
+                        Err(Fault::UnknownSymbol)
+                    }
                 }
-            } else {
-                Ok(Value::Nil)
-            }
-        } else if name == &Symbol::from("slider_between") && arity == 2 {
-            let start = vm[Register(0)].take();
-            let end = vm[Register(1)].take();
-
-            match self.0.map_ref(numeric_kind) | numeric_kind(&end) | numeric_kind(&start) {
-                NumericKind::Unknown => Err(Fault::UnsupportedOperation),
-                NumericKind::Float => Ok(Value::dynamic(MuseWidget::FloatSlider(
-                    self.0
-                        .linked(|v| v.as_f64().unwrap_or_default(), |v| Value::Float(*v))
-                        .slider_between(
-                            linked_dynamic_value(
-                                &start,
-                                |value| value.as_f64().unwrap_or_default(),
-                                |float| Value::Float(*float),
-                            ),
-                            linked_dynamic_value(
-                                &end,
-                                |value| value.as_f64().unwrap_or_default(),
-                                |float| Value::Float(*float),
-                            ),
-                        ),
-                ))),
-                NumericKind::Int => Ok(Value::dynamic(MuseWidget::IntSlider(
-                    self.0
-                        .linked(|v| v.as_i64().unwrap_or_default(), |v| Value::Int(*v))
-                        .slider_between(
-                            linked_dynamic_value(
-                                &start,
-                                |value| value.as_i64().unwrap_or_default(),
-                                |int| Value::Int(*int),
-                            ),
-                            linked_dynamic_value(
-                                &end,
-                                |value| value.as_i64().unwrap_or_default(),
-                                |int| Value::Int(*int),
-                            ),
-                        ),
-                ))),
-            }
-        } else {
-            Err(Fault::UnknownSymbol)
-        }
-    }
-
-    // All functions below are pass-throughs to the values contained.
-
-    fn deep_clone(&self) -> Option<muse::value::AnyDynamic> {
-        self.0
-            .map_ref(|value| value.deep_clone())
-            .map(|value| muse::value::AnyDynamic::new(Self(Dynamic::new(value))))
+            })
+            .with_call(|_| {
+                |this, _vm, arity| {
+                    if arity == 0 {
+                        Ok(this.0.get())
+                    } else {
+                        Err(Fault::NotAFunction)
+                    }
+                }
+            })
+            .with_deep_clone(|_| {
+                |this| {
+                    this.0
+                        .map_ref(|value| value.deep_clone())
+                        .map(|value| muse::value::AnyDynamic::new(Self(Dynamic::new(value))))
+                }
+            })
+        });
+        &TYPE
     }
 }
 
@@ -231,25 +239,37 @@ impl MakeWidget for &'_ MuseWidget {
 }
 
 impl CustomType for MuseWidget {
-    fn invoke(&self, _vm: &mut Vm, name: &Symbol, arity: Arity) -> Result<Value, Fault> {
-        if name == &Symbol::from("open") && arity == 0 {
-            let widget = self.make_widget();
-            Ok(widget
-                .open(&muse_app()?)
-                .unwrap()
-                .map(|handle| Value::dynamic(OpenWindow(handle)))
-                .unwrap_or_default())
-        } else if name == &Symbol::from("expand") && arity == 0 {
-            Ok(Value::dynamic(MuseWidget::Expand(
-                self.make_widget().expand(),
-            )))
-        } else {
-            Err(Fault::UnknownSymbol)
-        }
+    fn muse_type(&self) -> &TypeRef {
+        static TYPE: RustType<MuseWidget> = RustType::new("Widget", |t| {
+            t.with_invoke(|_| {
+                |this, _vm, name, arity| {
+                    if name == &Symbol::from("open") && arity == 0 {
+                        let widget = this.make_widget();
+                        Ok(widget
+                            .open(&muse_app()?)
+                            .unwrap()
+                            .map(|handle| Value::dynamic(OpenWindow(handle)))
+                            .unwrap_or_default())
+                    } else if name == &Symbol::from("expand") && arity == 0 {
+                        Ok(Value::dynamic(MuseWidget::Expand(
+                            this.make_widget().expand(),
+                        )))
+                    } else {
+                        Err(Fault::UnknownSymbol)
+                    }
+                }
+            })
+        });
+        &TYPE
     }
 }
 
 #[derive(Debug)]
 pub struct OpenWindow(WindowHandle);
 
-impl CustomType for OpenWindow {}
+impl CustomType for OpenWindow {
+    fn muse_type(&self) -> &TypeRef {
+        static TYPE: RustType<OpenWindow> = RustType::new("Window", |t| t);
+        &TYPE
+    }
+}
