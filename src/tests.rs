@@ -123,3 +123,33 @@ fn macros() {
     let result = vm.execute(&code).unwrap().as_u64();
     assert_eq!(result, Some(8));
 }
+
+#[test]
+fn recursive_macros() {
+    let code = Compiler::default()
+        .with_macro("$inner", |mut tokens: Vec<Ranged<Token>>| {
+            assert_eq!(tokens[0].0, Token::Open(Paired::Paren));
+            tokens.insert(2, Ranged::new(SourceRange::default(), Token::Char('+')));
+            assert_eq!(tokens[4].0, Token::Close(Paired::Paren));
+            dbg!(tokens)
+        })
+        .with_macro("$test", |mut tokens: Vec<Ranged<Token>>| {
+            tokens.insert(
+                0,
+                Ranged::new(SourceRange::default(), Token::Sigil(Symbol::from("$inner"))),
+            );
+            tokens
+        })
+        .with(&SourceCode::anonymous(
+            r"
+                let hello = 5;
+                let world = 3;
+                $test(hello world)
+            ",
+        ))
+        .build()
+        .unwrap();
+    let mut vm = Vm::default();
+    let result = vm.execute(&code).unwrap().as_u64();
+    assert_eq!(result, Some(8));
+}
