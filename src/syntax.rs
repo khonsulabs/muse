@@ -52,7 +52,7 @@ impl Sources {
     }
 }
 
-#[derive(Default, Clone, Copy, Eq, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Default, Clone, Copy, Eq, PartialEq, Hash, Debug, Serialize, Deserialize)]
 pub struct Ranged<T>(pub T, pub SourceRange);
 
 impl<T> Ranged<T> {
@@ -1049,6 +1049,7 @@ impl Parselet for Term {
                 | Token::String(_)
                 | Token::Symbol(_)
                 | Token::Sigil(_)
+                | Token::FormatString(_)
         )
     }
 }
@@ -1058,7 +1059,7 @@ impl PrefixParselet for Term {
         &self,
         token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
-        _config: &ParserConfig<'_>,
+        config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
         match token.0 {
             Token::Int(value) => Ok(Ranged::new(
@@ -1102,6 +1103,52 @@ impl PrefixParselet for Term {
                         })),
                     ))
                 }
+            }
+            Token::FormatString(format_string) => {
+                let mut left = Ranged::new(
+                    token.1,
+                    Expression::Literal(Literal::String(format_string.initial)),
+                );
+
+                // TODO this should use a var-arg join operation to avoid extra
+                // allocations
+                for part in format_string.parts {
+                    let mut reader = TokenReader::from(part.expression);
+                    let right = config.parse_expression(&mut reader)?;
+
+                    // Ensure the expression was fully consumed
+                    match reader.next() {
+                        Ok(token) => {
+                            return Err(token.map(|_| Error::ExpectedEof));
+                        }
+                        Err(Ranged(Error::UnexpectedEof, _)) => {}
+                        Err(other) => return Err(other),
+                    }
+
+                    left = tokens.ranged(
+                        left.range().start..right.range().end(),
+                        Expression::Binary(Box::new(BinaryExpression {
+                            left,
+                            right,
+                            kind: BinaryKind::Add,
+                        })),
+                    );
+
+                    let right = part
+                        .suffix
+                        .map(|suffix| Expression::Literal(Literal::String(suffix)));
+
+                    left = tokens.ranged(
+                        left.range().start..right.range().end(),
+                        Expression::Binary(Box::new(BinaryExpression {
+                            left,
+                            right,
+                            kind: BinaryKind::Add,
+                        })),
+                    );
+                }
+
+                Ok(left)
             }
             _ => unreachable!("parse called with invalid token"),
         }

@@ -24,6 +24,7 @@ pub enum Token {
     Char(char),
     String(String),
     Regex(RegexLiteral),
+    FormatString(FormatString),
     Power,
     LessThanOrEqual,
     GreaterThanOrEqual,
@@ -86,6 +87,7 @@ impl Hash for Token {
             Token::Open(t) | Token::Close(t) => t.hash(state),
             Token::String(t) => t.hash(state),
             Token::Regex(t) => t.hash(state),
+            Token::FormatString(t) => t.hash(state),
             Token::Whitespace
             | Token::NilCoalesce
             | Token::Comment
@@ -209,6 +211,9 @@ impl Iterator for Tokens<'_> {
                 }
 
                 (start, '"') => self.tokenize_string(start),
+                (start, 'f') if self.chars.peek() == Some('"') => {
+                    self.tokenize_format_string(start)
+                }
                 (start, '$') => Ok(self.tokenize_sigil(start)),
                 (start, '@') if self.chars.peek().map_or(false, unicode_ident::is_xid_start) => {
                     let ch = self.chars.next().expect("just peekend").1;
@@ -537,11 +542,15 @@ impl<'a> Tokens<'a> {
         self.chars.ranged(start.., Token::Comment)
     }
 
-    fn tokenize_string(&mut self, start: usize) -> Result<Ranged<Token>, Ranged<Error>> {
+    fn tokenize_string_literal_into_scratch(
+        &mut self,
+        allowed_escapes: &[char],
+        fallback: impl Fn(&mut Self, usize, char) -> Result<StringFlow, Ranged<Error>>,
+    ) -> Result<bool, Ranged<Error>> {
         self.scratch.clear();
         loop {
             match self.chars.next() {
-                Some((_, '"')) => break,
+                Some((_, '"')) => break Ok(false),
                 Some((index, '\\')) => match self.chars.next() {
                     Some((_, '"')) => self.scratch.push('"'),
                     Some((_, 'n')) => self.scratch.push('\n'),
@@ -555,11 +564,15 @@ impl<'a> Tokens<'a> {
                     Some((_, 'x')) => self
                         .decode_ascii_escape_into_scratch()
                         .map_err(|()| self.chars.ranged(index.., Error::InvalidEscapeSequence))?,
+                    Some((_, ch)) if allowed_escapes.contains(&ch) => self.scratch.push(ch),
                     _ => return Err(self.chars.ranged(index.., Error::InvalidEscapeSequence)),
                 },
-                Some((_, ch)) => {
-                    self.scratch.push(ch);
-                }
+                Some((offset, ch)) => match fallback(self, offset, ch)? {
+                    StringFlow::Break => break Ok(true),
+                    StringFlow::Unhandled => {
+                        self.scratch.push(ch);
+                    }
+                },
                 None => {
                     return Err(self
                         .chars
@@ -567,6 +580,10 @@ impl<'a> Tokens<'a> {
                 }
             }
         }
+    }
+
+    fn tokenize_string(&mut self, start: usize) -> Result<Ranged<Token>, Ranged<Error>> {
+        self.tokenize_string_literal_into_scratch(&[], |_, _, _| Ok(StringFlow::Unhandled))?;
 
         Ok(self
             .chars
@@ -638,6 +655,73 @@ impl<'a> Tokens<'a> {
         }
     }
 
+    #[allow(clippy::unnecessary_wraps)]
+    fn decode_format_string_fallback(
+        &mut self,
+        _offset: usize,
+        ch: char,
+    ) -> Result<StringFlow, Ranged<Error>> {
+        match ch {
+            '$' if self.chars.peek() == Some('{') => Ok(StringFlow::Break),
+            _ => Ok(StringFlow::Unhandled),
+        }
+    }
+
+    fn tokenize_format_string(&mut self, start: usize) -> Result<Ranged<Token>, Ranged<Error>> {
+        self.chars.next();
+        let mut continued =
+            self.tokenize_string_literal_into_scratch(&['$'], Self::decode_format_string_fallback)?;
+        let initial = self.scratch.clone();
+        let mut parts = Vec::new();
+
+        let mut stack = Vec::new();
+        while continued {
+            let (brace_offset, _brace) = self.chars.next().expect("just peeked");
+            stack.clear();
+            stack.push(Paired::Brace);
+            let mut expression = vec![self
+                .chars
+                .ranged(brace_offset.., Token::Open(Paired::Brace))];
+            while let Some(last_open) = stack.last().copied() {
+                let token = self.next().ok_or_else(|| {
+                    self.chars
+                        .ranged(self.chars.last_index.., Error::MissingEndQuote)
+                })??;
+                expression.push(token);
+                match &expression.last().expect("just pushed").0 {
+                    Token::Close(kind) => {
+                        if *kind == last_open {
+                            stack.pop();
+                        } else {
+                            // TODO change to a MissingEnd, but then refactor the other MissingEnd to use this variant.
+                            return Err(self
+                                .chars
+                                .ranged(self.chars.last_index.., Error::MissingEndQuote));
+                        }
+                    }
+                    Token::Open(kind) => {
+                        stack.push(*kind);
+                    }
+                    _ => {}
+                }
+            }
+            let suffix_start = self.chars.last_index;
+            continued = self.tokenize_string_literal_into_scratch(
+                &['$'],
+                Self::decode_format_string_fallback,
+            )?;
+            parts.push(FormatStringPart {
+                expression,
+                suffix: self.chars.ranged(suffix_start.., self.scratch.clone()),
+            });
+        }
+
+        Ok(self.chars.ranged(
+            start..,
+            Token::FormatString(FormatString { initial, parts }),
+        ))
+    }
+
     fn tokenize_regex(
         &mut self,
         start: usize,
@@ -697,6 +781,11 @@ impl<'a> Tokens<'a> {
             }),
         ))
     }
+}
+
+enum StringFlow {
+    Break,
+    Unhandled,
 }
 
 fn decode_hex_char(ch: char) -> Option<u8> {
@@ -769,6 +858,20 @@ pub struct RegexLiteral {
     pub dot_matches_all: bool,
     #[serde(default)]
     pub multiline: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, Hash, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct FormatString {
+    pub initial: String,
+    pub parts: Vec<FormatStringPart>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, Hash, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct FormatStringPart {
+    pub expression: Vec<Ranged<Token>>,
+    pub suffix: Ranged<String>,
 }
 
 #[test]

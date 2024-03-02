@@ -32,3 +32,18 @@ split_same: {
         String(""),
     ]),
 }
+
+format: {
+    src: r#"
+        let name = "world";
+        f"hello, ${ name }!"
+    "#,
+    output: String("hello, world!"),
+}
+
+format_escape: {
+    src: r#"
+        f"hello, \${ name }! $"
+    "#,
+    output: String("hello, ${ name }! $"),
+}
