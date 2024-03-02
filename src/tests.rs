@@ -1,7 +1,7 @@
 use crate::compiler::Compiler;
 use crate::exception::Exception;
 use crate::symbol::Symbol;
-use crate::syntax::token::Token;
+use crate::syntax::token::{Paired, Token};
 use crate::syntax::{Ranged, SourceCode, SourceRange};
 use crate::value::Value;
 use crate::vm::bitcode::BitcodeBlock;
@@ -105,8 +105,10 @@ fn invoke() {
 fn macros() {
     let code = Compiler::default()
         .with_macro("$test", |mut tokens: Vec<Ranged<Token>>| {
-            tokens.insert(1, Ranged::new(SourceRange::default(), Token::Char('+')));
-            tokens
+            assert_eq!(tokens[0].0, Token::Open(Paired::Paren));
+            tokens.insert(2, Ranged::new(SourceRange::default(), Token::Char('+')));
+            assert_eq!(tokens[4].0, Token::Close(Paired::Paren));
+            dbg!(tokens)
         })
         .with(&SourceCode::anonymous(
             r"

@@ -1112,22 +1112,17 @@ fn gather_macro_tokens(tokens: &mut TokenReader<'_>) -> Result<Vec<Ranged<Token>
     let Some(Token::Open(paired)) = tokens.peek_token() else {
         return Ok(Vec::new());
     };
-    tokens.next()?;
 
     let mut stack = vec![paired];
-    let mut contents = Vec::new();
+    let mut contents = vec![tokens.next()?];
 
-    loop {
+    while let Some(last_open) = stack.last().copied() {
         let token = tokens.next()?;
         match &token.0 {
             Token::Open(next) => stack.push(*next),
             Token::Close(kind) => {
-                let last_open = stack[stack.len() - 1];
                 if *kind == last_open {
                     stack.pop();
-                    if stack.is_empty() {
-                        break;
-                    }
                 } else {
                     return Err(token.map(|_| Error::MissingEnd(last_open)));
                 }

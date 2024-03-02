@@ -98,7 +98,7 @@ impl Compiler {
     pub fn expand_macros(&mut self, expr: &mut Ranged<Expression>) {
         match &mut expr.0 {
             Expression::Macro(e) => {
-                if let Some(m) = self.macros.get_mut(dbg!(&e.name)) {
+                if let Some(m) = self.macros.get_mut(&e.name) {
                     let tokens = std::mem::take(&mut e.tokens);
                     match syntax::parse_tokens(m.0.transform(tokens)) {
                         Ok(mut expanded) => {
@@ -106,14 +106,13 @@ impl Compiler {
                             *expr = expanded;
                         }
                         Err(err) => {
-                            // TODO: different error message since it's caused
-                            // inside of a macro expansion?
-                            self.errors.push(err.map(Error::Syntax));
+                            self.errors.push(err.map(Error::SigilSyntax));
                             expr.0 = Expression::Literal(Literal::Nil);
                         }
                     }
                 } else {
-                    todo!("unknown macro")
+                    self.errors
+                        .push(Ranged::new(expr.range(), Error::UnknownSigil));
                 }
             }
             Expression::RootModule | Expression::Literal(_) | Expression::Continue(_) => {}
@@ -1951,10 +1950,12 @@ pub enum Error {
     PubOnlyInModules,
     ExpectedBlock,
     NameAlreadyBound,
+    UnknownSigil,
     OrPatternBindingsMismatch,
     ElseOnIrrefutablePattern,
     LetElseMustDiverge,
     Syntax(syntax::Error),
+    SigilSyntax(syntax::Error),
 }
 
 impl crate::Error for Error {
@@ -1971,7 +1972,8 @@ impl crate::Error for Error {
             Error::OrPatternBindingsMismatch => "or pattern bindings mismatch",
             Error::ElseOnIrrefutablePattern => "else on irrefutable pattern",
             Error::LetElseMustDiverge => "let else must diverge",
-            Error::Syntax(err) => err.kind(),
+            Error::UnknownSigil => "unknown sigil",
+            Error::Syntax(err) | Error::SigilSyntax(err) => err.kind(),
         }
     }
 }
@@ -2002,7 +2004,9 @@ impl Display for Error {
                 f.write_str("this else block is unreachable, because the pattern is irrefutable")
             }
             Error::LetElseMustDiverge => f.write_str("all code paths must diverge"),
+            Error::UnknownSigil => f.write_str("unknown sigil"),
             Error::Syntax(err) => Display::fmt(err, f),
+            Error::SigilSyntax(err) => write!(f, "syntax error in sigil expansion: {err}"),
         }
     }
 }

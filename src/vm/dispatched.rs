@@ -912,7 +912,9 @@ impl Source for Value {
                 } else if let Some(func) = value.downcast_ref::<Function>() {
                     ValueOrSource::Function(BitcodeFunction::from(func))
                 } else {
-                    todo!("Error handling")
+                    // All dynamics generated into a Source must be known by
+                    // Muse
+                    unreachable!("unexpected dynamic")
                 }
             }
         }
