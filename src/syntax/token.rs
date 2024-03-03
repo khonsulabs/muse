@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
+use std::collections::VecDeque;
 use std::fmt::Display;
 use std::hash::Hash;
-use std::iter::Peekable;
 use std::ops::RangeBounds;
 use std::str::CharIndices;
 
@@ -143,9 +143,43 @@ impl Paired {
     }
 }
 
+struct PeekNChars<'a> {
+    peeked: VecDeque<(usize, char)>,
+    chars: CharIndices<'a>,
+}
+
+impl<'a> PeekNChars<'a> {
+    fn new(source: &'a str) -> Self {
+        Self {
+            peeked: VecDeque::new(),
+            chars: source.char_indices(),
+        }
+    }
+
+    fn peek_n(&mut self, n: usize) -> Option<&(usize, char)> {
+        while n >= self.peeked.len() {
+            self.peeked.push_back(self.chars.next()?);
+        }
+
+        self.peeked.get(n)
+    }
+
+    fn peek(&mut self) -> Option<&(usize, char)> {
+        self.peek_n(0)
+    }
+}
+
+impl Iterator for PeekNChars<'_> {
+    type Item = (usize, char);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.peeked.pop_front().or_else(|| self.chars.next())
+    }
+}
+
 struct Chars<'a> {
     id: SourceId,
-    source: Peekable<CharIndices<'a>>,
+    source: PeekNChars<'a>,
     last_index: usize,
 }
 
@@ -153,13 +187,23 @@ impl<'a> Chars<'a> {
     fn new(source: &'a str, id: SourceId) -> Self {
         Self {
             id,
-            source: source.char_indices().peekable(),
+            source: PeekNChars::new(source),
             last_index: 0,
         }
     }
 
     pub const fn source(&self) -> SourceId {
         self.id
+    }
+
+    fn peek_n(&mut self, n: usize) -> Option<char> {
+        self.source.peek_n(n).map(|(_, ch)| *ch)
+    }
+
+    fn advance(&mut self, n: usize) {
+        for _ in 0..n {
+            self.source.next();
+        }
     }
 
     fn peek(&mut self) -> Option<char> {
@@ -191,6 +235,7 @@ pub struct Tokens<'a> {
 impl Iterator for Tokens<'_> {
     type Item = Result<Ranged<Token>, Ranged<Error>>;
 
+    #[allow(clippy::too_many_lines)]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             break Some(match self.chars.next()? {
@@ -211,8 +256,18 @@ impl Iterator for Tokens<'_> {
                 }
 
                 (start, '"') => self.tokenize_string(start),
+                (start, 'r') if matches!(self.chars.peek(), Some('"' | '#')) => {
+                    self.tokenize_raw_string(start)
+                }
                 (start, 'f') if self.chars.peek() == Some('"') => {
-                    self.tokenize_format_string(start)
+                    self.tokenize_format_string(start, false)
+                }
+                (start, 'f')
+                    if self.chars.peek() == Some('r')
+                        && matches!(self.chars.peek_n(1), Some('"' | '#')) =>
+                {
+                    self.chars.next();
+                    self.tokenize_format_string(start, true)
                 }
                 (start, '$') => Ok(self.tokenize_sigil(start)),
                 (start, '@') if self.chars.peek().map_or(false, unicode_ident::is_xid_start) => {
@@ -590,6 +645,14 @@ impl<'a> Tokens<'a> {
             .ranged(start.., Token::String(self.scratch.clone())))
     }
 
+    fn tokenize_raw_string(&mut self, start: usize) -> Result<Ranged<Token>, Ranged<Error>> {
+        self.tokenize_raw_string_literal_into_scratch(&[], |_, _, _| Ok(StringFlow::Unhandled))?;
+
+        Ok(self
+            .chars
+            .ranged(start.., Token::String(self.scratch.clone())))
+    }
+
     fn decode_unicode_escape_into_scratch(&mut self) -> Result<(), ()> {
         match self.chars.next() {
             Some((_, '{')) => {}
@@ -655,6 +718,72 @@ impl<'a> Tokens<'a> {
         }
     }
 
+    fn determine_raw_string_thorpeness(&mut self) -> Result<usize, Ranged<Error>> {
+        let mut octothorpeness = 0;
+        while self.chars.peek() == Some('#') {
+            octothorpeness += 1;
+            self.chars.next();
+        }
+        match self.chars.next() {
+            Some((_, '"')) => Ok(octothorpeness),
+            Some((index, _)) => Err(self.chars.ranged(index.., Error::ExpectedRawString)),
+            None => Err(self
+                .chars
+                .ranged(self.chars.last_index.., Error::ExpectedRawString)),
+        }
+    }
+
+    fn tokenize_raw_string_literal_into_scratch(
+        &mut self,
+        allowed_escapes: &[char],
+        fallback: impl Fn(&mut Self, usize, char) -> Result<StringFlow, Ranged<Error>>,
+    ) -> Result<bool, Ranged<Error>> {
+        let octothorpeness = self.determine_raw_string_thorpeness()?;
+        self.tokenize_raw_string_literal_into_scratch_with_thorpeness(
+            octothorpeness,
+            allowed_escapes,
+            fallback,
+        )
+    }
+
+    fn tokenize_raw_string_literal_into_scratch_with_thorpeness(
+        &mut self,
+        octothorpeness: usize,
+        allowed_escapes: &[char],
+        fallback: impl Fn(&mut Self, usize, char) -> Result<StringFlow, Ranged<Error>>,
+    ) -> Result<bool, Ranged<Error>> {
+        self.scratch.clear();
+        'decoding: loop {
+            match self.chars.next() {
+                Some((_, '"')) => {
+                    for thorp in 0..octothorpeness {
+                        if self.chars.peek_n(thorp) != Some('#') {
+                            self.scratch.push('"');
+                            continue 'decoding;
+                        }
+                    }
+                    self.chars.advance(octothorpeness);
+                    break Ok(false);
+                }
+                Some((_, ch)) if allowed_escapes.contains(&ch) && self.chars.peek() == Some(ch) => {
+                    self.chars.next();
+                    self.scratch.push(ch);
+                }
+                Some((offset, ch)) => match fallback(self, offset, ch)? {
+                    StringFlow::Break => break Ok(true),
+                    StringFlow::Unhandled => {
+                        self.scratch.push(ch);
+                    }
+                },
+                _ => {
+                    return Err(self
+                        .chars
+                        .ranged(self.chars.last_index.., Error::MissingEndQuote))
+                }
+            }
+        }
+    }
+
     #[allow(clippy::unnecessary_wraps)]
     fn decode_format_string_fallback(
         &mut self,
@@ -667,10 +796,35 @@ impl<'a> Tokens<'a> {
         }
     }
 
-    fn tokenize_format_string(&mut self, start: usize) -> Result<Ranged<Token>, Ranged<Error>> {
-        self.chars.next();
-        let mut continued =
-            self.tokenize_string_literal_into_scratch(&['$'], Self::decode_format_string_fallback)?;
+    fn decode_format_string_contents(
+        &mut self,
+        raw: bool,
+        octothorpeness: usize,
+    ) -> Result<bool, Ranged<Error>> {
+        if raw {
+            self.tokenize_raw_string_literal_into_scratch_with_thorpeness(
+                octothorpeness,
+                &['$'],
+                Self::decode_format_string_fallback,
+            )
+        } else {
+            self.tokenize_string_literal_into_scratch(&['$'], Self::decode_format_string_fallback)
+        }
+    }
+
+    fn tokenize_format_string(
+        &mut self,
+        start: usize,
+        raw: bool,
+    ) -> Result<Ranged<Token>, Ranged<Error>> {
+        let octothorpeness = if raw {
+            self.determine_raw_string_thorpeness()?
+        } else {
+            self.chars.next();
+            0
+        };
+        let mut continued = self.decode_format_string_contents(raw, octothorpeness)?;
+
         let initial = self.scratch.clone();
         let mut parts = Vec::new();
 
@@ -706,10 +860,7 @@ impl<'a> Tokens<'a> {
                 }
             }
             let suffix_start = self.chars.last_index;
-            continued = self.tokenize_string_literal_into_scratch(
-                &['$'],
-                Self::decode_format_string_fallback,
-            )?;
+            continued = self.decode_format_string_contents(raw, octothorpeness)?;
             parts.push(FormatStringPart {
                 expression,
                 suffix: self.chars.ranged(suffix_start.., self.scratch.clone()),
@@ -813,6 +964,7 @@ pub enum Error {
     FloatParse(String),
     MissingEndQuote,
     MissingRegexEnd,
+    ExpectedRawString,
     InvalidEscapeSequence,
 }
 
@@ -825,6 +977,7 @@ impl crate::Error for Error {
             Error::MissingEndQuote => "missing end quote",
             Error::MissingRegexEnd => "missing regex end",
             Error::InvalidEscapeSequence => "invalid escape sequence",
+            Error::ExpectedRawString => "expected raw string",
         }
     }
 }
@@ -840,6 +993,7 @@ impl Display for Error {
             Error::MissingEndQuote => f.write_str("missing end quote (\")"),
             Error::MissingRegexEnd => f.write_str("missing regular expression end (/)"),
             Error::InvalidEscapeSequence => f.write_str("invalid escape sequence"),
+            Error::ExpectedRawString => f.write_str("expected raw string"),
         }
     }
 }

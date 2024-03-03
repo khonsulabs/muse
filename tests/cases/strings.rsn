@@ -47,3 +47,33 @@ format_escape: {
     "#,
     output: String("hello, ${ name }! $"),
 }
+
+raw_string: {
+    src: r#"r"raw\string""#,
+    output: String(r#"raw\string"#),
+}
+
+raw_1_string: {
+    src: r##"r#"""#"##,
+    output: String(r#"""#),
+}
+
+raw_2_string: {
+    src: r###"r##""#"##"###,
+    output: String(r##""#"##),
+}
+
+raw_format: {
+    src: r##"
+        let name = "world";
+        fr#"hello, "${ name }"!"#
+    "##,
+    output: String(r#"hello, "world"!"#),
+}
+
+raw_format_escape: {
+    src: r#"
+        fr"hello, $${ name }!"
+    "#,
+    output: String("hello, ${ name }!"),
+}
