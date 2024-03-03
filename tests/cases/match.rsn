@@ -82,7 +82,7 @@ let_else_doesnt_diverge: {
 }
 
 map_tuple_destructure: {
-    src: r#"let ["a", 1] = {"a": 1}"#,
+    src: r#"let (["a", 1]) = {"a": 1}"#,
     output: Bool(true),
 }
 
@@ -100,6 +100,11 @@ tuple_mismatch: {
     ),
 }
 
+list_match: {
+    src: r#"let ["a", a] = ["a", 1]; a"#,
+    output: Int(1),
+}
+
 map_match: {
     src: r#"let {"a": a} = {"a": 1}; a"#,
     output: Int(1),
@@ -115,5 +120,19 @@ tuple_remaining: {
         (1, 2) => false,
         (1, ...) => true,
     }"#,
+    output: Bool(true),
+}
+
+match_problem: {
+    src: r#"
+    match (1, 2) {
+        (1, 2) => true,
+    };
+
+    let a = (1, 2);
+    match a {
+        (1, 2) => true,
+    }
+    "#,
     output: Bool(true),
 }

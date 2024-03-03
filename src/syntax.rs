@@ -2368,7 +2368,7 @@ fn parse_pattern(
     tokens: &mut TokenReader<'_>,
     config: &ParserConfig<'_>,
 ) -> Result<Option<Ranged<Pattern>>, Ranged<Error>> {
-    let Some(kind) = parse_pattern_kind(tokens, true)? else {
+    let Some(kind) = parse_pattern_kind(tokens)? else {
         return Ok(None);
     };
 
@@ -2390,7 +2390,6 @@ fn parse_pattern(
 #[allow(clippy::too_many_lines)]
 fn parse_pattern_kind(
     tokens: &mut TokenReader<'_>,
-    top_level: bool,
 ) -> Result<Option<Ranged<PatternKind>>, Ranged<Error>> {
     let Some(indicator) = tokens.peek() else {
         return Ok(None);
@@ -2471,17 +2470,7 @@ fn parse_pattern_kind(
         }
         Token::Open(kind @ (Paired::Paren | Paired::Bracket)) => {
             tokens.next()?;
-            let mut pattern =
-                parse_tuple_destructure_pattern(indicator.range().start, *kind, tokens)?;
-            // TODO move this to pattern compilation, checking to see if the
-            // argument is a tuple or not
-            if top_level && *kind == Paired::Bracket {
-                pattern = Ranged::new(
-                    pattern.range(),
-                    PatternKind::DestructureTuple(vec![pattern]),
-                );
-            }
-            pattern
+            parse_tuple_destructure_pattern(indicator.range().start, *kind, tokens)?
         }
         Token::Open(Paired::Brace) => {
             tokens.next()?;
@@ -2493,7 +2482,7 @@ fn parse_pattern_kind(
 
     while tokens.peek_token() == Some(Token::Char('|')) {
         tokens.next()?;
-        let Some(rhs) = parse_pattern_kind(tokens, top_level)? else {
+        let Some(rhs) = parse_pattern_kind(tokens)? else {
             return Err(tokens.ranged(tokens.last_index.., Error::ExpectedPattern));
         };
         pattern = tokens.ranged(
@@ -2511,7 +2500,7 @@ fn parse_tuple_destructure_pattern(
     tokens: &mut TokenReader<'_>,
 ) -> Result<Ranged<PatternKind>, Ranged<Error>> {
     let mut patterns = Vec::new();
-    while let Some(pattern) = parse_pattern_kind(tokens, false)? {
+    while let Some(pattern) = parse_pattern_kind(tokens)? {
         patterns.push(pattern);
 
         if tokens.peek_token() == Some(Token::Char(',')) {
@@ -2566,7 +2555,7 @@ fn parse_map_destructure_pattern(
                 return Err(colon.map(|_| Error::ExpectedColon));
             }
 
-            let Some(value) = parse_pattern_kind(tokens, false)? else {
+            let Some(value) = parse_pattern_kind(tokens)? else {
                 return Err(tokens.ranged(tokens.last_index.., Error::ExpectedPattern));
             };
             entries.push(tokens.ranged(key.range().start.., EntryPattern { key, value }));

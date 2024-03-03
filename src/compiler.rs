@@ -917,45 +917,13 @@ impl<'a> Scope<'a> {
                 refutable
             }
             PatternKind::DestructureTuple(patterns) => {
-                let expected_count = u64::try_from(patterns.len()).unwrap_or_else(|_| {
-                    self.compiler
-                        .errors
-                        .push(Ranged::new(pattern.range(), Error::UsizeTooLarge));
-                    u64::MAX
-                });
-
-                self.compiler
-                    .code
-                    .invoke(source.clone(), Symbol::len_symbol(), 0);
-                self.compiler.code.compare(
-                    CompareKind::Equal,
-                    Register(0),
-                    expected_count,
-                    Register(0),
+                self.compile_tuple_destructure(
+                    patterns,
+                    &source,
+                    doesnt_match,
+                    pattern.range(),
+                    bindings,
                 );
-                self.compiler
-                    .code
-                    .jump_if_not(doesnt_match, Register(0), ());
-
-                let element = self.new_temporary();
-                for (i, index) in (0..expected_count).zip(0_usize..) {
-                    if i == expected_count - 1 && matches!(&pattern.0, PatternKind::AnyRemaining) {
-                        break;
-                    }
-                    self.compiler.code.set_current_source_range(pattern.range());
-                    self.compiler.code.copy(i, Register(0));
-                    self.compiler
-                        .code
-                        .invoke(source.clone(), Symbol::nth_symbol(), 1);
-                    self.compiler.code.copy(Register(0), element);
-                    self.compile_pattern_binding(
-                        &patterns[index],
-                        ValueOrSource::Stack(element),
-                        doesnt_match,
-                        bindings,
-                    );
-                }
-
                 Refutability::Refutable
             }
             PatternKind::DestructureMap(entries) => {
@@ -1009,22 +977,70 @@ impl<'a> Scope<'a> {
         }
     }
 
-    fn compile_match_expression(&mut self, match_expr: &MatchExpression, dest: OpDestination) {
-        let condition = if let Expression::Tuple(tuple) = &match_expr.condition.0 {
-            &**tuple
-        } else {
-            std::slice::from_ref(&match_expr.condition)
-        };
-        let conditions = condition
-            .iter()
-            .map(|condition| self.compile_source(condition))
-            .collect::<Vec<_>>();
-        self.compile_match(&conditions, &match_expr.matches, dest);
+    fn compile_tuple_destructure(
+        &mut self,
+        patterns: &[Ranged<PatternKind>],
+        source: &ValueOrSource,
+        doesnt_match: Label,
+        pattern_range: SourceRange,
+        bindings: &mut PatternBindings,
+    ) {
+        let expected_count = u64::try_from(patterns.len()).unwrap_or_else(|_| {
+            self.compiler
+                .errors
+                .push(Ranged::new(pattern_range, Error::UsizeTooLarge));
+            u64::MAX
+        });
+
+        self.compiler
+            .code
+            .invoke(source.clone(), Symbol::len_symbol(), 0);
+        self.compiler
+            .code
+            .compare(CompareKind::Equal, Register(0), expected_count, Register(0));
+        self.compiler
+            .code
+            .jump_if_not(doesnt_match, Register(0), ());
+
+        let element = self.new_temporary();
+        for (i, index) in (0..expected_count).zip(0_usize..) {
+            if i == expected_count - 1 && matches!(&patterns[index].0, PatternKind::AnyRemaining) {
+                break;
+            }
+            self.compiler
+                .code
+                .set_current_source_range(patterns[index].range());
+            self.compiler.code.copy(i, Register(0));
+            self.compiler
+                .code
+                .invoke(source.clone(), Symbol::nth_symbol(), 1);
+            self.compiler.code.copy(Register(0), element);
+            self.compile_pattern_binding(
+                &patterns[index],
+                ValueOrSource::Stack(element),
+                doesnt_match,
+                bindings,
+            );
+        }
     }
 
+    fn compile_match_expression(&mut self, match_expr: &MatchExpression, dest: OpDestination) {
+        let conditions = if let Expression::Tuple(tuple) | Expression::List(tuple) =
+            &match_expr.condition.0
+        {
+            MatchExpressions::Tuple(tuple.iter().map(|expr| self.compile_source(expr)).collect())
+        } else {
+            MatchExpressions::Single(self.compile_source(&match_expr.condition))
+        };
+        let after_expression = self.compiler.code.new_label();
+        self.compile_match(&conditions, &match_expr.matches, dest);
+        self.compiler.code.label(after_expression);
+    }
+
+    #[allow(clippy::too_many_lines)]
     fn compile_match(
         &mut self,
-        conditions: &[ValueOrSource],
+        conditions: &MatchExpressions,
         matches: &Ranged<Matches>,
         dest: OpDestination,
     ) {
@@ -1032,6 +1048,7 @@ impl<'a> Scope<'a> {
         let mut refutable = Refutability::Irrefutable;
         let previous_handler = self.new_temporary();
         let mut stored_previous_handler = false;
+        let after_expression = self.compiler.code.new_label();
 
         for matches in &matches.patterns {
             let mut pattern_block = self.enter_block(None);
@@ -1048,37 +1065,73 @@ impl<'a> Scope<'a> {
                 .code
                 .set_exception_handler(next_pattern, previous_handler);
 
-            let parameters = match &matches.pattern.kind.0 {
-                PatternKind::Any(None) | PatternKind::AnyRemaining => None,
-                PatternKind::Any(_)
-                | PatternKind::Literal(_)
-                | PatternKind::Or(_, _)
-                | PatternKind::DestructureMap(_) => {
-                    Some(std::slice::from_ref(&matches.pattern.kind))
-                }
-                PatternKind::DestructureTuple(patterns) => Some(&**patterns),
-            };
-
-            if let Some(parameters) = parameters {
-                if parameters.len() == conditions.len()
-                    || parameters
-                        .last()
-                        .map_or(false, |param| matches!(&param.0, PatternKind::AnyRemaining))
-                {
-                    for (parameter, condition) in parameters.iter().zip(conditions) {
-                        refutable |= pattern_block.compile_pattern_binding(
-                            parameter,
-                            condition.clone(),
-                            next_pattern,
-                            &mut PatternBindings::default(),
-                        );
+            match &conditions {
+                MatchExpressions::Single(condition) => {
+                    match &matches.pattern.kind.0 {
+                        PatternKind::Any(None) | PatternKind::AnyRemaining => {}
+                        PatternKind::Any(_)
+                        | PatternKind::Literal(_)
+                        | PatternKind::Or(_, _)
+                        | PatternKind::DestructureMap(_) => {
+                            refutable |= pattern_block.compile_pattern_binding(
+                                &matches.pattern.kind,
+                                condition.clone(),
+                                next_pattern,
+                                &mut PatternBindings::default(),
+                            );
+                        }
+                        PatternKind::DestructureTuple(patterns) => {
+                            pattern_block.compile_tuple_destructure(
+                                patterns,
+                                condition,
+                                next_pattern,
+                                matches.range(),
+                                &mut PatternBindings::default(),
+                            );
+                            refutable = Refutability::Refutable;
+                        }
                     }
+
                     pattern_block
                         .compiler
                         .code
                         .set_current_source_range(matches.range());
-                } else {
-                    pattern_block.compiler.code.jump(next_pattern, ());
+                }
+                MatchExpressions::Tuple(conditions) => {
+                    let parameters = match &matches.pattern.kind.0 {
+                        PatternKind::Any(None) | PatternKind::AnyRemaining => None,
+                        PatternKind::Any(_)
+                        | PatternKind::Literal(_)
+                        | PatternKind::Or(_, _)
+                        | PatternKind::DestructureMap(_) => {
+                            Some(std::slice::from_ref(&matches.pattern.kind))
+                        }
+                        PatternKind::DestructureTuple(patterns) => Some(&**patterns),
+                    };
+
+                    if let Some(parameters) = parameters {
+                        if parameters.len() == conditions.len()
+                            || parameters.last().map_or(false, |param| {
+                                matches!(&param.0, PatternKind::AnyRemaining)
+                            })
+                        {
+                            for (parameter, condition) in parameters.iter().zip(conditions) {
+                                refutable |= pattern_block.compile_pattern_binding(
+                                    parameter,
+                                    condition.clone(),
+                                    next_pattern,
+                                    &mut PatternBindings::default(),
+                                );
+                            }
+                            pattern_block
+                                .compiler
+                                .code
+                                .set_current_source_range(matches.range());
+                        } else {
+                            refutable = Refutability::Refutable;
+                            pattern_block.compiler.code.jump(next_pattern, ());
+                        }
+                    }
                 }
             }
 
@@ -1105,7 +1158,7 @@ impl<'a> Scope<'a> {
                 .compiler
                 .code
                 .set_current_source_range(matches.range());
-            pattern_block.compiler.code.return_early();
+            pattern_block.compiler.code.jump(after_expression, ());
             drop(pattern_block);
 
             self.compiler.code.label(next_pattern);
@@ -1120,6 +1173,7 @@ impl<'a> Scope<'a> {
         if refutable == Refutability::Refutable {
             self.compiler.code.throw(FaultKind::PatternMismatch);
         }
+        self.compiler.code.label(after_expression);
     }
 
     fn compile_throw(&mut self, value: &Ranged<Expression>, range: SourceRange) {
@@ -1136,7 +1190,11 @@ impl<'a> Scope<'a> {
             |this| this.compile_expression(&try_expr.body, dest),
             |this| {
                 if let Some(matches) = &try_expr.catch {
-                    this.compile_match(&[ValueOrSource::Register(Register(0))], matches, dest);
+                    this.compile_match(
+                        &MatchExpressions::Single(ValueOrSource::Register(Register(0))),
+                        matches,
+                        dest,
+                    );
                 } else {
                     // A catch-less try converts to nil. It's just a different
                     // form of the ? operator.
@@ -2088,4 +2146,9 @@ impl SourceMap {
 struct InstructionRange {
     range: SourceRange,
     instructions: Range<usize>,
+}
+
+enum MatchExpressions {
+    Single(ValueOrSource),
+    Tuple(Vec<ValueOrSource>),
 }

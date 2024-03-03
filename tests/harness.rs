@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::process::exit;
 
 use muse::compiler::{Compiler, Error};
 use muse::exception::Exception;
@@ -180,13 +181,16 @@ fn run_test_cases(path: &Path, filter: &str) {
         }
         println!("Running {name}");
         let (code, output) = case.run();
-        assert_eq!(
-            output,
-            case.output,
-            "in {path} @ {name}: expected {expected:?}, got {output:?}\n{code:#?}",
-            path = path.display(),
-            expected = case.output
-        );
+        if output != case.output {
+            eprintln!("== Test Case Error ==");
+            eprintln!("{code:#?}");
+            eprintln!(
+                "in {path} @ {name}: expected {expected:?}, got {output:?}",
+                path = path.display(),
+                expected = case.output,
+            );
+            exit(-1);
+        }
     }
 }
 
