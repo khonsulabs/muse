@@ -1,0 +1,12 @@
+$case(
+    block: r#"$assert({ 1; 2 } == 2)"#
+);
+
+$case(
+    labeled_block: r#"
+        let result = @label: {
+            break @label 42;
+        };
+        $assert(result == 42);
+    "#
+)

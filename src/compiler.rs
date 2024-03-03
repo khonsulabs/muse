@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::fmt::{Debug, Display};
 use std::ops::{BitOr, BitOrAssign, Range};
 use std::sync::Arc;
@@ -19,7 +20,7 @@ use crate::vm::bitcode::{
 };
 use crate::vm::{Code, Register, Stack};
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct Compiler {
     function_name: Option<Symbol>,
     parsed: Vec<Result<Ranged<Expression>, Ranged<syntax::Error>>>,
@@ -235,15 +236,58 @@ impl Compiler {
     }
 }
 
+impl Default for Compiler {
+    fn default() -> Self {
+        Self {
+            function_name: None,
+            parsed: Vec::new(),
+            errors: Vec::new(),
+            code: BitcodeBlock::default(),
+            declarations: Map::new(),
+            scopes: Vec::new(),
+            macros: Map::new(),
+        }
+        .with_macro("$assert", |mut tokens: VecDeque<Ranged<Token>>| {
+            let start_range = tokens.front().map(Ranged::range).unwrap_or_default();
+            let end_range = tokens.back().map(Ranged::range).unwrap_or_default();
+            tokens.push_back(Ranged::new(
+                end_range,
+                Token::Identifier(Symbol::else_symbol().clone()),
+            ));
+            tokens.push_back(Ranged::new(
+                end_range,
+                Token::Identifier(Symbol::throw_symbol().clone()),
+            ));
+            tokens.push_back(Ranged::new(
+                end_range,
+                Token::Symbol(Symbol::from("assertion_failed")),
+            ));
+            // tokens.push_back(Ranged::default_for(Token::Close(Paired::Paren)));
+            // tokens.push_front(Ranged::default_for(Token::Open(Paired::Paren)));
+            tokens.push_front(Ranged::new(start_range, Token::Char('!')));
+            tokens.push_front(Ranged::new(start_range, Token::Char('=')));
+            tokens.push_front(Ranged::new(
+                start_range,
+                Token::Identifier(Symbol::false_symbol().clone()),
+            ));
+            tokens.push_front(Ranged::new(
+                start_range,
+                Token::Identifier(Symbol::let_symbol().clone()),
+            ));
+            tokens
+        })
+    }
+}
+
 pub trait MacroFn: Send + Sync {
-    fn transform(&mut self, tokens: Vec<Ranged<Token>>) -> Vec<Ranged<Token>>;
+    fn transform(&mut self, tokens: VecDeque<Ranged<Token>>) -> VecDeque<Ranged<Token>>;
 }
 
 impl<F> MacroFn for F
 where
-    F: FnMut(Vec<Ranged<Token>>) -> Vec<Ranged<Token>> + Send + Sync,
+    F: FnMut(VecDeque<Ranged<Token>>) -> VecDeque<Ranged<Token>> + Send + Sync,
 {
-    fn transform(&mut self, tokens: Vec<Ranged<Token>>) -> Vec<Ranged<Token>> {
+    fn transform(&mut self, tokens: VecDeque<Ranged<Token>>) -> VecDeque<Ranged<Token>> {
         self(tokens)
     }
 }

@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::compiler::Compiler;
 use crate::exception::Exception;
 use crate::symbol::Symbol;
@@ -104,7 +106,7 @@ fn invoke() {
 #[test]
 fn macros() {
     let code = Compiler::default()
-        .with_macro("$test", |mut tokens: Vec<Ranged<Token>>| {
+        .with_macro("$test", |mut tokens: VecDeque<Ranged<Token>>| {
             assert_eq!(tokens[0].0, Token::Open(Paired::Paren));
             tokens.insert(2, Ranged::new(SourceRange::default(), Token::Char('+')));
             assert_eq!(tokens[4].0, Token::Close(Paired::Paren));
@@ -127,13 +129,13 @@ fn macros() {
 #[test]
 fn recursive_macros() {
     let code = Compiler::default()
-        .with_macro("$inner", |mut tokens: Vec<Ranged<Token>>| {
+        .with_macro("$inner", |mut tokens: VecDeque<Ranged<Token>>| {
             assert_eq!(tokens[0].0, Token::Open(Paired::Paren));
             tokens.insert(2, Ranged::new(SourceRange::default(), Token::Char('+')));
             assert_eq!(tokens[4].0, Token::Close(Paired::Paren));
             dbg!(tokens)
         })
-        .with_macro("$test", |mut tokens: Vec<Ranged<Token>>| {
+        .with_macro("$test", |mut tokens: VecDeque<Ranged<Token>>| {
             tokens.insert(
                 0,
                 Ranged::new(SourceRange::default(), Token::Sigil(Symbol::from("$inner"))),

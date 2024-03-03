@@ -57,6 +57,10 @@ unsafe_code = "forbid"
 name = "harness"
 harness = false
 
+[[test]]
+name = "hosted"
+harness = false
+
 # [profile.release]
 # debug = true
 # lto = true

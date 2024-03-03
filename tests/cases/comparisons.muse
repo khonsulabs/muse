@@ -1,0 +1,19 @@
+$case(
+    chain_range: "let true = 1 < 2 < 3",
+);
+
+$case(
+    chain_range_short_circuit: r#"1 < 0 < nonsense"#
+);
+
+$case(
+    chain_range_long: r#"$assert(1 < 3 > 2 < 4 > 1 < 10 > 2)"#,
+);
+
+$case(
+    int_float: r#"$assert(1 == 1.0)"#,
+);
+
+$case(int_bool: r#"$assert(1 == true)"#);
+
+$case(float_bool: r#"$assert(1.0 == true)"#);

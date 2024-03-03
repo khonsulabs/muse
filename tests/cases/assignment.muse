@@ -1,0 +1,22 @@
+$case(
+    var: r#"
+        var a = 1;
+        a = 2;
+        $assert(a == 2);
+    "#
+);
+
+$case(
+    map_obj: r#"
+        let a = {,};
+        a.c = 2 + (a.b = 1);
+        $assert(a.b + a.c == 4);
+    "#
+);
+
+$case(
+    let_match: r#"
+        let (a, b) = (1, 2);
+        $assert(a + b == 3);
+    "#
+);

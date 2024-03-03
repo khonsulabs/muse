@@ -60,6 +60,10 @@ impl<T> Ranged<T> {
         Self(value, range.into())
     }
 
+    pub fn default_for(value: T) -> Self {
+        Self::new(SourceRange::default(), value)
+    }
+
     pub fn bounded(
         source_id: SourceId,
         range: impl RangeBounds<usize>,
@@ -376,7 +380,7 @@ pub enum AssignTarget {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MacroInvocation {
     pub name: Symbol,
-    pub tokens: Vec<Ranged<Token>>,
+    pub tokens: VecDeque<Ranged<Token>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -451,7 +455,7 @@ pub struct Variable {
     pub r#else: Option<Ranged<Expression>>,
 }
 
-pub fn parse_tokens(source: Vec<Ranged<Token>>) -> Result<Ranged<Expression>, Ranged<Error>> {
+pub fn parse_tokens(source: VecDeque<Ranged<Token>>) -> Result<Ranged<Expression>, Ranged<Error>> {
     parse_from_reader(TokenReader::from(source))
 }
 
@@ -581,8 +585,8 @@ impl<'a> TokenReader<'a> {
     }
 }
 
-impl From<Vec<Ranged<Token>>> for TokenReader<'_> {
-    fn from(tokens: Vec<Ranged<Token>>) -> Self {
+impl From<VecDeque<Ranged<Token>>> for TokenReader<'_> {
+    fn from(tokens: VecDeque<Ranged<Token>>) -> Self {
         let mut iter = tokens.iter().map(|t| t.1);
         let range = iter
             .next()
@@ -602,10 +606,7 @@ impl From<Vec<Ranged<Token>>> for TokenReader<'_> {
             })
             .unwrap_or_default();
         Self {
-            tokens: TokenStream::List {
-                tokens: VecDeque::from(tokens),
-                range,
-            },
+            tokens: TokenStream::List { tokens, range },
             peeked: VecDeque::new(),
             last_index: 0,
         }
@@ -1099,7 +1100,7 @@ impl PrefixParselet for Term {
                         token.1.start..,
                         Expression::Macro(Box::new(MacroInvocation {
                             name: sym,
-                            tokens: contents,
+                            tokens: VecDeque::from(contents),
                         })),
                     ))
                 }
@@ -1113,7 +1114,7 @@ impl PrefixParselet for Term {
                 // TODO this should use a var-arg join operation to avoid extra
                 // allocations
                 for part in format_string.parts {
-                    let mut reader = TokenReader::from(part.expression);
+                    let mut reader = TokenReader::from(VecDeque::from(part.expression));
                     let right = config.parse_expression(&mut reader)?;
 
                     // Ensure the expression was fully consumed

@@ -1,0 +1,125 @@
+$case(
+    fn_named_arrow: r#"
+        fn test(a) => a * 2;
+        $assert(test(3) == 6);
+    "#
+);
+
+$case(
+    fn_named_block: r#"
+        fn test(a) { a * 2 };
+        $assert(test(3) == 6);
+    "#
+);
+
+$case(
+    fn_return: r#"
+        fn test(a) {
+            return a * 2;
+            nonsense
+        };
+        $assert(test(3) == 6);
+    "#
+);
+
+$case(
+    fn_return_nothing: r#"
+        fn test(a) {
+            return;
+            nonsense
+        };
+        $assert(test(3) == nil)
+    "#
+);
+
+$case(
+    fn_no_params_arrow: r#"
+        fn test => 42;
+        $assert(test() == 42)
+    "#
+);
+
+$case(
+    nameless_arrow: r#"
+        let test = fn(a) => a * 2;
+        $assert(test(3) == 6)
+    "#
+);
+
+$case(
+    nameless_block: r#"
+        let test = fn(a) { a * 2 };
+        $assert(test(3) == 6);
+    "#
+);
+
+$case(
+    nameless_no_params: r#"
+        let test = fn => 42;
+        $assert(test() == 42);
+    "#
+);
+
+$case(
+    named_and_bound: r#"
+        let test = fn answer => 42;
+        $assert(test() * answer() == 1764);
+    "#,
+);
+
+$case(
+    lambda_block: r#"
+        let test = n => { n * 2 };
+        $assert(test(3) == 6)
+    "#
+);
+
+$case(
+    lambda_expr: r#"
+        let test = n => n * 2;
+        $assert(test(3) == 6)
+    "#
+);
+
+$case(
+    fn_multi_params: r#"
+        fn test(a,b) => a * b;
+        $assert(test(2, 3) == 6)
+    "#
+);
+
+$case(
+    lambda_multi_params: r#"
+        let test = (a,b) => a * b;
+        $assert(test(2, 3) == 6)
+    "#
+);
+
+$case(
+    overload: r#"
+        fn answer {
+            () => 42,
+            (n) => answer() * n,
+        };
+        $assert(answer(2) == 84)
+    "#
+);
+
+$case(
+    fn_any_params: r#"
+        fn answer {
+            _ => 42,
+        };
+        $assert(answer() + answer(2, 3) == 84);
+    "#
+);
+
+$case(
+    fn_match_vararg: r#"
+        fn answer {
+            (1, ...) => 42,
+        };
+
+        $assert(answer(1,2,3) == 42);
+    "#
+);
