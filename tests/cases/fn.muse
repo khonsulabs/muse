@@ -77,8 +77,8 @@ $case(
 $case(
     overload: r#"
         fn answer {
-            () => 42,
-            (n) => answer() * n,
+            [] => 42,
+            [n] => answer() * n,
         };
         $assert(answer(2) == 84)
     "#
@@ -96,7 +96,7 @@ $case(
 $case(
     fn_match_vararg: r#"
         fn answer {
-            (1, ...) => 42,
+            [1, ...] => 42,
         };
 
         $assert(answer(1,2,3) == 42);

@@ -77,8 +77,8 @@ patterns:
 
 ```muse
 fn area {
-    (width) => width * width,
-    (width, height) => width * height,
+    [width] => width * width,
+    [width, height] => width * height,
 };
 
 let 4 = area(2);
@@ -86,8 +86,8 @@ let 6 = area(2, 3);
 
 # Anonymous functions can also be match functions
 let area = fn {
-    (width) => width * width,
-    (width, height) => width * height,
+    [width] => width * width,
+    [width, height] => width * height,
 };
 
 let 4 = area(2);

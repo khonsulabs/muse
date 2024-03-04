@@ -2463,9 +2463,9 @@ fn parse_pattern_kind(
                 PatternKind::Literal(Literal::String(string)),
             )
         }
-        Token::Open(kind @ (Paired::Paren | Paired::Bracket)) => {
+        Token::Open(Paired::Bracket) => {
             tokens.next()?;
-            parse_tuple_destructure_pattern(indicator.range().start, *kind, tokens)?
+            parse_tuple_destructure_pattern(indicator.range().start, Paired::Bracket, tokens)?
         }
         Token::Open(Paired::Brace) => {
             tokens.next()?;

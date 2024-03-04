@@ -15,26 +15,26 @@ match_any: {
 }
 
 match_two: {
-    src: r#"match (1, 2) {
-        (1, 0) => nonsense,
-        (0, 2) => nonsense,
-        (1, 2) => true,
+    src: r#"match [1, 2] {
+        [1, 0] => nonsense,
+        [0, 2] => nonsense,
+        [1, 2] => true,
     }"#,
     output: Bool(true),
 }
 
 match_two_any: {
-    src: r#"match (1, 2) {
-        (_, _) => true,
-        (1, 2) => false,
+    src: r#"match [1, 2] {
+        [_, _] => true,
+        [1, 2] => false,
     }"#,
     output: Bool(true),
 }
 
 match_two_any_one: {
-    src: r#"match (1, 2) {
+    src: r#"match [1, 2] {
         _ => true,
-        (1, 2) => false,
+        [1, 2] => false,
     }"#,
     output: Bool(true),
 }
@@ -82,12 +82,12 @@ let_else_doesnt_diverge: {
 }
 
 map_tuple_destructure: {
-    src: r#"let (["a", 1]) = {"a": 1}"#,
+    src: r#"let [["a", 1]] = {"a": 1}"#,
     output: Bool(true),
 }
 
 tuple_mismatch: {
-    src: r#"let (a, 1) = 1"#,
+    src: r#"let [a, 1] = 1"#,
     output: Fault(
         Exception(
             Exception {
@@ -116,22 +116,22 @@ map_mismatch: {
 }
 
 tuple_remaining: {
-    src: r#"match (1, 2, 3, 4) {
-        (1, 2) => false,
-        (1, ...) => true,
+    src: r#"match [1, 2, 3, 4] {
+        [1, 2] => false,
+        [1, ...] => true,
     }"#,
     output: Bool(true),
 }
 
 match_problem: {
     src: r#"
-    match (1, 2) {
-        (1, 2) => true,
+    match [1, 2] {
+        [1, 2] => true,
     };
 
-    let a = (1, 2);
+    let a = [1, 2];
     match a {
-        (1, 2) => true,
+        [1, 2] => true,
     }
     "#,
     output: Bool(true),

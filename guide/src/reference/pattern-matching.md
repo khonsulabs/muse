@@ -52,15 +52,13 @@ lot of the flexibility this feature provides:
 
 ```muse
 fn test_match {
-    [a, b] => a * b,
-    (a, b) if b != 1 => a - b,
-    (a, b) => a + b,
+    [a, b] if b != 1 => a - b,
+    [a, b] => a + b,
     n => n,
-    () => 42,
+    [] => 42,
     _ => "wildcard",
 };
 
-let 42 = test_match([21, 2]);
 let 42 = test_match(44, 2);
 let 42 = test_match(41, 1);
 let 42 = test_match(42);
