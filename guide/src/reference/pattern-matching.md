@@ -6,9 +6,8 @@ MatchBody: (<MatchPattern> (',' <MatchPattern>)*)?;
 MatchPattern: <GuardedPattern> '=>' <Expression>;
 GuardedPattern: <Pattern> ('if' <Expression>)?;
 Pattern: <PatternKind> ('|' <PatternKind>)*;
-PatternKind: <IdentifierPattern | TuplePattern | ListPattern | MapPattern>;
+PatternKind: <IdentifierPattern | ListPattern | MapPattern>;
 IdentifierPattern: '_' | '...' | <Identifier>;
-TuplePattern: '(' (<Pattern> (',' <Pattern>)*)? ')';
 ListPattern: '[' (<Pattern> (',' <Pattern>)*)? ']';
 
 MapPattern: '{' (<EntryPattern> (',' <EntryPattern>)*)? ','? '}';

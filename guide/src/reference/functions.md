@@ -1,8 +1,6 @@
 # Functions
 
 ```musebnf
-ArrowFn: <Identifier | Tuple(Identifier*)> '=>' <ArrowFn>;
-
 Fn: 'fn' <Identifier>? <FnDeclaration | FnMatch>;
 FnDeclaration: ('(' (<Identifier>)? ')')? <ArrowBody | Block>;
 ArrowBody: '=>' <Expression>;
@@ -14,24 +12,6 @@ Return: 'return' <Expression>?;
 
 Functions in Muse are parameterized expressions that can be executed on-demand.
 This is the primary way to reuse code and avoid [code duplication][duplicate-code].
-
-There are two styles of function declaration: ones that start with the `fn`
-keyword, and arrow functions.
-
-## Arrow Functions
-
-Arrow functions are the most concise form of function:
-
-```muse
-let square = n => n ** 2;
-let 4 = square(2);
-
-let area = (width, height) => width * height;
-let 6 = area(2, 3);
-```
-
-Arrow functions are a shorthand for creating an [anonymous
-function](#anonymous-functions).
 
 ## `fn` Functions
 

@@ -19,11 +19,9 @@ Program: <Chain>;
 
 Chain: <Expression> (';' <Expression>)*;
 
-Expression: <Assignment> | <ArrowFn> | <InlineIf>;
+Expression: <Assignment> | <InlineIf>;
 
 Assignment: <Lookup | Index> ('=' <Assignment>)*;
-
-ArrowFn: <Identifier | Tuple(Identifier*)> '=>' <ArrowFn>;
 
 InlineIf: <LogicalOr> ('if' <LogicalOr> ('else' <Expression>)?)?;
 
@@ -107,7 +105,7 @@ MapBody: <Mapping> (',' <Mapping>)*;
 Mapping: <Expression> ':' <Expression>;
 SetBody: <Expression> (',' <Expression>)*;
 
-Parentheses: '(' <ExpressionList> ')';
+Parentheses: '(' <Expression> ')';
 
 Brackets: '[' <ExpressionList> ']';
 
@@ -149,9 +147,8 @@ MatchBody: (<MatchPattern> (',' <MatchPattern>)*)?;
 MatchPattern: <GuardedPattern> '=>' <Expression>;
 GuardedPattern: <Pattern> ('if' <Expression>)?;
 Pattern: <PatternKind> ('|' <PatternKind>)*;
-PatternKind: <IdentifierPattern | TuplePattern | ListPattern | MapPattern>;
+PatternKind: <IdentifierPattern | ListPattern | MapPattern>;
 IdentifierPattern: '_' | '...' | <Identifier>;
-TuplePattern: '(' (<Pattern> (',' <Pattern>)*)? ')';
 ListPattern: '[' (<Pattern> (',' <Pattern>)*)? ']';
 
 MapPattern: '{' (<EntryPattern> (',' <EntryPattern>)*)? ','? '}';
