@@ -150,7 +150,7 @@ impl Compiler {
                     self.expand_macros(&mut field.value);
                 }
             }
-            Expression::Tuple(e) | Expression::List(e) => {
+            Expression::List(e) => {
                 for value in e {
                     self.expand_macros(value);
                 }
@@ -492,7 +492,7 @@ impl<'a> Scope<'a> {
                 }
                 self.compiler.code.new_map(num_elements, dest);
             }
-            Expression::List(list) | Expression::Tuple(list) => {
+            Expression::List(list) => {
                 let mut elements = Vec::with_capacity(list.len());
                 for field in list {
                     let value = self.compile_expression_into_temporary(field);
@@ -1069,9 +1069,7 @@ impl<'a> Scope<'a> {
     }
 
     fn compile_match_expression(&mut self, match_expr: &MatchExpression, dest: OpDestination) {
-        let conditions = if let Expression::Tuple(tuple) | Expression::List(tuple) =
-            &match_expr.condition.0
-        {
+        let conditions = if let Expression::List(tuple) = &match_expr.condition.0 {
             MatchExpressions::Tuple(tuple.iter().map(|expr| self.compile_source(expr)).collect())
         } else {
             MatchExpressions::Single(self.compile_source(&match_expr.condition))
@@ -1654,7 +1652,6 @@ impl<'a> Scope<'a> {
             | Expression::TryOrNil(_)
             | Expression::Map(_)
             | Expression::List(_)
-            | Expression::Tuple(_)
             | Expression::Call(_)
             | Expression::Index(_)
             | Expression::Assign(_)
@@ -1892,7 +1889,6 @@ impl<'a> Scope<'a> {
             }
             Expression::Map(_)
             | Expression::List(_)
-            | Expression::Tuple(_)
             | Expression::If(_)
             | Expression::Match(_)
             | Expression::Function(_)

@@ -194,7 +194,6 @@ pub enum Expression {
     Throw(Box<Ranged<Expression>>),
     Map(Box<MapExpression>),
     List(Vec<Ranged<Expression>>),
-    Tuple(Vec<Ranged<Expression>>),
     Call(Box<FunctionCall>),
     Index(Box<Index>),
     Assign(Box<Assignment>),
@@ -1546,22 +1545,17 @@ impl Parselet for Parentheses {
 impl PrefixParselet for Parentheses {
     fn parse_prefix(
         &self,
-        token: Ranged<Token>,
+        _token: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
-        let mut expressions = Vec::new();
+        let expression = config.parse_expression(tokens)?;
 
-        let ended_in_comma = parse_paired(Paired::Paren, &Token::Char(','), tokens, |tokens| {
-            config
-                .parse_expression(tokens)
-                .map(|expr| expressions.push(expr))
-        })?;
-
-        if expressions.len() != 1 || ended_in_comma {
-            Ok(tokens.ranged(token.range().start.., Expression::Tuple(expressions)))
+        let end_paren = tokens.next()?;
+        if end_paren.0 == Token::Close(Paired::Paren) {
+            Ok(expression)
         } else {
-            Ok(expressions.into_iter().next().expect("length checked"))
+            Err(end_paren.map(|_| Error::MissingEnd(Paired::Paren)))
         }
     }
 }
@@ -2686,65 +2680,6 @@ impl PrefixParselet for Var {
     }
 }
 
-struct ArrowFn;
-
-impl Parselet for ArrowFn {
-    fn token(&self) -> Option<Token> {
-        Some(Token::FatArrow)
-    }
-}
-
-impl InfixParselet for ArrowFn {
-    fn parse(
-        &self,
-        lhs: Ranged<Expression>,
-        _token: &Ranged<Token>,
-        tokens: &mut TokenReader<'_>,
-        config: &ParserConfig<'_>,
-    ) -> Result<Ranged<Expression>, Ranged<Error>> {
-        let pattern = match &lhs.0 {
-            Expression::Lookup(lookup) if lookup.base.is_none() => {
-                Ranged::new(lhs.range(), PatternKind::Any(Some(lookup.name.clone())))
-            }
-            Expression::Tuple(list) => {
-                let tuple: Vec<Ranged<PatternKind>> = list
-                    .iter()
-                    .map(|expr| match &expr.0 {
-                        Expression::Lookup(lookup) if lookup.base.is_none() => Ok(Ranged::new(
-                            expr.range(),
-                            PatternKind::Any(Some(lookup.name.clone())),
-                        )),
-                        _ => Err(Ranged::new(expr.range(), Error::ExpectedName)),
-                    })
-                    .collect::<Result<_, _>>()?;
-                Ranged::new(lhs.range(), PatternKind::DestructureTuple(tuple))
-            }
-            _ => return Err(lhs.map(|_| Error::ExpectedFunctionParameters)),
-        };
-
-        let body = config.parse_expression(tokens)?;
-        Ok(tokens.ranged(
-            lhs.range().start..,
-            Expression::Function(Box::new(FunctionDefinition {
-                publish: false,
-                name: None,
-                body: tokens.ranged(
-                    lhs.range().start..,
-                    Matches {
-                        patterns: vec![tokens.ranged(
-                            lhs.range().start..,
-                            MatchPattern {
-                                pattern: pattern.into(),
-                                body,
-                            },
-                        )],
-                    },
-                ),
-            })),
-        ))
-    }
-}
-
 struct Dot;
 
 impl Parselet for Dot {
@@ -2929,7 +2864,6 @@ fn parselets() -> Parselets {
     let mut parser = Parselets::new();
     parser.markers.expression = parser.precedence;
     parser.push_infix(parselets![Assign]);
-    parser.push_infix(parselets![ArrowFn]);
     parser.markers.conditional = parser.precedence;
     parser.push_infix(parselets![If]);
     parser.push_infix(parselets![Or]);

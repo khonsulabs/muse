@@ -68,29 +68,8 @@ $case(
 );
 
 $case(
-    lambda_block: r#"
-        let test = n => { n * 2 };
-        $assert(test(3) == 6)
-    "#
-);
-
-$case(
-    lambda_expr: r#"
-        let test = n => n * 2;
-        $assert(test(3) == 6)
-    "#
-);
-
-$case(
     fn_multi_params: r#"
         fn test(a,b) => a * b;
-        $assert(test(2, 3) == 6)
-    "#
-);
-
-$case(
-    lambda_multi_params: r#"
-        let test = (a,b) => a * b;
         $assert(test(2, 3) == 6)
     "#
 );

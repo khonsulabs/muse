@@ -16,7 +16,7 @@ $case(
 
 $case(
     let_match: r#"
-        let (a, b) = (1, 2);
+        let [a, b] = [1, 2];
         $assert(a + b == 3);
     "#
 );
