@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::fmt::{Debug, Display};
 use std::ops::{BitOr, BitOrAssign, Range};
+use std::slice;
 use std::sync::Arc;
 
 use kempt::{Map, Set};
@@ -10,10 +11,10 @@ use serde::{Deserialize, Serialize};
 use crate::symbol::Symbol;
 use crate::syntax::token::Token;
 use crate::syntax::{
-    self, AssignTarget, BinaryExpression, BreakExpression, Chain, CompareKind, ContinueExpression,
-    EntryKeyPattern, Expression, FunctionCall, FunctionDefinition, Index, Literal, LogicalKind,
-    Lookup, LoopExpression, LoopKind, MatchExpression, MatchPattern, Matches, PatternKind, Ranged,
-    SourceCode, SourceRange, TryExpression, UnaryExpression, Variable,
+    self, AssignTarget, BinaryExpression, BreakExpression, CompareKind, ContinueExpression,
+    Delimited, DelimitedIter, EntryKeyPattern, Expression, FunctionCall, FunctionDefinition, Index,
+    Literal, LogicalKind, Lookup, LoopExpression, LoopKind, MatchExpression, MatchPattern, Matches,
+    PatternKind, Ranged, SourceCode, SourceRange, TryExpression, UnaryExpression, Variable,
 };
 use crate::vm::bitcode::{
     BinaryKind, BitcodeBlock, BitcodeFunction, FaultKind, Label, Op, OpDestination, ValueOrSource,
@@ -29,6 +30,7 @@ pub struct Compiler {
     declarations: Map<Symbol, BlockDeclaration>,
     scopes: Vec<ScopeInfo>,
     macros: Map<Symbol, Macro>,
+    infix_macros: Map<Symbol, InfixMacro>,
 }
 
 impl Compiler {
@@ -62,6 +64,23 @@ impl Compiler {
         self
     }
 
+    pub fn push_infix_macro<M>(&mut self, name: impl Into<Symbol>, func: M)
+    where
+        M: InfixMacroFn + 'static,
+    {
+        self.infix_macros
+            .insert(name.into(), InfixMacro(Box::new(func)));
+    }
+
+    #[must_use]
+    pub fn with_infix_macro<M>(mut self, name: impl Into<Symbol>, func: M) -> Self
+    where
+        M: InfixMacroFn + 'static,
+    {
+        self.push_infix_macro(name, func);
+        self
+    }
+
     pub fn compile(source: &SourceCode<'_>) -> Result<Code, Vec<Ranged<Error>>> {
         Self::default().with(source).build()
     }
@@ -77,7 +96,7 @@ impl Compiler {
             }
         }
 
-        let expression = Chain::from_expressions(expressions);
+        let expression = Expression::chain(expressions, Vec::new());
 
         Scope::module_root(self)
             .compile_expression(&expression, OpDestination::Register(Register(0)));
@@ -95,25 +114,41 @@ impl Compiler {
         Stack(id)
     }
 
+    fn parse_macro_expansion(&mut self, tokens: VecDeque<Ranged<Token>>) -> Ranged<Expression> {
+        match syntax::parse_tokens(tokens) {
+            Ok(mut expanded) => {
+                self.expand_macros(&mut expanded);
+                expanded
+            }
+            Err(err) => {
+                let range = err.range();
+                self.errors.push(err.map(Error::SigilSyntax));
+                Ranged::new(range, Expression::Literal(Literal::Nil))
+            }
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     pub fn expand_macros(&mut self, expr: &mut Ranged<Expression>) {
         match &mut expr.0 {
             Expression::Macro(e) => {
                 if let Some(m) = self.macros.get_mut(&e.name) {
                     let tokens = std::mem::take(&mut e.tokens);
-                    match syntax::parse_tokens(m.0.transform(tokens)) {
-                        Ok(mut expanded) => {
-                            self.expand_macros(&mut expanded);
-                            *expr = expanded;
-                        }
-                        Err(err) => {
-                            self.errors.push(err.map(Error::SigilSyntax));
-                            expr.0 = Expression::Literal(Literal::Nil);
-                        }
-                    }
+                    let tokens = m.0.transform(tokens);
+                    *expr = self.parse_macro_expansion(tokens);
                 } else {
                     self.errors
-                        .push(Ranged::new(expr.range(), Error::UnknownSigil));
+                        .push(Ranged::new(e.name.range(), Error::UnknownSigil));
+                }
+            }
+            Expression::InfixMacro(e) => {
+                if let Some(m) = self.infix_macros.get_mut(&e.invocation.name) {
+                    let tokens = std::mem::take(&mut e.invocation.tokens);
+                    let tokens = m.0.transform(&e.subject, tokens);
+                    *expr = self.parse_macro_expansion(tokens);
+                } else {
+                    self.errors
+                        .push(Ranged::new(e.invocation.name.range(), Error::UnknownSigil));
                 }
             }
             Expression::RootModule | Expression::Literal(_) | Expression::Continue(_) => {}
@@ -124,7 +159,7 @@ impl Compiler {
                 self.expand_macros(&mut e.condition);
                 self.expand_macros(&mut e.when_true);
                 if let Some(when_false) = &mut e.when_false {
-                    self.expand_macros(when_false);
+                    self.expand_macros(&mut when_false.expression);
                 }
             }
             Expression::Match(e) => {
@@ -134,15 +169,15 @@ impl Compiler {
             }
             Expression::Try(e) => {
                 self.expand_macros(&mut e.body);
-                if let Some(matches) = &mut e.catch {
-                    self.expand_macros_in_matches(matches);
+                if let Some(catch) = &mut e.catch {
+                    self.expand_macros_in_matches(&mut catch.matches);
                 }
             }
             Expression::TryOrNil(e) => {
                 self.expand_macros(&mut e.body);
             }
             Expression::Throw(e) => {
-                self.expand_macros(e);
+                self.expand_macros(&mut e.value);
             }
             Expression::Map(e) => {
                 for field in &mut e.fields {
@@ -150,8 +185,8 @@ impl Compiler {
                     self.expand_macros(&mut field.value);
                 }
             }
-            Expression::List(e) => {
-                for value in e {
+            Expression::List(list) => {
+                for value in &mut list.values {
                     self.expand_macros(value);
                 }
             }
@@ -176,25 +211,29 @@ impl Compiler {
                 self.expand_macros(&mut e.right);
             }
             Expression::Block(e) => {
-                self.expand_macros(&mut e.body);
+                self.expand_macros(&mut e.body.enclosed);
             }
             Expression::Loop(e) => {
                 match &mut e.kind {
                     LoopKind::Infinite => {}
-                    LoopKind::While(condition) | LoopKind::TailWhile(condition) => {
-                        self.expand_macros(condition);
+                    LoopKind::While(expression) | LoopKind::TailWhile { expression, .. } => {
+                        self.expand_macros(expression);
                     }
-                    LoopKind::For { pattern, source } => {
+                    LoopKind::For {
+                        pattern, source, ..
+                    } => {
                         if let Some(guard) = &mut pattern.guard {
                             self.expand_macros(guard);
                         }
                         self.expand_macros(source);
                     }
                 }
-                self.expand_macros(&mut e.block.body);
+                self.expand_macros(&mut e.block.body.enclosed);
             }
             Expression::Break(e) => self.expand_macros(&mut e.value),
-            Expression::Return(e) => self.expand_macros(e),
+            Expression::Return(e) => {
+                self.expand_macros(&mut e.value);
+            }
             Expression::Module(e) => {
                 self.expand_macros(&mut e.contents);
             }
@@ -207,15 +246,18 @@ impl Compiler {
                     self.expand_macros(guard);
                 }
                 if let Some(else_expr) = &mut e.r#else {
-                    self.expand_macros(else_expr);
+                    self.expand_macros(&mut else_expr.expression);
                 }
+            }
+            Expression::Group(e) => {
+                self.expand_macros(&mut e.enclosed);
             }
         }
     }
 
     fn expand_macros_in_lookup(&mut self, e: &mut Lookup) {
         if let Some(base) = &mut e.base {
-            self.expand_macros(base);
+            self.expand_macros(&mut base.expression);
         }
     }
 
@@ -246,6 +288,7 @@ impl Default for Compiler {
             declarations: Map::new(),
             scopes: Vec::new(),
             macros: Map::new(),
+            infix_macros: Map::new(),
         }
         .with_macro("$assert", |mut tokens: VecDeque<Ranged<Token>>| {
             let start_range = tokens.front().map(Ranged::range).unwrap_or_default();
@@ -297,6 +340,35 @@ pub struct Macro(Box<dyn MacroFn>);
 impl Debug for Macro {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Macro").finish_non_exhaustive()
+    }
+}
+
+pub trait InfixMacroFn: Send + Sync {
+    fn transform(
+        &mut self,
+        expression: &Ranged<Expression>,
+        tokens: VecDeque<Ranged<Token>>,
+    ) -> VecDeque<Ranged<Token>>;
+}
+
+impl<F> InfixMacroFn for F
+where
+    F: FnMut(&Ranged<Expression>, VecDeque<Ranged<Token>>) -> VecDeque<Ranged<Token>> + Send + Sync,
+{
+    fn transform(
+        &mut self,
+        expression: &Ranged<Expression>,
+        tokens: VecDeque<Ranged<Token>>,
+    ) -> VecDeque<Ranged<Token>> {
+        self(expression, tokens)
+    }
+}
+
+pub struct InfixMacro(Box<dyn InfixMacroFn>);
+
+impl Debug for InfixMacro {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InfixMacro").finish_non_exhaustive()
     }
 }
 
@@ -426,37 +498,38 @@ impl<'a> Scope<'a> {
             Expression::Literal(literal) => self.compile_literal(literal, dest),
             Expression::Lookup(lookup) => {
                 if let Some(base) = &lookup.base {
-                    let (target, after_label) = if let Expression::TryOrNil(try_op) = &base.0 {
-                        let exception_error = self.compiler.code.new_label();
-                        let after_expression = self.compiler.code.new_label();
-                        let after_handler = self.compiler.code.new_label();
-                        let previous_handler = self.new_temporary();
-                        self.compiler
-                            .code
-                            .set_exception_handler(exception_error, previous_handler);
+                    let (target, after_label) =
+                        if let Expression::TryOrNil(try_op) = &base.expression.0 {
+                            let exception_error = self.compiler.code.new_label();
+                            let after_expression = self.compiler.code.new_label();
+                            let after_handler = self.compiler.code.new_label();
+                            let previous_handler = self.new_temporary();
+                            self.compiler
+                                .code
+                                .set_exception_handler(exception_error, previous_handler);
 
-                        let base = self.compile_source(&try_op.body);
-                        self.compiler.code.set_current_source_range(expr.range());
-                        self.compiler.code.copy((), dest);
-                        self.compiler
-                            .code
-                            .set_exception_handler(previous_handler, ());
-                        self.compiler.code.jump(after_handler, ());
+                            let base = self.compile_source(&try_op.body);
+                            self.compiler.code.set_current_source_range(expr.range());
+                            self.compiler.code.copy((), dest);
+                            self.compiler
+                                .code
+                                .set_exception_handler(previous_handler, ());
+                            self.compiler.code.jump(after_handler, ());
 
-                        self.compiler.code.label(exception_error);
-                        self.compiler.code.copy((), dest);
-                        self.compiler
-                            .code
-                            .set_exception_handler(previous_handler, ());
-                        self.compiler.code.jump(after_expression, ());
+                            self.compiler.code.label(exception_error);
+                            self.compiler.code.copy((), dest);
+                            self.compiler
+                                .code
+                                .set_exception_handler(previous_handler, ());
+                            self.compiler.code.jump(after_expression, ());
 
-                        self.compiler.code.label(after_handler);
-                        (base, Some(after_expression))
-                    } else {
-                        (self.compile_source(base), None)
-                    };
+                            self.compiler.code.label(after_handler);
+                            (base, Some(after_expression))
+                        } else {
+                            (self.compile_source(&base.expression), None)
+                        };
                     self.compiler.code.set_current_source_range(expr.range());
-                    self.compiler.code.copy(lookup.name.clone(), Register(0));
+                    self.compiler.code.copy(lookup.name.0.clone(), Register(0));
                     self.compiler
                         .code
                         .invoke(target, Symbol::get_symbol().clone(), 1);
@@ -468,7 +541,7 @@ impl<'a> Scope<'a> {
                 } else if let Some(var) = self.compiler.declarations.get(&lookup.name) {
                     self.compiler.code.copy(var.stack, dest);
                 } else {
-                    self.compiler.code.resolve(lookup.name.clone(), dest);
+                    self.compiler.code.resolve(lookup.name.0.clone(), dest);
                 }
             }
             Expression::Map(map) => {
@@ -493,8 +566,8 @@ impl<'a> Scope<'a> {
                 self.compiler.code.new_map(num_elements, dest);
             }
             Expression::List(list) => {
-                let mut elements = Vec::with_capacity(list.len());
-                for field in list {
+                let mut elements = Vec::with_capacity(list.values.len());
+                for field in &list.values {
                     let value = self.compile_expression_into_temporary(field);
                     elements.push(value);
                 }
@@ -519,7 +592,7 @@ impl<'a> Scope<'a> {
                 self.compiler.code.jump_if(if_true, condition, ());
                 let after_true = self.compiler.code.new_label();
                 if let Some(when_false) = &if_expr.when_false {
-                    self.compile_expression(when_false, dest);
+                    self.compile_expression(&when_false.expression, dest);
                     self.compiler.code.set_current_source_range(expr.range());
                 }
                 self.compiler.code.jump(after_true, ());
@@ -538,20 +611,20 @@ impl<'a> Scope<'a> {
                 self.compile_continue(continue_expr, expr.1);
             }
             Expression::Return(result) => {
-                self.compile_expression(result, OpDestination::Register(Register(0)));
+                self.compile_expression(&result.value, OpDestination::Register(Register(0)));
                 self.compiler.code.set_current_source_range(expr.range());
                 self.compiler.code.return_early();
             }
             Expression::Assign(assign) => match &assign.target.0 {
                 AssignTarget::Lookup(target) => {
                     if let Some(base) = &target.base {
-                        let target_source = self.compile_source(base);
+                        let target_source = self.compile_source(&base.expression);
                         self.compile_expression(
                             &assign.value,
                             OpDestination::Register(Register(1)),
                         );
                         self.compiler.code.set_current_source_range(expr.range());
-                        self.compiler.code.copy(target.name.clone(), Register(0));
+                        self.compiler.code.copy(target.name.0.clone(), Register(0));
                         self.compiler
                             .code
                             .invoke(target_source, Symbol::set_symbol().clone(), 2);
@@ -570,7 +643,9 @@ impl<'a> Scope<'a> {
                     } else {
                         let value = self.compile_source(&assign.value);
                         self.compiler.code.set_current_source_range(expr.range());
-                        self.compiler.code.assign(target.name.clone(), value, dest);
+                        self.compiler
+                            .code
+                            .assign(target.name.0.clone(), value, dest);
                     }
                 }
                 AssignTarget::Index(index) => {
@@ -609,9 +684,9 @@ impl<'a> Scope<'a> {
                     block
                         .name
                         .as_ref()
-                        .map(|name| (name.clone(), break_label, dest)),
+                        .map(|label| (label.name.0.clone(), break_label, dest)),
                 );
-                scope.compile_expression(&block.body, dest);
+                scope.compile_expression(&block.body.enclosed, dest);
                 scope.compiler.code.set_current_source_range(expr.range());
                 scope.compiler.code.label(break_label);
             }
@@ -621,7 +696,7 @@ impl<'a> Scope<'a> {
                 |this| this.compile_expression(&try_expr.body, dest),
                 |this| this.compiler.code.copy((), dest),
             ),
-            Expression::Throw(value) => self.compile_throw(value, expr.range()),
+            Expression::Throw(throw) => self.compile_throw(&throw.value, expr.range()),
             Expression::Call(call) => self.compile_function_call(call, expr.range(), dest),
             Expression::Index(index) => self.compile_index(index, expr.range(), dest),
             Expression::Variable(decl) => {
@@ -640,7 +715,7 @@ impl<'a> Scope<'a> {
                 let mut mod_compiler = Compiler::default();
                 let mut mod_scope = Scope::module_root(&mut mod_compiler);
 
-                mod_scope.compile_expression(&block.body, OpDestination::Void);
+                mod_scope.compile_expression(&block.body.enclosed, OpDestination::Void);
                 drop(mod_scope);
                 self.compiler.code.set_current_source_range(expr.range());
                 let name = &module.name.0;
@@ -652,7 +727,7 @@ impl<'a> Scope<'a> {
                 self.compiler
                     .code
                     .load_module(instance, OpDestination::Stack(stack));
-                if module.publish {
+                if module.publish.is_some() {
                     self.ensure_in_module(module.name.1);
 
                     self.compiler.code.declare(name.clone(), false, stack, dest);
@@ -662,7 +737,12 @@ impl<'a> Scope<'a> {
 
                 self.compiler.errors.append(&mut mod_compiler.errors);
             }
-            Expression::Macro(_) => unreachable!("macros should be expanded already"),
+            Expression::Group(e) => {
+                self.compile_expression(&e.enclosed, dest);
+            }
+            Expression::Macro(_) | Expression::InfixMacro(_) => {
+                unreachable!("macros should be expanded already")
+            }
         }
     }
 
@@ -735,15 +815,20 @@ impl<'a> Scope<'a> {
                     PatternKind::Any(None) | PatternKind::AnyRemaining => None,
                     PatternKind::Any(_)
                     | PatternKind::Literal(_)
-                    | PatternKind::Or(_, _)
-                    | PatternKind::DestructureMap(_) => {
-                        Some(std::slice::from_ref(&body.pattern.kind))
+                    | PatternKind::Or(_, _, _)
+                    | PatternKind::DestructureMap(_) => Some(PatternKinds::Slice(
+                        std::slice::from_ref(&body.pattern.kind),
+                    )),
+                    PatternKind::DestructureTuple(patterns) => {
+                        Some(PatternKinds::Delimited(&patterns.enclosed))
                     }
-                    PatternKind::DestructureTuple(patterns) => Some(&**patterns),
                 };
                 if let Some(parameters) = parameters {
-                    refutability |= body_block
-                        .compile_function_parameters_pattern(arity, parameters, next_body);
+                    refutability |= body_block.compile_function_parameters_pattern(
+                        arity,
+                        &parameters,
+                        next_body,
+                    );
                 }
 
                 if let Some(guard) = &body.pattern.guard {
@@ -784,7 +869,7 @@ impl<'a> Scope<'a> {
             }
         }
 
-        match (&decl.name, decl.publish) {
+        match (&decl.name, decl.publish.is_some()) {
             (Some(name), true) => {
                 self.ensure_in_module(name.1);
                 self.compiler.code.declare(name.0.clone(), false, fun, dest);
@@ -809,7 +894,7 @@ impl<'a> Scope<'a> {
     fn compile_function_parameters_pattern(
         &mut self,
         arity: u8,
-        parameters: &[Ranged<PatternKind>],
+        parameters: &PatternKinds<'_>,
         doesnt_match: Label,
     ) -> Refutability {
         let mut refutable = Refutability::Irrefutable;
@@ -935,7 +1020,7 @@ impl<'a> Scope<'a> {
                 doesnt_match,
                 bindings,
             ),
-            PatternKind::Or(a, b) => {
+            PatternKind::Or(a, _, b) => {
                 let b_label = self.compiler.code.new_label();
                 let body_label = self.compiler.code.new_label();
 
@@ -962,7 +1047,7 @@ impl<'a> Scope<'a> {
             }
             PatternKind::DestructureTuple(patterns) => {
                 self.compile_tuple_destructure(
-                    patterns,
+                    &patterns.enclosed,
                     &source,
                     doesnt_match,
                     pattern.range(),
@@ -971,7 +1056,7 @@ impl<'a> Scope<'a> {
                 Refutability::Refutable
             }
             PatternKind::DestructureMap(entries) => {
-                let expected_count = u64::try_from(entries.len()).unwrap_or_else(|_| {
+                let expected_count = u64::try_from(entries.enclosed.len()).unwrap_or_else(|_| {
                     self.compiler
                         .errors
                         .push(Ranged::new(pattern.range(), Error::UsizeTooLarge));
@@ -992,7 +1077,7 @@ impl<'a> Scope<'a> {
                     .jump_if_not(doesnt_match, Register(0), ());
 
                 let element = self.new_temporary();
-                for entry in entries {
+                for entry in &entries.enclosed {
                     self.compiler.code.set_current_source_range(pattern.range());
                     let key = match &entry.key.0 {
                         EntryKeyPattern::Nil => ValueOrSource::Nil,
@@ -1023,7 +1108,7 @@ impl<'a> Scope<'a> {
 
     fn compile_tuple_destructure(
         &mut self,
-        patterns: &[Ranged<PatternKind>],
+        patterns: &Delimited<Ranged<PatternKind>>,
         source: &ValueOrSource,
         doesnt_match: Label,
         pattern_range: SourceRange,
@@ -1069,8 +1154,13 @@ impl<'a> Scope<'a> {
     }
 
     fn compile_match_expression(&mut self, match_expr: &MatchExpression, dest: OpDestination) {
-        let conditions = if let Expression::List(tuple) = &match_expr.condition.0 {
-            MatchExpressions::Tuple(tuple.iter().map(|expr| self.compile_source(expr)).collect())
+        let conditions = if let Expression::List(list) = &match_expr.condition.0 {
+            MatchExpressions::List(
+                list.values
+                    .iter()
+                    .map(|expr| self.compile_source(expr))
+                    .collect(),
+            )
         } else {
             MatchExpressions::Single(self.compile_source(&match_expr.condition))
         };
@@ -1113,7 +1203,7 @@ impl<'a> Scope<'a> {
                         PatternKind::Any(None) | PatternKind::AnyRemaining => {}
                         PatternKind::Any(_)
                         | PatternKind::Literal(_)
-                        | PatternKind::Or(_, _)
+                        | PatternKind::Or(_, _, _)
                         | PatternKind::DestructureMap(_) => {
                             refutable |= pattern_block.compile_pattern_binding(
                                 &matches.pattern.kind,
@@ -1124,7 +1214,7 @@ impl<'a> Scope<'a> {
                         }
                         PatternKind::DestructureTuple(patterns) => {
                             pattern_block.compile_tuple_destructure(
-                                patterns,
+                                &patterns.enclosed,
                                 condition,
                                 next_pattern,
                                 matches.range(),
@@ -1139,16 +1229,18 @@ impl<'a> Scope<'a> {
                         .code
                         .set_current_source_range(matches.range());
                 }
-                MatchExpressions::Tuple(conditions) => {
+                MatchExpressions::List(conditions) => {
                     let parameters = match &matches.pattern.kind.0 {
                         PatternKind::Any(None) | PatternKind::AnyRemaining => None,
                         PatternKind::Any(_)
                         | PatternKind::Literal(_)
-                        | PatternKind::Or(_, _)
-                        | PatternKind::DestructureMap(_) => {
-                            Some(std::slice::from_ref(&matches.pattern.kind))
+                        | PatternKind::Or(_, _, _)
+                        | PatternKind::DestructureMap(_) => Some(PatternKinds::Slice(
+                            std::slice::from_ref(&matches.pattern.kind),
+                        )),
+                        PatternKind::DestructureTuple(patterns) => {
+                            Some(PatternKinds::Delimited(&patterns.enclosed))
                         }
-                        PatternKind::DestructureTuple(patterns) => Some(&**patterns),
                     };
 
                     if let Some(parameters) = parameters {
@@ -1231,10 +1323,10 @@ impl<'a> Scope<'a> {
             range,
             |this| this.compile_expression(&try_expr.body, dest),
             |this| {
-                if let Some(matches) = &try_expr.catch {
+                if let Some(catch) = &try_expr.catch {
                     this.compile_match(
                         &MatchExpressions::Single(ValueOrSource::Register(Register(0))),
-                        matches,
+                        &catch.matches,
                         dest,
                     );
                 } else {
@@ -1359,12 +1451,14 @@ impl<'a> Scope<'a> {
                     .jump_if_not(break_label, condition, ());
                 (ValueOrSource::Label(continue_label), None)
             }
-            LoopKind::TailWhile(_) => {
+            LoopKind::TailWhile { .. } => {
                 let tail_condition = outer_scope.compiler.code.new_label();
                 outer_scope.compiler.code.label(tail_condition);
                 (ValueOrSource::Label(tail_condition), None)
             }
-            LoopKind::For { pattern, source } => {
+            LoopKind::For {
+                pattern, source, ..
+            } => {
                 let source = outer_scope.compile_expression_into_temporary(source);
                 outer_scope.compiler.code.set_current_source_range(range);
 
@@ -1508,19 +1602,23 @@ impl<'a> Scope<'a> {
             }
         };
 
-        let mut loop_scope =
-            outer_scope.enter_loop(expr.block.name.clone(), continue_label, break_label, dest);
+        let mut loop_scope = outer_scope.enter_loop(
+            expr.block.name.as_ref().map(|label| label.name.0.clone()),
+            continue_label,
+            break_label,
+            dest,
+        );
 
-        loop_scope.compile_expression(&expr.block.body, dest);
+        loop_scope.compile_expression(&expr.block.body.enclosed, dest);
         drop(loop_scope);
 
         outer_scope.compiler.code.set_current_source_range(range);
 
         match &expr.kind {
             LoopKind::Infinite | LoopKind::While(_) | LoopKind::For { .. } => {}
-            LoopKind::TailWhile(condition) => {
+            LoopKind::TailWhile { expression, .. } => {
                 outer_scope.compiler.code.label(continue_label);
-                let condition = outer_scope.compile_source(condition);
+                let condition = outer_scope.compile_source(expression);
                 outer_scope.compiler.code.set_current_source_range(range);
                 outer_scope
                     .compiler
@@ -1557,8 +1655,8 @@ impl<'a> Scope<'a> {
             value,
             pattern_mismatch,
             &mut PatternBindings {
-                publish: decl.publish,
-                mutable: decl.mutable,
+                publish: decl.publish.is_some(),
+                mutable: &decl.kind.0 == Symbol::var_symbol(),
                 bound_names: Set::new(),
             },
         );
@@ -1583,20 +1681,20 @@ impl<'a> Scope<'a> {
             .set_exception_handler(previous_handler, ());
 
         if let Some(r#else) = &decl.r#else {
-            self.compile_expression(r#else, OpDestination::Void);
+            self.compile_expression(&r#else.expression, OpDestination::Void);
             self.compiler.code.set_current_source_range(range);
             match refutable {
                 Refutability::Refutable => {
-                    if let Err(range) = Self::check_all_branches_diverge(r#else) {
+                    if let Err(range) = Self::check_all_branches_diverge(&r#else.expression) {
                         self.compiler
                             .errors
                             .push(Ranged::new(range, Error::LetElseMustDiverge));
                     }
                 }
-                Refutability::Irrefutable => self
-                    .compiler
-                    .errors
-                    .push(Ranged::new(r#else.1, Error::ElseOnIrrefutablePattern)),
+                Refutability::Irrefutable => self.compiler.errors.push(Ranged::new(
+                    r#else.expression.1,
+                    Error::ElseOnIrrefutablePattern,
+                )),
             }
         } else {
             self.compiler.code.throw(FaultKind::PatternMismatch);
@@ -1618,9 +1716,9 @@ impl<'a> Scope<'a> {
                 };
                 Self::check_all_branches_diverge(&if_expr.when_true)?;
 
-                Self::check_all_branches_diverge(when_false)
+                Self::check_all_branches_diverge(&when_false.expression)
             }
-            Expression::Block(block) => Self::check_all_branches_diverge(&block.body),
+            Expression::Block(block) => Self::check_all_branches_diverge(&block.body.enclosed),
             Expression::Binary(binary) if binary.kind == syntax::BinaryKind::Chain => {
                 Self::check_all_branches_diverge(&binary.left)
                     .or_else(|_| Self::check_all_branches_diverge(&binary.right))
@@ -1628,7 +1726,7 @@ impl<'a> Scope<'a> {
             Expression::Try(try_expr) => {
                 Self::check_all_branches_diverge(&try_expr.body)?;
                 if let Some(catch) = &try_expr.catch {
-                    Self::check_matches_diverge(catch)
+                    Self::check_matches_diverge(&catch.matches)
                 } else {
                     Err(expr.range())
                 }
@@ -1636,17 +1734,18 @@ impl<'a> Scope<'a> {
             Expression::Loop(loop_expr) => {
                 let conditional = match &loop_expr.kind {
                     LoopKind::Infinite => false,
-                    LoopKind::While(_) | LoopKind::TailWhile(_) | LoopKind::For { .. } => true,
+                    LoopKind::While(_) | LoopKind::TailWhile { .. } | LoopKind::For { .. } => true,
                 };
 
                 if !conditional {
                     return Err(expr.1);
                 }
 
-                Self::check_all_branches_diverge(&loop_expr.block.body)
+                Self::check_all_branches_diverge(&loop_expr.block.body.enclosed)
             }
 
             Expression::Match(match_expr) => Self::check_matches_diverge(&match_expr.matches),
+            Expression::Group(e) => Self::check_all_branches_diverge(&e.enclosed),
             Expression::Literal(_)
             | Expression::Lookup(_)
             | Expression::TryOrNil(_)
@@ -1661,7 +1760,9 @@ impl<'a> Scope<'a> {
             | Expression::Function(_)
             | Expression::Variable(_)
             | Expression::RootModule => Err(expr.1),
-            Expression::Macro(_) => unreachable!("macros should be expanded already"),
+            Expression::Macro(_) | Expression::InfixMacro(_) => {
+                unreachable!("macros should be expanded already")
+            }
         }
     }
 
@@ -1710,7 +1811,6 @@ impl<'a> Scope<'a> {
             syntax::UnaryKind::LogicalNot => UnaryKind::LogicalNot,
             syntax::UnaryKind::BitwiseNot => UnaryKind::BitwiseNot,
             syntax::UnaryKind::Negate => UnaryKind::Negate,
-            syntax::UnaryKind::Copy => UnaryKind::Copy,
         };
         self.compiler.code.set_current_source_range(range);
         self.compiler.code.push(Op::Unary { op, dest, kind });
@@ -1887,6 +1987,7 @@ impl<'a> Scope<'a> {
                     ValueOrSource::Stack(self.compile_expression_into_temporary(source))
                 }
             }
+            Expression::Group(e) => self.compile_source(&e.enclosed),
             Expression::Map(_)
             | Expression::List(_)
             | Expression::If(_)
@@ -1910,7 +2011,9 @@ impl<'a> Scope<'a> {
             | Expression::Return(_) => {
                 ValueOrSource::Stack(self.compile_expression_into_temporary(source))
             }
-            Expression::Macro(_) => unreachable!("macros should be expanded already"),
+            Expression::Macro(_) | Expression::InfixMacro(_) => {
+                unreachable!("macros should be expanded already")
+            }
         }
     }
 
@@ -1940,16 +2043,18 @@ impl<'a> Scope<'a> {
                     .compiler
                     .function_name
                     .as_ref()
-                    .map_or(false, |f| f == &lookup.name) =>
+                    .map_or(false, |f| f == &lookup.name.0) =>
             {
                 ValueOrSource::Nil
             }
             Expression::Lookup(lookup) if lookup.base.is_some() => {
                 let base = lookup.base.as_ref().expect("just matched");
-                let base = self.compile_source(base);
+                let base = self.compile_source(&base.expression);
 
                 self.compile_function_args(&call.parameters, arity);
-                self.compiler.code.invoke(base, lookup.name.clone(), arity);
+                self.compiler
+                    .code
+                    .invoke(base, lookup.name.0.clone(), arity);
                 self.compiler.code.copy(Register(0), dest);
                 return;
             }
@@ -1981,9 +2086,9 @@ impl<'a> Scope<'a> {
         self.compiler.code.copy(Register(0), dest);
     }
 
-    fn compile_function_args(&mut self, args: &[Ranged<Expression>], arity: u8) {
+    fn compile_function_args(&mut self, args: &Delimited<Ranged<Expression>>, arity: u8) {
         let mut parameters = Vec::with_capacity(args.len());
-        for param in &args[..usize::from(arity)] {
+        for param in args.iter().take(usize::from(arity)) {
             parameters.push(self.compile_source(param));
         }
         for (parameter, index) in parameters.into_iter().zip(0..arity) {
@@ -2011,6 +2116,50 @@ impl Drop for Scope<'_> {
                     }
                 }
             }
+        }
+    }
+}
+
+enum PatternKinds<'a> {
+    Slice(&'a [Ranged<PatternKind>]),
+    Delimited(&'a Delimited<Ranged<PatternKind>>),
+}
+
+impl PatternKinds<'_> {
+    fn iter(&self) -> PatternKindsIter<'_> {
+        match self {
+            PatternKinds::Slice(contents) => PatternKindsIter::Slice(contents.iter()),
+            PatternKinds::Delimited(contents) => PatternKindsIter::Delimited(contents.iter()),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            PatternKinds::Slice(kinds) => kinds.len(),
+            PatternKinds::Delimited(kinds) => kinds.len(),
+        }
+    }
+
+    fn last(&self) -> Option<&'_ Ranged<PatternKind>> {
+        match self {
+            PatternKinds::Slice(kinds) => kinds.last(),
+            PatternKinds::Delimited(kinds) => kinds.last(),
+        }
+    }
+}
+
+enum PatternKindsIter<'a> {
+    Slice(slice::Iter<'a, Ranged<PatternKind>>),
+    Delimited(DelimitedIter<'a, Ranged<PatternKind>>),
+}
+
+impl<'a> Iterator for PatternKindsIter<'a> {
+    type Item = &'a Ranged<PatternKind>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            PatternKindsIter::Slice(iter) => iter.next(),
+            PatternKindsIter::Delimited(iter) => iter.next(),
         }
     }
 }
@@ -2190,5 +2339,5 @@ struct InstructionRange {
 
 enum MatchExpressions {
     Single(ValueOrSource),
-    Tuple(Vec<ValueOrSource>),
+    List(Vec<ValueOrSource>),
 }

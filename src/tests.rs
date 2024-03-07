@@ -4,7 +4,7 @@ use crate::compiler::Compiler;
 use crate::exception::Exception;
 use crate::symbol::Symbol;
 use crate::syntax::token::{Paired, Token};
-use crate::syntax::{Ranged, SourceCode, SourceRange};
+use crate::syntax::{Expression, Ranged, SourceCode, SourceRange};
 use crate::value::Value;
 use crate::vm::bitcode::BitcodeBlock;
 use crate::vm::{Code, ExecutionError, Register, Vm};
@@ -154,4 +154,37 @@ fn recursive_macros() {
     let mut vm = Vm::default();
     let result = vm.execute(&code).unwrap().as_u64();
     assert_eq!(result, Some(8));
+}
+
+#[test]
+fn infix_macros() {
+    let code = Compiler::default()
+        .with_infix_macro(
+            "$test",
+            |expr: &Ranged<Expression>, mut tokens: VecDeque<Ranged<Token>>| {
+                let mut expr = expr.to_tokens();
+
+                assert_eq!(tokens[0].0, Token::Open(Paired::Paren));
+                assert_eq!(tokens[1].0, Token::Close(Paired::Paren));
+
+                let close = tokens.pop_back().unwrap();
+
+                tokens.append(&mut expr);
+
+                tokens.push_back(Ranged::new(SourceRange::default(), Token::Char('+')));
+                tokens.push_back(Ranged::new(SourceRange::default(), Token::Int(1)));
+                tokens.push_back(close);
+                dbg!(tokens)
+            },
+        )
+        .with(&SourceCode::anonymous(
+            r"
+                (5)$test()
+            ",
+        ))
+        .build()
+        .unwrap();
+    let mut vm = Vm::default();
+    let result = vm.execute(&code).unwrap().as_u64();
+    assert_eq!(result, Some(6));
 }

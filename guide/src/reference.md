@@ -96,7 +96,7 @@ Prefix:
         Try |
         Throw> | Term;
 
-Literal: 'true' | 'false';
+Literal: 'true' | 'false' | 'nil';
 
 BlockOrMap: '{' <EmptyMap | BlockBody | MapBody | SetBody> '}';
 EmptyMap: ',';
