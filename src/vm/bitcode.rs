@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use super::LoadedOp;
 use super::{Arity, Code, CodeData, Function, LoadedSource, Register};
 use crate::compiler::{BitcodeModule, SourceMap, UnaryKind};
-use crate::string::MuseString;
 use crate::symbol::Symbol;
 use crate::syntax::token::RegexLiteral;
 use crate::syntax::{BitwiseKind, CompareKind, Literal, SourceRange};
@@ -22,7 +21,6 @@ pub enum ValueOrSource {
     UInt(u64),
     Float(f64),
     Symbol(Symbol),
-    String(String),
     Regex(RegexLiteral),
     Register(Register),
     Function(BitcodeFunction),
@@ -36,17 +34,19 @@ impl From<()> for ValueOrSource {
     }
 }
 
-impl From<Literal> for ValueOrSource {
-    fn from(value: Literal) -> Self {
+impl TryFrom<Literal> for ValueOrSource {
+    type Error = Symbol;
+
+    fn try_from(value: Literal) -> Result<Self, Self::Error> {
         match value {
-            Literal::Nil => ValueOrSource::Nil,
-            Literal::Bool(value) => ValueOrSource::Bool(value),
-            Literal::Int(value) => ValueOrSource::Int(value),
-            Literal::UInt(value) => ValueOrSource::UInt(value),
-            Literal::Float(value) => ValueOrSource::Float(value),
-            Literal::String(value) => ValueOrSource::String(value),
-            Literal::Symbol(value) => ValueOrSource::Symbol(value),
-            Literal::Regex(value) => ValueOrSource::Regex(value),
+            Literal::Nil => Ok(ValueOrSource::Nil),
+            Literal::Bool(value) => Ok(ValueOrSource::Bool(value)),
+            Literal::Int(value) => Ok(ValueOrSource::Int(value)),
+            Literal::UInt(value) => Ok(ValueOrSource::UInt(value)),
+            Literal::Float(value) => Ok(ValueOrSource::Float(value)),
+            Literal::String(value) => Err(value),
+            Literal::Symbol(value) => Ok(ValueOrSource::Symbol(value)),
+            Literal::Regex(value) => Ok(ValueOrSource::Regex(value)),
         }
     }
 }
@@ -518,14 +518,6 @@ pub(super) fn trusted_loaded_source_to_value(
         LoadedSource::Float(loaded) => ValueOrSource::Float(*loaded),
         LoadedSource::Symbol(loaded) => ValueOrSource::Symbol(code.symbols[*loaded].clone()),
         LoadedSource::Register(loaded) => ValueOrSource::Register(*loaded),
-        LoadedSource::Dynamic(loaded) => {
-            let loaded = &code.dynamics[*loaded];
-            if let Some(string) = loaded.downcast_ref::<MuseString>() {
-                ValueOrSource::String(string.to_string())
-            } else {
-                unreachable!("unknown dynamic type: {loaded:?}")
-            }
-        }
         LoadedSource::Stack(loaded) => ValueOrSource::Stack(*loaded),
         LoadedSource::Label(loaded) => ValueOrSource::Label(*loaded),
         LoadedSource::Regex(loaded) => ValueOrSource::Regex(code.regexes[*loaded].literal.clone()),

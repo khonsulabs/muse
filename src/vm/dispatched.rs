@@ -13,7 +13,6 @@ use super::{
     Stack,
 };
 use crate::compiler::{BitcodeModule, UnaryKind};
-use crate::string::MuseString;
 use crate::symbol::Symbol;
 use crate::syntax::{BitwiseKind, CompareKind};
 use crate::value::{Dynamic, Value};
@@ -907,9 +906,7 @@ impl Source for Value {
             Value::Float(value) => ValueOrSource::Float(*value),
             Value::Symbol(value) => ValueOrSource::Symbol(value.clone()),
             Value::Dynamic(value) => {
-                if let Some(str) = value.downcast_ref::<MuseString>() {
-                    ValueOrSource::String(str.to_string())
-                } else if let Some(func) = value.downcast_ref::<Function>() {
+                if let Some(func) = value.downcast_ref::<Function>() {
                     ValueOrSource::Function(BitcodeFunction::from(func))
                 } else {
                     // All dynamics generated into a Source must be known by
@@ -1111,7 +1108,6 @@ macro_rules! decode_source {
             ValueOrSource::UInt(source) => $next_fn($source, $code $(, $($arg)*)?, *source),
             ValueOrSource::Float(source) => $next_fn($source, $code $(, $($arg)*)?, *source),
             ValueOrSource::Regex(source) => $next_fn($source, $code $(, $($arg)*)?, precompiled_regex(source)),
-            ValueOrSource::String(source) => $next_fn($source, $code $(, $($arg)*)?, Value::dynamic(MuseString::from(source.clone()))),
             ValueOrSource::Symbol(source) => $next_fn($source, $code $(, $($arg)*)?, source.clone()),
             ValueOrSource::Function(source) => $next_fn($source, $code $(, $($arg)*)?, Function::from(source)),
             ValueOrSource::Register(source) => $next_fn($source, $code $(, $($arg)*)?, *source),

@@ -22,7 +22,7 @@ pub enum Token {
     UInt(u64),
     Float(f64),
     Char(char),
-    String(String),
+    String(Symbol),
     Regex(RegexLiteral),
     FormatString(FormatString),
     Power,
@@ -642,7 +642,7 @@ impl<'a> Tokens<'a> {
 
         Ok(self
             .chars
-            .ranged(start.., Token::String(self.scratch.clone())))
+            .ranged(start.., Token::String(Symbol::from(&self.scratch))))
     }
 
     fn tokenize_raw_string(&mut self, start: usize) -> Result<Ranged<Token>, Ranged<Error>> {
@@ -650,7 +650,7 @@ impl<'a> Tokens<'a> {
 
         Ok(self
             .chars
-            .ranged(start.., Token::String(self.scratch.clone())))
+            .ranged(start.., Token::String(Symbol::from(&self.scratch))))
     }
 
     fn decode_unicode_escape_into_scratch(&mut self) -> Result<(), ()> {
@@ -825,7 +825,7 @@ impl<'a> Tokens<'a> {
         };
         let mut continued = self.decode_format_string_contents(raw, octothorpeness)?;
 
-        let initial = self.scratch.clone();
+        let initial = self.chars.ranged(start.., Symbol::from(&self.scratch));
         let mut parts = Vec::new();
 
         let mut stack = Vec::new();
@@ -863,7 +863,9 @@ impl<'a> Tokens<'a> {
             continued = self.decode_format_string_contents(raw, octothorpeness)?;
             parts.push(FormatStringPart {
                 expression,
-                suffix: self.chars.ranged(suffix_start.., self.scratch.clone()),
+                suffix: self
+                    .chars
+                    .ranged(suffix_start.., Symbol::from(&self.scratch)),
             });
         }
 
@@ -1017,7 +1019,7 @@ pub struct RegexLiteral {
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, Hash, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct FormatString {
-    pub initial: String,
+    pub initial: Ranged<Symbol>,
     pub parts: Vec<FormatStringPart>,
 }
 
@@ -1025,7 +1027,7 @@ pub struct FormatString {
 #[allow(clippy::struct_excessive_bools)]
 pub struct FormatStringPart {
     pub expression: Vec<Ranged<Token>>,
-    pub suffix: Ranged<String>,
+    pub suffix: Ranged<Symbol>,
 }
 
 #[test]

@@ -8,7 +8,7 @@ use std::{option, vec};
 use ahash::AHashMap;
 use serde::{Deserialize, Serialize};
 
-use self::token::{Paired, RegexLiteral, Token, Tokens};
+use self::token::{FormatString, FormatStringPart, Paired, RegexLiteral, Token, Tokens};
 use crate::symbol::Symbol;
 pub mod token;
 
@@ -185,12 +185,12 @@ impl From<(SourceId, RangeInclusive<usize>)> for SourceRange {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Delimited<T> {
+pub struct Delimited<T, Delimiter = Ranged<Token>> {
     pub first: Option<T>,
-    pub remaining: Vec<(Ranged<Token>, T)>,
+    pub remaining: Vec<(Delimiter, T)>,
 }
 
-impl<T> Delimited<T> {
+impl<T, Delimiter> Delimited<T, Delimiter> {
     #[must_use]
     pub const fn single(value: T) -> Self {
         Self {
@@ -208,12 +208,12 @@ impl<T> Delimited<T> {
     }
 
     #[must_use]
-    pub const fn build(first: T) -> DelimitedBuilder<T> {
+    pub const fn build(first: T) -> DelimitedBuilder<T, Delimiter> {
         DelimitedBuilder::new(first)
     }
 
     #[must_use]
-    pub const fn build_empty() -> DelimitedBuilder<T> {
+    pub const fn build_empty() -> DelimitedBuilder<T, Delimiter> {
         DelimitedBuilder::empty()
     }
 
@@ -225,11 +225,11 @@ impl<T> Delimited<T> {
         self.first.is_none()
     }
 
-    pub fn iter(&self) -> DelimitedIter<'_, T> {
+    pub fn iter(&self) -> DelimitedIter<'_, T, Delimiter> {
         self.into_iter()
     }
 
-    pub fn iter_mut(&mut self) -> DelimitedIterMut<'_, T> {
+    pub fn iter_mut(&mut self) -> DelimitedIterMut<'_, T, Delimiter> {
         self.into_iter()
     }
 
@@ -274,8 +274,8 @@ where
     }
 }
 
-impl<'a, T> IntoIterator for &'a Delimited<T> {
-    type IntoIter = DelimitedIter<'a, T>;
+impl<'a, T, Delimiter> IntoIterator for &'a Delimited<T, Delimiter> {
+    type IntoIter = DelimitedIter<'a, T, Delimiter>;
     type Item = &'a T;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -286,12 +286,12 @@ impl<'a, T> IntoIterator for &'a Delimited<T> {
     }
 }
 
-pub struct DelimitedIter<'a, T> {
+pub struct DelimitedIter<'a, T, Delimiter = Ranged<Token>> {
     first: option::Iter<'a, T>,
-    remaining: slice::Iter<'a, (Ranged<Token>, T)>,
+    remaining: slice::Iter<'a, (Delimiter, T)>,
 }
 
-impl<'a, T> Iterator for DelimitedIter<'a, T> {
+impl<'a, T, Delimiter> Iterator for DelimitedIter<'a, T, Delimiter> {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -301,8 +301,8 @@ impl<'a, T> Iterator for DelimitedIter<'a, T> {
     }
 }
 
-impl<'a, T> IntoIterator for &'a mut Delimited<T> {
-    type IntoIter = DelimitedIterMut<'a, T>;
+impl<'a, T, Delimiter> IntoIterator for &'a mut Delimited<T, Delimiter> {
+    type IntoIter = DelimitedIterMut<'a, T, Delimiter>;
     type Item = &'a mut T;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -313,12 +313,12 @@ impl<'a, T> IntoIterator for &'a mut Delimited<T> {
     }
 }
 
-pub struct DelimitedIterMut<'a, T> {
+pub struct DelimitedIterMut<'a, T, Delimiter = Ranged<Token>> {
     first: option::IterMut<'a, T>,
-    remaining: slice::IterMut<'a, (Ranged<Token>, T)>,
+    remaining: slice::IterMut<'a, (Delimiter, T)>,
 }
 
-impl<'a, T> Iterator for DelimitedIterMut<'a, T> {
+impl<'a, T, Delimiter> Iterator for DelimitedIterMut<'a, T, Delimiter> {
     type Item = &'a mut T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -328,12 +328,12 @@ impl<'a, T> Iterator for DelimitedIterMut<'a, T> {
     }
 }
 
-pub struct DelimitedBuilder<T> {
-    delimited: Delimited<T>,
-    pending_delimiter: Option<Ranged<Token>>,
+pub struct DelimitedBuilder<T, Delimiter = Ranged<Token>> {
+    delimited: Delimited<T, Delimiter>,
+    pending_delimiter: Option<Delimiter>,
 }
 
-impl<T> DelimitedBuilder<T> {
+impl<T, Delimiter> DelimitedBuilder<T, Delimiter> {
     #[must_use]
     pub const fn new(first: T) -> Self {
         Self {
@@ -351,11 +351,11 @@ impl<T> DelimitedBuilder<T> {
     }
 
     #[must_use]
-    pub fn finish(self) -> Delimited<T> {
+    pub fn finish(self) -> Delimited<T, Delimiter> {
         self.delimited
     }
 
-    pub fn set_delimiter(&mut self, delimiter: Ranged<Token>) {
+    pub fn set_delimiter(&mut self, delimiter: Delimiter) {
         assert!(self.pending_delimiter.replace(delimiter).is_none());
     }
 
@@ -424,6 +424,7 @@ pub enum Expression {
     Macro(Box<MacroInvocation>),
     InfixMacro(Box<InfixMacroInvocation>),
     Group(Box<Enclosed<Ranged<Expression>>>),
+    FormatString(Box<Delimited<Ranged<Symbol>, Ranged<Expression>>>),
 }
 
 impl Expression {
@@ -516,6 +517,20 @@ impl TokenizeRanged for Expression {
             Expression::Group(e) => {
                 e.tokenize_into(tokens);
             }
+            Expression::FormatString(parts) => tokens.push_back(Ranged::new(
+                range,
+                Token::FormatString(FormatString {
+                    initial: parts.first.clone().expect("missing initial format string"),
+                    parts: parts
+                        .remaining
+                        .iter()
+                        .map(|(expr, part)| FormatStringPart {
+                            expression: Vec::from(expr.to_tokens()),
+                            suffix: part.clone(),
+                        })
+                        .collect(),
+                }),
+            )),
         }
     }
 }
@@ -528,7 +543,7 @@ pub enum Literal {
     Int(i64),
     UInt(u64),
     Float(f64),
-    String(String),
+    String(Symbol),
     Symbol(Symbol),
     Regex(RegexLiteral),
 }
@@ -1750,54 +1765,35 @@ impl PrefixParselet for Term {
                 }
             }
             Token::FormatString(format_string) => {
-                let mut left = Ranged::new(
-                    token.1,
-                    Expression::Literal(Literal::String(format_string.initial)),
-                );
+                if format_string.parts.is_empty() {
+                    Ok(format_string
+                        .initial
+                        .map(|s| Expression::Literal(Literal::String(s))))
+                } else {
+                    let mut all_strings =
+                        Delimited::<_, Ranged<Expression>>::build(format_string.initial);
+                    for part in format_string.parts {
+                        let mut reader = TokenReader::from(VecDeque::from(part.expression));
+                        let expression = config.parse_expression(&mut reader)?;
 
-                // TODO this should use a var-arg join operation to avoid extra
-                // allocations
-                for part in format_string.parts {
-                    let mut reader = TokenReader::from(VecDeque::from(part.expression));
-                    let right = config.parse_expression(&mut reader)?;
-
-                    // Ensure the expression was fully consumed
-                    match reader.next() {
-                        Ok(token) => {
-                            return Err(token.map(|_| Error::ExpectedEof));
+                        // Ensure the expression was fully consumed
+                        match reader.next() {
+                            Ok(token) => {
+                                return Err(token.map(|_| Error::ExpectedEof));
+                            }
+                            Err(Ranged(Error::UnexpectedEof, _)) => {}
+                            Err(other) => return Err(other),
                         }
-                        Err(Ranged(Error::UnexpectedEof, _)) => {}
-                        Err(other) => return Err(other),
+
+                        all_strings.set_delimiter(expression);
+
+                        all_strings.push(part.suffix);
                     }
-
-                    left = tokens.ranged(
-                        left.range().start..right.range().end(),
-                        Expression::Binary(Box::new(BinaryExpression {
-                            operator: tokens
-                                .ranged(left.range().end()..right.range().start, Token::Char('+')),
-                            left,
-                            right,
-                            kind: BinaryKind::Add,
-                        })),
-                    );
-
-                    let right = part
-                        .suffix
-                        .map(|suffix| Expression::Literal(Literal::String(suffix)));
-
-                    left = tokens.ranged(
-                        left.range().start..right.range().end(),
-                        Expression::Binary(Box::new(BinaryExpression {
-                            operator: tokens
-                                .ranged(left.range().end()..right.range().start, Token::Char('+')),
-                            left,
-                            right,
-                            kind: BinaryKind::Add,
-                        })),
-                    );
+                    Ok(tokens.ranged(
+                        token.1.start..,
+                        Expression::FormatString(Box::new(all_strings.finish())),
+                    ))
                 }
-
-                Ok(left)
             }
             _ => unreachable!("parse called with invalid token"),
         }
@@ -1982,14 +1978,7 @@ fn parse_block(
         match tokens.peek() {
             Some(Ranged(Token::Char(';'), _)) => {
                 let semicolon = tokens.next()?;
-                Braces::parse_block(
-                    open_brace.range().start,
-                    open_brace,
-                    expr,
-                    semicolon,
-                    tokens,
-                    config,
-                )
+                Braces::parse_block(open_brace, expr, semicolon, tokens, config)
             }
             Some(Ranged(Token::Close(Paired::Brace), _)) => {
                 let close = tokens.next()?;
@@ -2017,7 +2006,6 @@ fn parse_block(
 
 impl Braces {
     fn parse_block(
-        start: usize,
         open: Ranged<Token>,
         expr: Ranged<Expression>,
         mut semicolon: Ranged<Token>,
@@ -2070,7 +2058,7 @@ impl Braces {
 
         match tokens.next() {
             Ok(token @ Ranged(Token::Close(Paired::Brace), _)) => Ok(tokens.ranged(
-                start..,
+                open.range().start..,
                 Block {
                     name: None,
                     body: Enclosed {
@@ -2087,7 +2075,6 @@ impl Braces {
     }
 
     fn parse_map(
-        start: usize,
         open: Ranged<Token>,
         key: Ranged<Expression>,
         colon: Ranged<Token>,
@@ -2095,7 +2082,7 @@ impl Braces {
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
         let value = config.parse_expression(tokens)?;
-        let mut values = Delimited::build(MapField {
+        let mut values = Delimited::<_, Ranged<Token>>::build(MapField {
             key,
             colon: Some(colon),
             value,
@@ -2133,7 +2120,7 @@ impl Braces {
 
         match tokens.next() {
             Ok(close @ Ranged(Token::Close(Paired::Brace), _)) => Ok(tokens.ranged(
-                start..,
+                open.range().start..,
                 Expression::Map(Box::new(MapExpression {
                     open,
                     fields: values.finish(),
@@ -2147,14 +2134,13 @@ impl Braces {
     }
 
     fn parse_set(
-        start: usize,
         open: Ranged<Token>,
         expr: Ranged<Expression>,
         comma: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
-        let mut values = Delimited::build(MapField {
+        let mut values = Delimited::<_, Ranged<Token>>::build(MapField {
             key: expr.clone(),
             colon: None,
             value: expr,
@@ -2181,7 +2167,7 @@ impl Braces {
 
         match tokens.next() {
             Ok(close @ Ranged(Token::Close(Paired::Brace), _)) => Ok(tokens.ranged(
-                start..,
+                open.range().start..,
                 Expression::Map(Box::new(MapExpression {
                     open,
                     fields: values.finish(),
@@ -2234,15 +2220,15 @@ impl PrefixParselet for Braces {
         match tokens.peek() {
             Some(Ranged(Token::Char(':'), _)) => {
                 let colon = tokens.next()?;
-                Self::parse_map(open.range().start, open, expr, colon, tokens, config)
+                Self::parse_map(open, expr, colon, tokens, config)
             }
             Some(Ranged(Token::Char(','), _)) => {
                 let comma = tokens.next()?;
-                Self::parse_set(open.range().start, open, expr, comma, tokens, config)
+                Self::parse_set(open, expr, comma, tokens, config)
             }
             Some(Ranged(Token::Char(';'), _)) => {
                 let semicolon = tokens.next()?;
-                Self::parse_block(open.range().start, open, expr, semicolon, tokens, config)
+                Self::parse_block(open, expr, semicolon, tokens, config)
                     .map(|ranged| ranged.map(|block| Expression::Block(Box::new(block))))
             }
             Some(Ranged(Token::Close(Paired::Brace), _)) => {
@@ -2346,7 +2332,7 @@ impl InfixParselet for Parentheses {
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
-        let mut parameters = Delimited::build_empty();
+        let mut parameters = Delimited::<_, Ranged<Token>>::build_empty();
 
         let (_, close) = parse_paired(
             Paired::Paren,
@@ -2389,7 +2375,7 @@ impl PrefixParselet for Brackets {
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
-        let mut expressions = Delimited::build_empty();
+        let mut expressions = Delimited::<_, Ranged<Token>>::build_empty();
 
         let (_, close) = parse_paired(
             Paired::Bracket,
@@ -2424,7 +2410,7 @@ impl InfixParselet for Brackets {
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
-        let mut parameters = Delimited::build_empty();
+        let mut parameters = Delimited::<_, Ranged<Token>>::build_empty();
 
         let (_, close) = parse_paired(
             Paired::Bracket,
@@ -2807,7 +2793,7 @@ impl PrefixParselet for Try {
                     // Match catch
                     let open_brace = tokens.next()?;
 
-                    parse_match_block_body(open_brace.1.start, open_brace, tokens, config)?
+                    parse_match_block_body(open_brace, tokens, config)?
                 }
                 Some(Token::FatArrow) => {
                     let arrow = tokens.next()?;
@@ -2938,7 +2924,7 @@ impl PrefixParselet for Match {
 
         let brace = tokens.next()?;
         let matches = if brace.0 == Token::Open(Paired::Brace) {
-            parse_match_block_body(brace.range().start, brace, tokens, config)?
+            parse_match_block_body(brace, tokens, config)?
         } else {
             return Err(brace.map(|_| Error::ExpectedMatchBody));
         };
@@ -3081,7 +3067,7 @@ impl Fn {
             Some(Token::Open(Paired::Brace)) => {
                 // Pattern/overloaded function.
                 let brace = tokens.next()?;
-                let body = parse_match_block_body(brace.range().start, brace, tokens, config)?;
+                let body = parse_match_block_body(brace, tokens, config)?;
 
                 return Ok(tokens.ranged(
                     r#fn.range().start..,
@@ -3342,7 +3328,7 @@ pub enum EntryKeyPattern {
     Int(i64),
     UInt(u64),
     Float(f64),
-    String(String),
+    String(Symbol),
     Identifier(Symbol),
 }
 
@@ -3481,7 +3467,7 @@ fn parse_tuple_destructure_pattern(
     kind: Paired,
     tokens: &mut TokenReader<'_>,
 ) -> Result<Ranged<PatternKind>, Ranged<Error>> {
-    let mut patterns = Delimited::build_empty();
+    let mut patterns = Delimited::<_, Ranged<Token>>::build_empty();
     while let Some(pattern) = parse_pattern_kind(tokens)? {
         patterns.push(pattern);
 
@@ -3518,7 +3504,7 @@ fn parse_map_destructure_pattern(
     open: Ranged<Token>,
     tokens: &mut TokenReader<'_>,
 ) -> Result<Ranged<PatternKind>, Ranged<Error>> {
-    let mut entries = Delimited::build_empty();
+    let mut entries = Delimited::<_, Ranged<Token>>::build_empty();
 
     if tokens.peek_token() == Some(Token::Char(',')) {
         // Empty map
@@ -3574,12 +3560,11 @@ fn parse_map_destructure_pattern(
 }
 
 fn parse_match_block_body(
-    start: usize,
     open: Ranged<Token>,
     tokens: &mut TokenReader<'_>,
     config: &ParserConfig<'_>,
 ) -> Result<Ranged<Matches>, Ranged<Error>> {
-    let mut patterns = Delimited::build_empty();
+    let mut patterns = Delimited::<_, Ranged<Token>>::build_empty();
     while let Some(pattern) = parse_pattern(tokens, config)? {
         let arrow_or_brace = tokens.next()?;
         let (arrow, body) = match &arrow_or_brace.0 {
@@ -3614,7 +3599,7 @@ fn parse_match_block_body(
     let closing_brace = tokens.next()?;
     if closing_brace.0 == Token::Close(Paired::Brace) {
         Ok(tokens.ranged(
-            start..,
+            open.range().start..,
             Matches {
                 open_close: Some([open, closing_brace]),
                 patterns: patterns.finish(),

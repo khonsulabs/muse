@@ -1271,6 +1271,11 @@ where
     }
 
     #[must_use]
+    pub fn into_value(self) -> Value {
+        Value::Dynamic(self.into_any_dynamic())
+    }
+
+    #[must_use]
     pub fn into_any_dynamic(self) -> AnyDynamic {
         self.dynamic
     }
@@ -2033,10 +2038,11 @@ where
     #[must_use]
     pub fn with_construct<Func>(mut self, func: impl FnOnce(ConstructFn) -> Func) -> Self
     where
-        Func: Fn(&mut Vm, Arity) -> Result<T, Fault> + Send + Sync + 'static,
+        Func: Fn(&mut Vm, Arity) -> Result<Dynamic<T>, Fault> + Send + Sync + 'static,
     {
         let func = func(self.t.vtable.construct);
-        self.t.vtable.construct = Box::new(move |vm, arity| func(vm, arity).map(Value::dynamic));
+        self.t.vtable.construct =
+            Box::new(move |vm, arity| func(vm, arity).map(Dynamic::into_value));
         self
     }
 

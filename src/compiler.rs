@@ -252,6 +252,11 @@ impl Compiler {
             Expression::Group(e) => {
                 self.expand_macros(&mut e.enclosed);
             }
+            Expression::FormatString(parts) => {
+                for (joiner, _) in &mut parts.remaining {
+                    self.expand_macros(joiner);
+                }
+            }
         }
     }
 
@@ -740,10 +745,55 @@ impl<'a> Scope<'a> {
             Expression::Group(e) => {
                 self.compile_expression(&e.enclosed, dest);
             }
+            Expression::FormatString(parts) => self.compile_format_string(parts, dest),
             Expression::Macro(_) | Expression::InfixMacro(_) => {
                 unreachable!("macros should be expanded already")
             }
         }
+    }
+
+    fn compile_format_string(
+        &mut self,
+        parts: &Delimited<Ranged<Symbol>, Ranged<Expression>>,
+        dest: OpDestination,
+    ) {
+        let mut initial =
+            ValueOrSource::Symbol(parts.first.clone().expect("missing first format part").0);
+        if parts.remaining.len() < 255 {
+            self.compile_format_string_chunk(initial, &parts.remaining, dest);
+        } else {
+            let joined = self.new_temporary();
+            for chunk in parts.remaining.chunks(254) {
+                self.compile_format_string_chunk(initial, chunk, OpDestination::Stack(joined));
+                initial = ValueOrSource::Stack(joined);
+            }
+            self.compiler.code.copy(joined, dest);
+        }
+    }
+
+    fn compile_format_string_chunk(
+        &mut self,
+        initial: ValueOrSource,
+        parts: &[(Ranged<Expression>, Ranged<Symbol>)],
+        dest: OpDestination,
+    ) {
+        let mut sources = Vec::with_capacity(256);
+        sources.push(initial);
+        for (joiner, part) in parts {
+            sources.push(self.compile_source(joiner));
+            sources.push(ValueOrSource::Symbol(part.0.clone()));
+        }
+        let arity = u8::try_from(sources.len()).expect("chunk size matches u8");
+        for (index, source) in sources.into_iter().enumerate() {
+            self.compiler.code.copy(
+                source,
+                OpDestination::Register(Register(index.try_into().expect("chunk size matches u8"))),
+            );
+        }
+        self.compiler
+            .code
+            .call(Symbol::from("$.core.String"), arity);
+        self.compiler.code.copy(Register(0), dest);
     }
 
     fn compile_literal(&mut self, literal: &Literal, dest: OpDestination) {
@@ -753,10 +803,11 @@ impl<'a> Scope<'a> {
             Literal::Int(int) => self.compiler.code.copy(*int, dest),
             Literal::UInt(int) => self.compiler.code.copy(*int, dest),
             Literal::Float(float) => self.compiler.code.copy(*float, dest),
-            Literal::String(string) => self
-                .compiler
-                .code
-                .copy(ValueOrSource::String(string.clone()), dest),
+            Literal::String(string) => {
+                self.compiler.code.copy(string.clone(), Register(0));
+                self.compiler.code.call(Symbol::from("$.core.String"), 1);
+                self.compiler.code.copy(Register(0), dest);
+            }
             Literal::Symbol(symbol) => self.compiler.code.copy(symbol.clone(), dest),
             Literal::Regex(regex) => self.compiler.code.copy(regex.clone(), dest),
         }
@@ -921,13 +972,16 @@ impl<'a> Scope<'a> {
     ) -> Refutability {
         let matches = self.new_temporary();
 
-        if let Literal::Regex(regex) = literal {
-            match Regex::new(&regex.pattern) {
+        if let Literal::Regex(regex_literal) = literal {
+            match Regex::new(&regex_literal.pattern) {
                 Ok(regex) if regex.capture_names().any(|s| s.is_some()) => {
                     self.compiler.code.copy(source, Register(0));
-                    self.compiler
-                        .code
-                        .invoke(literal.clone(), Symbol::captures_symbol(), 1);
+
+                    self.compiler.code.invoke(
+                        ValueOrSource::Regex(regex_literal.clone()),
+                        Symbol::captures_symbol(),
+                        1,
+                    );
                     self.compiler
                         .code
                         .jump_if_not(doesnt_match, Register(0), ());
@@ -967,7 +1021,10 @@ impl<'a> Scope<'a> {
             }
         }
 
-        self.compiler.code.matches(literal.clone(), source, matches);
+        match ValueOrSource::try_from(literal.clone()) {
+            Ok(literal) => self.compiler.code.matches(literal.clone(), source, matches),
+            Err(string) => self.compiler.code.matches(string.clone(), source, matches),
+        }
         self.compiler.code.jump_if_not(doesnt_match, matches, ());
 
         Refutability::Refutable
@@ -1085,7 +1142,11 @@ impl<'a> Scope<'a> {
                         EntryKeyPattern::Int(value) => ValueOrSource::Int(*value),
                         EntryKeyPattern::UInt(value) => ValueOrSource::UInt(*value),
                         EntryKeyPattern::Float(value) => ValueOrSource::Float(*value),
-                        EntryKeyPattern::String(value) => ValueOrSource::String(value.clone()),
+                        EntryKeyPattern::String(value) => {
+                            self.compiler.code.copy(value.clone(), Register(0));
+                            self.compiler.code.call(Symbol::from("$.core.String"), 1);
+                            ValueOrSource::Register(Register(0))
+                        }
                         EntryKeyPattern::Identifier(value) => ValueOrSource::Symbol(value.clone()),
                     };
                     self.compiler.code.copy(key, Register(0));
@@ -1759,7 +1820,8 @@ impl<'a> Scope<'a> {
             | Expression::Module(_)
             | Expression::Function(_)
             | Expression::Variable(_)
-            | Expression::RootModule => Err(expr.1),
+            | Expression::RootModule
+            | Expression::FormatString(_) => Err(expr.1),
             Expression::Macro(_) | Expression::InfixMacro(_) => {
                 unreachable!("macros should be expanded already")
             }
@@ -1977,7 +2039,9 @@ impl<'a> Scope<'a> {
                 Literal::UInt(int) => ValueOrSource::UInt(*int),
                 Literal::Float(float) => ValueOrSource::Float(*float),
                 Literal::Regex(regex) => ValueOrSource::Regex(regex.clone()),
-                Literal::String(string) => ValueOrSource::String(string.clone()),
+                Literal::String(_) => {
+                    ValueOrSource::Stack(self.compile_expression_into_temporary(source))
+                }
                 Literal::Symbol(symbol) => ValueOrSource::Symbol(symbol.clone()),
             },
             Expression::Lookup(lookup) => {
@@ -2008,7 +2072,8 @@ impl<'a> Scope<'a> {
             | Expression::Break(_)
             | Expression::Continue(_)
             | Expression::RootModule
-            | Expression::Return(_) => {
+            | Expression::Return(_)
+            | Expression::FormatString(_) => {
                 ValueOrSource::Stack(self.compile_expression_into_temporary(source))
             }
             Expression::Macro(_) | Expression::InfixMacro(_) => {

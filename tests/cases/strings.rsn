@@ -77,3 +77,10 @@ raw_format_escape: {
     "#,
     output: String("hello, ${ name }!"),
 }
+
+to_string: {
+    src: r#"
+        $.core.String(123)
+    "#,
+    output: String("123"),
+}

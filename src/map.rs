@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use crate::list::List;
 use crate::symbol::Symbol;
-use crate::value::{CustomType, RustType, StaticRustFunctionTable, TypeRef, Value};
+use crate::value::{CustomType, Dynamic, RustType, StaticRustFunctionTable, TypeRef, Value};
 use crate::vm::{Fault, Register, Vm};
 
 #[derive(Debug)]
@@ -18,7 +18,7 @@ pub static MAP_TYPE: RustType<Map> = RustType::new("Map", |t| {
                 let value = vm[Register(reg_index + 1)].take();
                 map.insert(vm, key, value)?;
             }
-            Ok(map)
+            Ok(Dynamic::new(map))
         }
     })
     .with_invoke(|_| {

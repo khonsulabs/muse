@@ -1206,14 +1206,6 @@ impl Vm {
             LoadedSource::Float(v) => Ok(Value::Float(v)),
             LoadedSource::Symbol(v) => self.op_load_symbol(code_index, v).map(Value::Symbol),
             LoadedSource::Register(v) => Ok(self[v].clone()),
-            LoadedSource::Dynamic(v) => self.code[code_index]
-                .code
-                .data
-                .dynamics
-                .get(v)
-                .cloned()
-                .map(Value::Dynamic)
-                .ok_or(Fault::InvalidOpcode),
             LoadedSource::Stack(v) => self
                 .current_frame()
                 .get(v.0)
@@ -1631,7 +1623,6 @@ struct CodeData {
     stack_requirement: usize,
     symbols: Vec<Symbol>,
     known_symbols: AHashMap<Symbol, usize>,
-    dynamics: Vec<AnyDynamic>,
     functions: Vec<BitcodeFunction>,
     modules: Vec<BitcodeModule>,
     map: SourceMap,
@@ -1776,12 +1767,6 @@ impl CodeData {
         index
     }
 
-    fn push_dynamic(&mut self, dynamic: AnyDynamic) -> usize {
-        let index = self.dynamics.len();
-        self.dynamics.push(dynamic);
-        index
-    }
-
     fn push_symbol(&mut self, symbol: Symbol) -> usize {
         *self.known_symbols.entry(symbol.clone()).or_insert_with(|| {
             let index = self.symbols.len();
@@ -1811,9 +1796,6 @@ impl CodeData {
             ValueOrSource::UInt(uint) => LoadedSource::UInt(*uint),
             ValueOrSource::Float(float) => LoadedSource::Float(*float),
             ValueOrSource::Symbol(sym) => LoadedSource::Symbol(self.push_symbol(sym.clone())),
-            ValueOrSource::String(string) => LoadedSource::Dynamic(
-                self.push_dynamic(AnyDynamic::new(MuseString::from(string.as_str()))),
-            ),
             ValueOrSource::Regex(regex) => LoadedSource::Regex(self.push_regex(regex)),
             ValueOrSource::Register(reg) => LoadedSource::Register(*reg),
             ValueOrSource::Stack(stack) => {
@@ -1909,6 +1891,13 @@ impl Module {
             ModuleDeclaration {
                 mutable: false,
                 value: Value::Dynamic(crate::list::LIST_TYPE.as_any_dynamic().clone()),
+            },
+        );
+        declarations.insert(
+            Symbol::from("String"),
+            ModuleDeclaration {
+                mutable: false,
+                value: Value::Dynamic(crate::string::STRING_TYPE.as_any_dynamic().clone()),
             },
         );
         drop(declarations);
@@ -2121,7 +2110,6 @@ enum LoadedSource {
     Float(f64),
     Symbol(usize),
     Register(Register),
-    Dynamic(usize),
     Function(usize),
     Stack(Stack),
     Label(Label),

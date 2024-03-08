@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use crate::symbol::Symbol;
-use crate::value::{CustomType, RustType, StaticRustFunctionTable, TypeRef, Value};
+use crate::value::{CustomType, Dynamic, RustType, StaticRustFunctionTable, TypeRef, Value};
 use crate::vm::{Fault, Register, Vm};
 
 pub static LIST_TYPE: RustType<List> = RustType::new("List", |t| {
@@ -12,7 +12,7 @@ pub static LIST_TYPE: RustType<List> = RustType::new("List", |t| {
                 let value = vm[Register(reg_index)].take();
                 list.push(value)?;
             }
-            Ok(list)
+            Ok(Dynamic::new(list))
         }
     })
     .with_invoke(|_| {
