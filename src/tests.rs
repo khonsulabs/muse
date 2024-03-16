@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 
+use refuse::CollectionGuard;
+
 use crate::compiler::Compiler;
 use crate::exception::Exception;
 use crate::symbol::Symbol;
@@ -7,35 +9,42 @@ use crate::syntax::token::{Paired, Token};
 use crate::syntax::{Expression, Ranged, SourceCode, SourceRange};
 use crate::value::Value;
 use crate::vm::bitcode::BitcodeBlock;
-use crate::vm::{Code, ExecutionError, Register, Vm};
+use crate::vm::{ExecutionError, Register, Vm};
 
 #[test]
 fn budgeting() {
     const COUNT_TO: i64 = 42;
+
+    let mut guard = CollectionGuard::acquire();
     let mut code = BitcodeBlock::default();
     for value in 0..=COUNT_TO {
         code.copy(value, Register(0));
     }
-    let code = Code::from(&code);
-    let mut vm = Vm::default();
+    let code = code.to_code(&guard);
+    let mut vm = Vm::new(&guard);
     // Turn on budgeting, but don't give any budget.
     vm.increase_budget(0);
-    assert_eq!(vm.execute(&code).unwrap_err(), ExecutionError::NoBudget);
+    assert_eq!(
+        vm.execute(&code, &mut guard).unwrap_err(),
+        ExecutionError::NoBudget
+    );
     for value in 0..=COUNT_TO {
         // Step through by allowing one op at a time.
         vm.increase_budget(1);
-        assert_eq!(vm.resume().unwrap_err(), ExecutionError::NoBudget);
-        assert_eq!(vm[Register(0)].as_i64(), Some(value));
+        assert_eq!(vm.resume(&mut guard).unwrap_err(), ExecutionError::NoBudget);
+        assert_eq!(vm.register(Register(0)).as_i64(), Some(value));
     }
     vm.increase_budget(1);
-    assert_eq!(vm.resume().unwrap().as_i64(), Some(COUNT_TO));
+    assert_eq!(vm.resume(&mut guard).unwrap().as_i64(), Some(COUNT_TO));
 }
 
 #[test]
 fn module_budgeting() {
     const MAX_OPS: usize = 24;
-    let code = Compiler::compile(&SourceCode::anonymous(
-        r"
+    let mut guard = CollectionGuard::acquire();
+    let code = Compiler::compile(
+        &SourceCode::anonymous(
+            r"
             mod foo {
                 pub var a = 1;
                 a = a + 1;
@@ -46,18 +55,23 @@ fn module_budgeting() {
 
             foo.a
         ",
-    ))
+        ),
+        &guard,
+    )
     .unwrap();
-    let mut vm = Vm::default();
+    let mut vm = Vm::new(&guard);
     // Turn on budgeting, but don't give any budget.
     vm.increase_budget(0);
-    assert_eq!(vm.execute(&code).unwrap_err(), ExecutionError::NoBudget);
+    assert_eq!(
+        vm.execute(&code, &mut guard).unwrap_err(),
+        ExecutionError::NoBudget
+    );
     let mut ops = 0;
     for _ in 0..MAX_OPS {
         ops += 1;
         // Step through by allowing one op at a time.
         vm.increase_budget(1);
-        match vm.resume() {
+        match vm.resume(&mut guard) {
             Ok(value) => {
                 assert_eq!(value.as_i64(), Some(5));
                 break;
@@ -72,29 +86,36 @@ fn module_budgeting() {
 
 #[test]
 fn invoke() {
-    let code = Compiler::compile(&SourceCode::anonymous(
-        r"
-            pub fn test(n) => n * 2;
-            fn private(n) => n * 2;
-        ",
-    ))
+    let mut guard = CollectionGuard::acquire();
+    let code = Compiler::compile(
+        &SourceCode::anonymous(
+            r"
+                pub fn test(n) => n * 2;
+                fn private(n) => n * 2;
+            ",
+        ),
+        &guard,
+    )
     .unwrap();
-    let mut vm = Vm::default();
-    vm.execute(&code).unwrap();
+    let mut vm = Vm::new(&guard);
+    vm.execute(&code, &mut guard).unwrap();
 
-    let Value::Int(result) = vm.invoke(&Symbol::from("test"), [Value::Int(3)]).unwrap() else {
+    let Value::Int(result) = vm
+        .invoke(&Symbol::from("test"), [Value::Int(3)], &mut guard)
+        .unwrap()
+    else {
         unreachable!()
     };
     assert_eq!(result, 6);
     let ExecutionError::Exception(exception) = vm
-        .invoke(&Symbol::from("private"), [Value::Int(3)])
+        .invoke(&Symbol::from("private"), [Value::Int(3)], &mut guard)
         .unwrap_err()
     else {
         unreachable!()
     };
     assert_eq!(
         exception
-            .as_downcast_ref::<Exception>()
+            .as_downcast_ref::<Exception>(&guard)
             .expect("exception")
             .value()
             .as_symbol()
@@ -105,6 +126,7 @@ fn invoke() {
 
 #[test]
 fn macros() {
+    let mut guard = CollectionGuard::acquire();
     let code = Compiler::default()
         .with_macro("$test", |mut tokens: VecDeque<Ranged<Token>>| {
             assert_eq!(tokens[0].0, Token::Open(Paired::Paren));
@@ -119,15 +141,16 @@ fn macros() {
                 $test(hello world)
             ",
         ))
-        .build()
+        .build(&guard)
         .unwrap();
-    let mut vm = Vm::default();
-    let result = vm.execute(&code).unwrap().as_u64();
+    let vm = Vm::new(&guard);
+    let result = vm.execute(&code, &mut guard).unwrap().as_u64();
     assert_eq!(result, Some(8));
 }
 
 #[test]
 fn recursive_macros() {
+    let mut guard = CollectionGuard::acquire();
     let code = Compiler::default()
         .with_macro("$inner", |mut tokens: VecDeque<Ranged<Token>>| {
             assert_eq!(tokens[0].0, Token::Open(Paired::Paren));
@@ -149,15 +172,16 @@ fn recursive_macros() {
                 $test(hello world)
             ",
         ))
-        .build()
+        .build(&guard)
         .unwrap();
-    let mut vm = Vm::default();
-    let result = vm.execute(&code).unwrap().as_u64();
+    let vm = Vm::new(&guard);
+    let result = vm.execute(&code, &mut guard).unwrap().as_u64();
     assert_eq!(result, Some(8));
 }
 
 #[test]
 fn infix_macros() {
+    let mut guard = CollectionGuard::acquire();
     let code = Compiler::default()
         .with_infix_macro(
             "$test",
@@ -182,9 +206,9 @@ fn infix_macros() {
                 (5)$test()
             ",
         ))
-        .build()
+        .build(&guard)
         .unwrap();
-    let mut vm = Vm::default();
-    let result = vm.execute(&code).unwrap().as_u64();
+    let vm = Vm::new(&guard);
+    let result = vm.execute(&code, &mut guard).unwrap().as_u64();
     assert_eq!(result, Some(6));
 }

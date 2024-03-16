@@ -2,13 +2,15 @@ use std::fmt::Display;
 use std::hash::Hash;
 use std::sync::{Mutex, MutexGuard};
 
+use refuse::ContainsNoRefs;
+
 use crate::list::List;
 use crate::regex::MuseRegex;
 use crate::symbol::Symbol;
 use crate::value::{
-    AnyDynamic, CustomType, Dynamic, RustType, StaticRustFunctionTable, TypeRef, Value,
+    AnyDynamic, CustomType, Dynamic, Rooted, RustType, StaticRustFunctionTable, TypeRef, Value,
 };
-use crate::vm::{Fault, Register, Vm};
+use crate::vm::{Fault, Register, VmContext};
 
 #[derive(Debug)]
 pub struct MuseString(Mutex<String>);
@@ -31,6 +33,8 @@ impl From<&'_ str> for MuseString {
     }
 }
 
+impl ContainsNoRefs for MuseString {}
+
 pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
     t.with_construct(|_| {
         |vm, arity| {
@@ -39,7 +43,7 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
                     Ok(dynamic)
                 } else {
                     let value = vm[Register(0)].take().to_string(vm)?;
-                    Ok(Dynamic::new(MuseString::from(&*value)))
+                    Ok(Dynamic::new(MuseString::from(&*value), vm))
                 }
             } else if let Ok(length) = (0..arity.0).try_fold(0_usize, |accum, r| {
                 vm[Register(r)]
@@ -54,7 +58,7 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
                     joined.push_str(sym);
                 }
 
-                Ok(Dynamic::new(MuseString::from(joined)))
+                Ok(Dynamic::new(MuseString::from(joined), vm))
             } else {
                 let mut joined = String::new();
                 for r in 0..arity.0 {
@@ -62,7 +66,7 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
                     joined.push_str(&sym);
                 }
 
-                Ok(Dynamic::new(MuseString::from(joined)))
+                Ok(Dynamic::new(MuseString::from(joined), vm))
             }
         }
     })
@@ -72,8 +76,8 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
         }
     })
     .with_eq(|_| {
-        |this, _vm, rhs| {
-            if let Some(rhs) = rhs.as_downcast_ref::<MuseString>() {
+        |this, vm, rhs| {
+            if let Some(rhs) = rhs.as_downcast_ref::<MuseString>(vm.as_ref()) {
                 Ok(*this.0.lock().expect("poisoned") == *rhs.0.lock().expect("poisoned"))
             } else if let Some(rhs) = rhs.as_symbol() {
                 Ok(*this.0.lock().expect("poisoned") == **rhs)
@@ -83,8 +87,8 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
         }
     })
     .with_total_cmp(|_| {
-        |this, _vm, rhs| {
-            if let Some(rhs) = rhs.as_downcast_ref::<MuseString>() {
+        |this, vm, rhs| {
+            if let Some(rhs) = rhs.as_downcast_ref::<MuseString>(vm.as_ref()) {
                 Ok(this
                     .0
                     .lock()
@@ -106,41 +110,55 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
                         .with_fn(
                             Symbol::len_symbol(),
                             0,
-                            |_vm: &mut Vm, this: &MuseString| {
+                            |_vm: &mut VmContext<'_, '_>, this: &Rooted<MuseString>| {
                                 Value::try_from(this.0.lock().expect("poisoned").len())
                             },
                         )
-                        .with_fn("split", 1, |vm: &mut Vm, this: &MuseString| {
-                            let needle = vm[Register(0)].take();
-                            if let Some(needle) = needle.as_downcast_ref::<MuseString>() {
-                                if std::ptr::eq(&this.0, &needle.0) {
-                                    Ok(Value::dynamic(List::from(vec![Value::dynamic(
-                                        MuseString::from(String::default()),
-                                    )])))
-                                } else {
+                        .with_fn(
+                            "split",
+                            1,
+                            |vm: &mut VmContext<'_, '_>, this: &Rooted<MuseString>| {
+                                let needle = vm[Register(0)].take();
+                                if let Some(needle) = needle.as_rooted::<MuseString>(vm.as_ref()) {
+                                    if std::ptr::eq(&this.0, &needle.0) {
+                                        Ok(Value::dynamic(
+                                            List::from(vec![Value::dynamic(
+                                                MuseString::from(String::default()),
+                                                &vm,
+                                            )]),
+                                            vm,
+                                        ))
+                                    } else {
+                                        let haystack = this.lock();
+                                        let needle = needle.lock();
+                                        Ok(Value::dynamic(
+                                            haystack
+                                                .split(&*needle)
+                                                .map(|segment| {
+                                                    Value::dynamic(MuseString::from(segment), &vm)
+                                                })
+                                                .collect::<List>(),
+                                            vm,
+                                        ))
+                                    }
+                                } else if let Some(needle) =
+                                    needle.as_downcast_ref::<MuseRegex>(vm.as_ref())
+                                {
                                     let haystack = this.lock();
-                                    let needle = needle.lock();
                                     Ok(Value::dynamic(
-                                        haystack
-                                            .split(&*needle)
+                                        needle
+                                            .split(&haystack)
                                             .map(|segment| {
-                                                Value::dynamic(MuseString::from(segment))
+                                                Value::dynamic(MuseString::from(segment), &vm)
                                             })
                                             .collect::<List>(),
+                                        vm,
                                     ))
+                                } else {
+                                    Err(Fault::ExpectedString)
                                 }
-                            } else if let Some(needle) = needle.as_downcast_ref::<MuseRegex>() {
-                                let haystack = this.lock();
-                                Ok(Value::dynamic(
-                                    needle
-                                        .split(&haystack)
-                                        .map(|segment| Value::dynamic(MuseString::from(segment)))
-                                        .collect::<List>(),
-                                ))
-                            } else {
-                                Err(Fault::ExpectedString)
-                            }
-                        })
+                            },
+                        )
                 });
 
             FUNCTIONS.invoke(vm, name, arity, &this)
@@ -149,26 +167,26 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
     .with_add(|_| {
         |this, vm, rhs| {
             let lhs = this.0.lock().expect("poisoned");
-            if let Some(rhs) = rhs.as_downcast_ref::<MuseString>() {
+            if let Some(rhs) = rhs.as_downcast_ref::<MuseString>(vm.as_ref()) {
                 if std::ptr::eq(&this.0, &rhs.0) {
                     let mut repeated =
                         String::with_capacity(lhs.len().checked_mul(2).ok_or(Fault::OutOfMemory)?);
                     repeated.push_str(&lhs);
                     repeated.push_str(&lhs);
-                    Ok(Value::dynamic(MuseString::from(repeated)))
+                    Ok(Value::dynamic(MuseString::from(repeated), vm))
                 } else {
                     let rhs = rhs.0.lock().expect("poisoned");
                     let mut combined = String::with_capacity(lhs.len() + rhs.len());
                     combined.push_str(&lhs);
                     combined.push_str(&rhs);
-                    Ok(Value::dynamic(MuseString::from(combined)))
+                    Ok(Value::dynamic(MuseString::from(combined), &vm))
                 }
             } else {
                 let rhs = rhs.to_string(vm)?;
                 let mut combined = String::with_capacity(lhs.len() + rhs.len());
                 combined.push_str(&lhs);
                 combined.push_str(&rhs);
-                Ok(Value::dynamic(MuseString::from(combined)))
+                Ok(Value::dynamic(MuseString::from(combined), vm))
             }
         }
     })
@@ -179,36 +197,37 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
             let mut combined = String::with_capacity(rhs.len() + lhs.len());
             combined.push_str(&lhs);
             combined.push_str(&rhs);
-            Ok(Value::dynamic(MuseString::from(combined)))
+            Ok(Value::dynamic(MuseString::from(combined), vm))
         }
     })
     .with_mul(|_| {
-        |this, _vm, rhs| {
+        |this, vm, rhs| {
             let Some(times) = rhs.as_usize() else {
                 return Err(Fault::ExpectedInteger);
             };
             let this = this.0.lock().expect("poisoned");
 
-            Ok(Value::dynamic(MuseString::from(this.repeat(times))))
+            Ok(Value::dynamic(MuseString::from(this.repeat(times)), vm))
         }
     })
     .with_mul_right(|_| {
-        |this, _vm, lhs| {
+        |this, vm, lhs| {
             let Some(times) = lhs.as_usize() else {
                 return Err(Fault::ExpectedInteger);
             };
             let this = this.0.lock().expect("poisoned");
 
-            Ok(Value::dynamic(MuseString::from(this.repeat(times))))
+            Ok(Value::dynamic(MuseString::from(this.repeat(times)), vm))
         }
     })
     .with_truthy(|_| |this, _vm| !this.0.lock().expect("poisoned").is_empty())
     .with_to_string(|_| |this, _vm| Ok(Symbol::from(&*this.0.lock().expect("poisoned"))))
     .with_deep_clone(|_| {
-        |this| {
-            Some(AnyDynamic::new(MuseString(Mutex::new(
-                this.0.lock().expect("poisoned").clone(),
-            ))))
+        |this, guard| {
+            Some(AnyDynamic::new(
+                MuseString(Mutex::new(this.0.lock().expect("poisoned").clone())),
+                guard,
+            ))
         }
     })
 });

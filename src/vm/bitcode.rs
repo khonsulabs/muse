@@ -2,6 +2,7 @@ use std::ops::{Deref, DerefMut};
 use std::str;
 
 use kempt::Map;
+use refuse::CollectionGuard;
 use serde::{Deserialize, Serialize};
 
 #[cfg(not(feature = "dispatched"))]
@@ -487,20 +488,19 @@ impl BitcodeBlock {
             kind: UnaryKind::BitwiseNot,
         });
     }
-}
 
-impl From<&'_ BitcodeBlock> for Code {
-    fn from(bitcode: &'_ BitcodeBlock) -> Self {
+    #[must_use]
+    pub fn to_code(&self, guard: &CollectionGuard) -> Code {
         let mut code = Code::default();
         let mut previous_location = SourceRange::default();
-        for (index, op) in bitcode.ops.iter().enumerate() {
-            let location = if let Some(new_location) = bitcode.map.get(index) {
+        for (index, op) in self.ops.iter().enumerate() {
+            let location = if let Some(new_location) = self.map.get(index) {
                 previous_location = new_location;
                 new_location
             } else {
                 previous_location
             };
-            code.push(op, location);
+            code.push(op, location, guard);
         }
         code
     }
@@ -704,22 +704,21 @@ impl BitcodeFunction {
     pub const fn name(&self) -> &Option<Symbol> {
         &self.name
     }
-}
 
-impl From<&'_ BitcodeFunction> for Function {
-    fn from(bit: &'_ BitcodeFunction) -> Self {
-        Self {
+    #[must_use]
+    pub fn to_function(&self, guard: &CollectionGuard<'_>) -> Function {
+        Function {
             module: None,
-            name: bit.name.clone(),
-            bodies: bit
+            name: self.name.clone(),
+            bodies: self
                 .bodies
                 .iter()
-                .map(|f| (*f.key(), Code::from(&f.value)))
+                .map(|f| (*f.key(), f.value.to_code(guard)))
                 .collect(),
-            varg_bodies: bit
+            varg_bodies: self
                 .varg_bodies
                 .iter()
-                .map(|f| (*f.key(), Code::from(&f.value)))
+                .map(|f| (*f.key(), f.value.to_code(guard)))
                 .collect(),
         }
     }

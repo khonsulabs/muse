@@ -22,6 +22,8 @@ pub mod regex;
 #[cfg(test)]
 mod tests;
 
+pub use refuse;
+
 pub trait Error: std::error::Error {
     fn kind(&self) -> &'static str;
 }

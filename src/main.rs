@@ -6,8 +6,9 @@ use ariadne::{Cache, Label, Span};
 use muse::compiler::Compiler;
 use muse::exception::Exception;
 use muse::syntax::{parse, Ranged, SourceId, SourceRange, Sources};
-use muse::vm::{ExecutionError, StackFrame, Vm};
+use muse::vm::{ExecutionError, StackFrame, Vm, VmContext};
 use muse::Error;
+use refuse::CollectionGuard;
 use rustyline::completion::Completer;
 use rustyline::config::Configurer;
 use rustyline::error::ReadlineError;
@@ -26,7 +27,8 @@ fn main() {
     let _err = editor.load_history(&history_path);
     editor.set_auto_add_history(true);
     editor.set_helper(Some(Muse));
-    let mut vm = Vm::default();
+    let mut guard = CollectionGuard::acquire();
+    let vm = Vm::new(&guard);
     let mut sources = Sources::default();
     let mut compiler = Compiler::default();
     loop {
@@ -38,11 +40,11 @@ fn main() {
                 let _err = editor.append_history(&history_path);
                 let source = sources.push(line);
                 compiler.push(&source);
-                match compiler.build() {
-                    Ok(code) => match vm.execute(&code) {
+                match compiler.build(&guard) {
+                    Ok(code) => match vm.execute(&code, &mut guard) {
                         Ok(value) => {
                             let displayed = value
-                                .map_str(&mut vm, |_vm, value| {
+                                .map_str(&mut VmContext::new(&vm, &mut guard), |_vm, value| {
                                     println!("{value}");
                                 })
                                 .is_ok();
@@ -52,7 +54,8 @@ fn main() {
                         }
                         Err(err) => match err {
                             ExecutionError::Exception(exception) => {
-                                let Some(exception) = exception.as_downcast_ref::<Exception>()
+                                let Some(exception) =
+                                    exception.as_downcast_ref::<Exception>(&guard)
                                 else {
                                     unreachable!()
                                 };

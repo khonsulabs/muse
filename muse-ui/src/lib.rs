@@ -7,22 +7,28 @@ use cushy::widgets::slider::Slidable;
 use cushy::widgets::{Expand, Slider};
 use cushy::window::WindowHandle;
 use cushy::{App, Application, Open, PendingApp};
+use muse::refuse::{self, CollectionGuard, SimpleType, Trace};
 use muse::symbol::Symbol;
-use muse::value::{CustomType, RustFunction, RustType, TypeRef, Value};
-use muse::vm::{Fault, Register, Vm};
+use muse::value::{ContextOrGuard, CustomType, RustFunction, RustType, TypeRef, Value};
+use muse::vm::{Fault, Register, Vm, VmContext};
 
-pub fn install(vm: &mut Vm) {
+pub fn install(vm: &Vm, guard: &mut CollectionGuard<'_>) {
     vm.declare(
         "Dynamic",
-        Value::dynamic(RustFunction::new(|vm: &mut Vm, arity| {
-            if arity == 1 {
-                Ok(Value::dynamic(DynamicValue(Dynamic::new(
-                    vm[Register(0)].take(),
-                ))))
-            } else {
-                Err(Fault::IncorrectNumberOfArguments)
-            }
-        })),
+        Value::dynamic(
+            RustFunction::new(|vm: &mut VmContext<'_, '_>, arity| {
+                if arity == 1 {
+                    Ok(Value::dynamic(
+                        DynamicValue(Dynamic::new(vm[Register(0)].take())),
+                        vm,
+                    ))
+                } else {
+                    Err(Fault::IncorrectNumberOfArguments)
+                }
+            }),
+            &guard,
+        ),
+        guard,
     )
     .unwrap();
 }
@@ -58,6 +64,14 @@ impl DerefMut for DynamicValue {
     }
 }
 
+impl Trace for DynamicValue {
+    const MAY_CONTAIN_REFERENCES: bool = true;
+
+    fn trace(&self, tracer: &mut refuse::Tracer) {
+        self.0.map_ref(|value| value.trace(tracer));
+    }
+}
+
 impl CustomType for DynamicValue {
     fn muse_type(&self) -> &TypeRef {
         static TYPE: RustType<DynamicValue> = RustType::new("DynamicValue", |t| {
@@ -66,7 +80,7 @@ impl CustomType for DynamicValue {
                     if name == Symbol::set_symbol() && arity == 1 {
                         let value = vm[Register(0)].take();
                         if let Ok(mut contents) = this.0.try_lock() {
-                            if contents.equals(Some(vm), &value)? {
+                            if contents.equals(ContextOrGuard::Context(vm), &value)? {
                                 Ok(value)
                             } else {
                                 let old_value = std::mem::replace(&mut *contents, value);
@@ -79,46 +93,59 @@ impl CustomType for DynamicValue {
                         let start = vm[Register(0)].take();
                         let end = vm[Register(1)].take();
 
-                        match this.0.map_ref(numeric_kind)
-                            | numeric_kind(&end)
-                            | numeric_kind(&start)
+                        match this.0.map_ref(|this| numeric_kind(this, vm.as_ref()))
+                            | numeric_kind(&end, vm.as_ref())
+                            | numeric_kind(&start, vm.as_ref())
                         {
                             NumericKind::Unknown => Err(Fault::UnsupportedOperation),
-                            NumericKind::Float => Ok(Value::dynamic(MuseWidget::FloatSlider(
-                                this.0
-                                    .linked(
-                                        |v| v.as_f64().unwrap_or_default(),
-                                        |v| Value::Float(*v),
-                                    )
-                                    .slider_between(
-                                        linked_dynamic_value(
-                                            &start,
-                                            |value| value.as_f64().unwrap_or_default(),
-                                            |float| Value::Float(*float),
+                            NumericKind::Float => Ok(Value::dynamic(
+                                MuseWidget::FloatSlider(
+                                    this.0
+                                        .linked(
+                                            |v| v.as_f64().unwrap_or_default(),
+                                            |v| Value::Float(*v),
+                                        )
+                                        .slider_between(
+                                            linked_dynamic_value(
+                                                &start,
+                                                vm.as_ref(),
+                                                |value| value.as_f64().unwrap_or_default(),
+                                                |float| Value::Float(*float),
+                                            ),
+                                            linked_dynamic_value(
+                                                &end,
+                                                vm.as_ref(),
+                                                |value| value.as_f64().unwrap_or_default(),
+                                                |float| Value::Float(*float),
+                                            ),
                                         ),
-                                        linked_dynamic_value(
-                                            &end,
-                                            |value| value.as_f64().unwrap_or_default(),
-                                            |float| Value::Float(*float),
+                                ),
+                                vm,
+                            )),
+                            NumericKind::Int => Ok(Value::dynamic(
+                                MuseWidget::IntSlider(
+                                    this.0
+                                        .linked(
+                                            |v| v.as_i64().unwrap_or_default(),
+                                            |v| Value::Int(*v),
+                                        )
+                                        .slider_between(
+                                            linked_dynamic_value(
+                                                &start,
+                                                vm.as_ref(),
+                                                |value| value.as_i64().unwrap_or_default(),
+                                                |int| Value::Int(*int),
+                                            ),
+                                            linked_dynamic_value(
+                                                &end,
+                                                vm.as_ref(),
+                                                |value| value.as_i64().unwrap_or_default(),
+                                                |int| Value::Int(*int),
+                                            ),
                                         ),
-                                    ),
-                            ))),
-                            NumericKind::Int => Ok(Value::dynamic(MuseWidget::IntSlider(
-                                this.0
-                                    .linked(|v| v.as_i64().unwrap_or_default(), |v| Value::Int(*v))
-                                    .slider_between(
-                                        linked_dynamic_value(
-                                            &start,
-                                            |value| value.as_i64().unwrap_or_default(),
-                                            |int| Value::Int(*int),
-                                        ),
-                                        linked_dynamic_value(
-                                            &end,
-                                            |value| value.as_i64().unwrap_or_default(),
-                                            |int| Value::Int(*int),
-                                        ),
-                                    ),
-                            ))),
+                                ),
+                                vm,
+                            )),
                         }
                     } else {
                         Err(Fault::UnknownSymbol)
@@ -135,10 +162,10 @@ impl CustomType for DynamicValue {
                 }
             })
             .with_deep_clone(|_| {
-                |this| {
+                |this, guard| {
                     this.0
-                        .map_ref(|value| value.deep_clone())
-                        .map(|value| muse::value::AnyDynamic::new(Self(Dynamic::new(value))))
+                        .map_ref(|value| value.deep_clone(guard))
+                        .map(|value| muse::value::AnyDynamic::new(Self(Dynamic::new(value)), guard))
                 }
             })
         });
@@ -146,16 +173,20 @@ impl CustomType for DynamicValue {
     }
 }
 
-fn numeric_kind(value: &Value) -> NumericKind {
-    map_dynamic_value(value, |value| match value {
+fn numeric_kind(value: &Value, guard: &CollectionGuard) -> NumericKind {
+    map_dynamic_value(value, guard, |value| match value {
         Value::Int(_) => NumericKind::Int,
         Value::Float(_) => NumericKind::Float,
         _ => NumericKind::Unknown,
     })
 }
 
-fn map_dynamic_value<R>(value: &Value, map: impl FnOnce(&Value) -> R) -> R {
-    if let Some(dynamic) = value.as_downcast_ref::<DynamicValue>() {
+fn map_dynamic_value<R>(
+    value: &Value,
+    guard: &CollectionGuard,
+    map: impl FnOnce(&Value) -> R,
+) -> R {
+    if let Some(dynamic) = value.as_downcast_ref::<DynamicValue>(guard) {
         return dynamic.0.map_ref(map);
     }
     map(value)
@@ -163,13 +194,14 @@ fn map_dynamic_value<R>(value: &Value, map: impl FnOnce(&Value) -> R) -> R {
 
 fn linked_dynamic_value<R>(
     value: &Value,
+    guard: &CollectionGuard,
     mut map_to: impl FnMut(&Value) -> R + Send + 'static,
     map_from: impl FnMut(&R) -> Value + Send + 'static,
 ) -> CushyValue<R>
 where
     R: PartialEq + Send + 'static,
 {
-    if let Some(dynamic) = value.as_downcast_ref::<DynamicValue>() {
+    if let Some(dynamic) = value.as_downcast_ref::<DynamicValue>(guard) {
         return dynamic.0.linked(map_to, map_from).into_value();
     }
 
@@ -211,12 +243,12 @@ impl BitOr for NumericKind {
 }
 
 pub trait VmUi: Sized {
-    fn with_ui(self) -> Self;
+    fn with_ui(self, guard: &mut CollectionGuard<'_>) -> Self;
 }
 
 impl VmUi for Vm {
-    fn with_ui(mut self) -> Self {
-        install(&mut self);
+    fn with_ui(self, guard: &mut CollectionGuard<'_>) -> Self {
+        install(&self, guard);
         self
     }
 }
@@ -242,18 +274,19 @@ impl CustomType for MuseWidget {
     fn muse_type(&self) -> &TypeRef {
         static TYPE: RustType<MuseWidget> = RustType::new("Widget", |t| {
             t.with_invoke(|_| {
-                |this, _vm, name, arity| {
+                |this, vm, name, arity| {
                     if name == &Symbol::from("open") && arity == 0 {
                         let widget = this.make_widget();
                         Ok(widget
                             .open(&muse_app()?)
                             .unwrap()
-                            .map(|handle| Value::dynamic(OpenWindow(handle)))
+                            .map(|handle| Value::dynamic(OpenWindow(handle), vm))
                             .unwrap_or_default())
                     } else if name == &Symbol::from("expand") && arity == 0 {
-                        Ok(Value::dynamic(MuseWidget::Expand(
-                            this.make_widget().expand(),
-                        )))
+                        Ok(Value::dynamic(
+                            MuseWidget::Expand(this.make_widget().expand()),
+                            vm,
+                        ))
                     } else {
                         Err(Fault::UnknownSymbol)
                     }
@@ -264,6 +297,8 @@ impl CustomType for MuseWidget {
     }
 }
 
+impl SimpleType for MuseWidget {}
+
 #[derive(Debug)]
 pub struct OpenWindow(WindowHandle);
 
@@ -273,3 +308,5 @@ impl CustomType for OpenWindow {
         &TYPE
     }
 }
+
+impl SimpleType for OpenWindow {}

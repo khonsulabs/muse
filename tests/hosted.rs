@@ -8,7 +8,8 @@ use muse::symbol::Symbol;
 use muse::syntax::token::{Paired, Token};
 use muse::syntax::{Ranged, SourceCode};
 use muse::value::{CustomType, RustFunction, RustType, Value};
-use muse::vm::{ExecutionError, Fault, Register, Vm};
+use muse::vm::{ExecutionError, Fault, Register, Vm, VmContext};
+use refuse::{CollectionGuard, SimpleType};
 
 fn main() {
     let filter = std::env::args().nth(1).unwrap_or_default();
@@ -26,6 +27,7 @@ fn run_test_cases(path: &Path, filter: &str) {
     let path = path.to_str().expect("invalid test path");
     let contents = std::fs::read_to_string(path).unwrap();
     let eval = Symbol::from("eval");
+    let mut guard = CollectionGuard::acquire();
 
     let code = Compiler::default()
         .with_macro("$case", {
@@ -72,43 +74,53 @@ fn run_test_cases(path: &Path, filter: &str) {
             }
         })
         .with(&SourceCode::anonymous(&contents))
-        .build()
+        .build(&guard)
         .unwrap();
 
-    let mut vm = Vm::default();
+    let vm = Vm::new(&guard);
     let path = path.to_string();
-    vm.declare(
-        eval,
-        Value::dynamic(RustFunction::new(move |vm, arity| {
-            let 4 = arity.0 else {
-                return Err(Fault::InvalidArity);
-            };
-            let name = vm[Register(0)].take();
-            let name_string = name.to_string(vm).expect("invalid name");
-            println!("running case {name_string}");
-            let offset = vm[Register(1)].take();
-            let source = vm[Register(2)].take();
-            let code = vm[Register(3)].take().to_string(vm)?;
 
-            let code = Compiler::compile(&SourceCode::anonymous(&code)).unwrap();
-            let mut sandbox = Vm::default();
-            match sandbox.execute(&code) {
-                Ok(result) => Ok(result),
-                Err(err) => Err(Fault::Exception(Value::dynamic(TestError {
-                    err,
-                    name,
-                    offset,
-                    source,
-                }))),
-            }
-        })),
-    )
-    .unwrap();
+    let mut context = VmContext::new(&vm, &mut guard);
+    context
+        .declare(
+            eval,
+            Value::dynamic(
+                RustFunction::new(move |vm, arity| {
+                    let 4 = arity.0 else {
+                        return Err(Fault::InvalidArity);
+                    };
+                    let name = vm[Register(0)].take();
+                    let name_string = name.to_string(vm).expect("invalid name");
+                    println!("running case {name_string}");
+                    let offset = vm[Register(1)].take();
+                    let source = vm[Register(2)].take();
+                    let code = vm[Register(3)].take().to_string(vm)?;
 
-    match vm.execute(&code) {
+                    let code =
+                        Compiler::compile(&SourceCode::anonymous(&code), vm.guard()).unwrap();
+                    let sandbox = Vm::new(vm.guard());
+                    match sandbox.execute(&code, vm.guard_mut()) {
+                        Ok(result) => Ok(result),
+                        Err(err) => Err(Fault::Exception(Value::dynamic(
+                            TestError {
+                                err,
+                                name,
+                                offset,
+                                source,
+                            },
+                            vm.guard(),
+                        ))),
+                    }
+                }),
+                context.guard(),
+            ),
+        )
+        .unwrap();
+
+    match context.execute(&code) {
         Ok(_) => {}
         Err(ExecutionError::Exception(exc)) => {
-            let Some(exc) = exc.as_dynamic::<TestError>() else {
+            let Some(exc) = exc.as_rooted::<TestError>(context.guard()) else {
                 unreachable!("expected test error: {exc:?}")
             };
             let Some(offset) = exc.offset.as_usize() else {
@@ -133,9 +145,9 @@ fn run_test_cases(path: &Path, filter: &str) {
                 unreachable!("expected inner error to be exception")
             };
 
-            if let Some(inner_exception) = inner_exception.as_dynamic::<Exception>() {
+            if let Some(inner_exception) = inner_exception.as_rooted::<Exception>(context.guard()) {
                 eprintln!("exception: {exc:?}", exc = inner_exception.value());
-                let Ok(source) = exc.source.to_string(&mut vm) else {
+                let Ok(source) = exc.source.to_string(&mut context) else {
                     unreachable!("source was not a string")
                 };
                 let mut line_offset = 0;
@@ -183,6 +195,8 @@ impl CustomType for TestError {
         &TYPE
     }
 }
+
+impl SimpleType for TestError {}
 
 // fn execute_test_cases(path: &str, filter: &str, contents: &str) -> Result<(), TestError> {}
 

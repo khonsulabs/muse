@@ -1,8 +1,12 @@
 use std::sync::Mutex;
 
+use refuse::Trace;
+
 use crate::symbol::Symbol;
-use crate::value::{CustomType, Dynamic, RustType, StaticRustFunctionTable, TypeRef, Value};
-use crate::vm::{Fault, Register, Vm};
+use crate::value::{
+    CustomType, Dynamic, Rooted, RustType, StaticRustFunctionTable, TypeRef, Value,
+};
+use crate::vm::{Fault, Register, VmContext};
 
 pub static LIST_TYPE: RustType<List> = RustType::new("List", |t| {
     t.with_construct(|_| {
@@ -12,7 +16,7 @@ pub static LIST_TYPE: RustType<List> = RustType::new("List", |t| {
                 let value = vm[Register(reg_index)].take();
                 list.push(value)?;
             }
-            Ok(Dynamic::new(list))
+            Ok(Dynamic::new(list, vm))
         }
     })
     .with_invoke(|_| {
@@ -20,9 +24,13 @@ pub static LIST_TYPE: RustType<List> = RustType::new("List", |t| {
             static FUNCTIONS: StaticRustFunctionTable<List> =
                 StaticRustFunctionTable::new(|table| {
                     table
-                        .with_fn(Symbol::len_symbol(), 0, |_vm: &mut Vm, this: &List| {
-                            Value::try_from(this.0.lock().expect("poisoned").len())
-                        })
+                        .with_fn(
+                            Symbol::len_symbol(),
+                            0,
+                            |_vm: &mut VmContext<'_, '_>, this: &Rooted<List>| {
+                                Value::try_from(this.0.lock().expect("poisoned").len())
+                            },
+                        )
                         .with_fn(Symbol::set_symbol(), 2, |vm, this| {
                             let index = vm[Register(0)].take();
                             let value = vm[Register(1)].take();
@@ -109,5 +117,13 @@ impl FromIterator<Value> for List {
 impl CustomType for List {
     fn muse_type(&self) -> &TypeRef {
         &LIST_TYPE
+    }
+}
+
+impl Trace for List {
+    const MAY_CONTAIN_REFERENCES: bool = true;
+
+    fn trace(&self, tracer: &mut refuse::Tracer) {
+        self.0.lock().expect("poisoned").trace(tracer);
     }
 }

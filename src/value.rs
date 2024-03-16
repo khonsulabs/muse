@@ -4,18 +4,19 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 
 pub type ValueHasher = ahash::AHasher;
 
 use kempt::Map;
+use refuse::{AnyRef, CollectionGuard, ContainsNoRefs, MapAs, Ref, Root, SimpleType, Trace};
 
 use crate::string::MuseString;
 use crate::symbol::{Symbol, SymbolList};
-use crate::vm::{Arity, Fault, Vm};
+use crate::vm::{Arity, ExecutionError, Fault, VmContext};
 
 #[derive(Default, Clone, Debug)]
 pub enum Value {
@@ -30,11 +31,11 @@ pub enum Value {
 }
 
 impl Value {
-    pub fn dynamic<T>(value: T) -> Self
+    pub fn dynamic<'guard, T>(value: T, guard: impl AsRef<CollectionGuard<'guard>>) -> Self
     where
-        T: DynamicValue,
+        T: DynamicValue + Trace,
     {
-        Self::Dynamic(AnyDynamic::new(value))
+        Self::Dynamic(AnyDynamic::new(value, guard))
     }
 
     #[must_use]
@@ -171,9 +172,9 @@ impl Value {
     }
 
     #[must_use]
-    pub fn as_any_dynamic(&self) -> Option<&AnyDynamic> {
+    pub fn as_any_dynamic(&self) -> Option<AnyDynamic> {
         match self {
-            Value::Dynamic(value) => Some(value),
+            Value::Dynamic(value) => Some(*value),
             _ => None,
         }
     }
@@ -181,37 +182,37 @@ impl Value {
     #[must_use]
     pub fn as_dynamic<T>(&self) -> Option<Dynamic<T>>
     where
-        T: DynamicValue,
+        T: DynamicValue + Trace,
     {
         match self {
-            Value::Dynamic(value) => value.as_type(),
+            Value::Dynamic(value) => value.as_dynamic(),
             _ => None,
         }
     }
 
     #[must_use]
-    pub fn as_downcast_ref<T>(&self) -> Option<&T>
+    pub fn as_rooted<T>(&self, guard: &CollectionGuard<'_>) -> Option<Rooted<T>>
     where
-        T: DynamicValue,
+        T: DynamicValue + Trace,
     {
         match self {
-            Value::Dynamic(value) => value.downcast_ref(),
+            Value::Dynamic(value) => value.as_rooted(guard),
             _ => None,
         }
     }
 
     #[must_use]
-    pub fn as_downcast_mut<T>(&mut self) -> Option<&mut T>
+    pub fn as_downcast_ref<'guard, T>(&self, guard: &'guard CollectionGuard) -> Option<&'guard T>
     where
-        T: DynamicValue,
+        T: DynamicValue + Trace,
     {
         match self {
-            Value::Dynamic(value) => value.downcast_mut(),
+            Value::Dynamic(value) => value.downcast_ref(guard),
             _ => None,
         }
     }
 
-    pub fn truthy(&self, vm: &mut Vm) -> bool {
+    pub fn truthy(&self, vm: &mut VmContext<'_, '_>) -> bool {
         match self {
             Value::Nil => false,
             Value::Bool(value) => *value,
@@ -223,7 +224,11 @@ impl Value {
         }
     }
 
-    pub fn call(&self, vm: &mut Vm, arity: impl Into<Arity>) -> Result<Value, Fault> {
+    pub fn call(
+        &self,
+        vm: &mut VmContext<'_, '_>,
+        arity: impl Into<Arity>,
+    ) -> Result<Value, Fault> {
         match self {
             Value::Dynamic(dynamic) => dynamic.call(vm, arity),
             Value::Symbol(name) => vm.resolve(name).and_then(|named| named.call(vm, arity)),
@@ -234,7 +239,7 @@ impl Value {
 
     pub fn invoke(
         &self,
-        vm: &mut Vm,
+        vm: &mut VmContext<'_, '_>,
         name: &Symbol,
         arity: impl Into<Arity>,
     ) -> Result<Value, Fault> {
@@ -253,7 +258,7 @@ impl Value {
         }
     }
 
-    pub fn add(&self, vm: &mut Vm, rhs: &Self) -> Result<Value, Fault> {
+    pub fn add(&self, vm: &mut VmContext<'_, '_>, rhs: &Self) -> Result<Value, Fault> {
         match (self, rhs) {
             (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
             (Value::Bool(lhs), Value::Bool(rhs)) => Ok(Value::Bool(*lhs || *rhs)),
@@ -286,7 +291,7 @@ impl Value {
         }
     }
 
-    pub fn sub(&self, vm: &mut Vm, rhs: &Self) -> Result<Value, Fault> {
+    pub fn sub(&self, vm: &mut VmContext<'_, '_>, rhs: &Self) -> Result<Value, Fault> {
         match (self, rhs) {
             (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
 
@@ -313,7 +318,7 @@ impl Value {
         }
     }
 
-    pub fn mul(&self, vm: &mut Vm, rhs: &Self) -> Result<Value, Fault> {
+    pub fn mul(&self, vm: &mut VmContext<'_, '_>, rhs: &Self) -> Result<Value, Fault> {
         match (self, rhs) {
             (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
 
@@ -347,7 +352,7 @@ impl Value {
         }
     }
 
-    pub fn pow(&self, vm: &mut Vm, exp: &Self) -> Result<Value, Fault> {
+    pub fn pow(&self, vm: &mut VmContext<'_, '_>, exp: &Self) -> Result<Value, Fault> {
         match (self, exp) {
             (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
 
@@ -386,7 +391,7 @@ impl Value {
         }
     }
 
-    pub fn div(&self, vm: &mut Vm, rhs: &Self) -> Result<Value, Fault> {
+    pub fn div(&self, vm: &mut VmContext<'_, '_>, rhs: &Self) -> Result<Value, Fault> {
         match (self, rhs) {
             (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
 
@@ -451,7 +456,7 @@ impl Value {
         }
     }
 
-    pub fn idiv(&self, vm: &mut Vm, rhs: &Self) -> Result<Value, Fault> {
+    pub fn idiv(&self, vm: &mut VmContext<'_, '_>, rhs: &Self) -> Result<Value, Fault> {
         match (self, rhs) {
             (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
 
@@ -520,7 +525,7 @@ impl Value {
         }
     }
 
-    pub fn rem(&self, vm: &mut Vm, rhs: &Self) -> Result<Value, Fault> {
+    pub fn rem(&self, vm: &mut VmContext<'_, '_>, rhs: &Self) -> Result<Value, Fault> {
         match (self, rhs) {
             (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
 
@@ -587,11 +592,11 @@ impl Value {
         }
     }
 
-    pub fn not(&self, vm: &mut Vm) -> Result<Self, Fault> {
+    pub fn not(&self, vm: &mut VmContext<'_, '_>) -> Result<Self, Fault> {
         Ok(Value::Bool(!self.truthy(vm)))
     }
 
-    pub fn negate(&self, vm: &mut Vm) -> Result<Self, Fault> {
+    pub fn negate(&self, vm: &mut VmContext<'_, '_>) -> Result<Self, Fault> {
         match self {
             Value::Nil => Ok(Value::Nil),
             Value::Bool(bool) => Ok(Value::Bool(!bool)),
@@ -607,7 +612,7 @@ impl Value {
         }
     }
 
-    pub fn bitwise_not(&self, vm: &mut Vm) -> Result<Self, Fault> {
+    pub fn bitwise_not(&self, vm: &mut VmContext<'_, '_>) -> Result<Self, Fault> {
         match self {
             Value::Nil => Ok(Value::Nil),
             Value::Bool(bool) => Ok(Value::Bool(!bool)),
@@ -618,7 +623,7 @@ impl Value {
         }
     }
 
-    pub fn bitwise_and(&self, vm: &mut Vm, rhs: &Value) -> Result<Self, Fault> {
+    pub fn bitwise_and(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Self, Fault> {
         match (self, rhs) {
             (Value::Dynamic(dymamic), other) | (other, Value::Dynamic(dymamic)) => {
                 dymamic.bitwise_and(vm, other)
@@ -662,7 +667,7 @@ impl Value {
         }
     }
 
-    pub fn bitwise_or(&self, vm: &mut Vm, rhs: &Value) -> Result<Self, Fault> {
+    pub fn bitwise_or(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Self, Fault> {
         match (self, rhs) {
             (Value::Dynamic(dymamic), other) | (other, Value::Dynamic(dymamic)) => {
                 dymamic.bitwise_or(vm, other)
@@ -706,7 +711,7 @@ impl Value {
         }
     }
 
-    pub fn bitwise_xor(&self, vm: &mut Vm, rhs: &Value) -> Result<Self, Fault> {
+    pub fn bitwise_xor(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Self, Fault> {
         match (self, rhs) {
             (Value::Dynamic(dymamic), other) | (other, Value::Dynamic(dymamic)) => {
                 dymamic.bitwise_xor(vm, other)
@@ -750,7 +755,7 @@ impl Value {
         }
     }
 
-    pub fn shift_left(&self, vm: &mut Vm, rhs: &Value) -> Result<Self, Fault> {
+    pub fn shift_left(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Self, Fault> {
         match self {
             Value::Dynamic(dymamic) => dymamic.shift_left(vm, rhs),
 
@@ -777,7 +782,7 @@ impl Value {
         }
     }
 
-    pub fn shift_right(&self, vm: &mut Vm, rhs: &Value) -> Result<Self, Fault> {
+    pub fn shift_right(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Self, Fault> {
         match self {
             Value::Dynamic(dymamic) => dymamic.shift_right(vm, rhs),
 
@@ -804,7 +809,7 @@ impl Value {
         }
     }
 
-    pub fn to_string(&self, vm: &mut Vm) -> Result<Symbol, Fault> {
+    pub fn to_string(&self, vm: &mut VmContext<'_, '_>) -> Result<Symbol, Fault> {
         match self {
             Value::Nil => Ok(Symbol::empty().clone()),
             Value::Bool(bool) => Ok(Symbol::from(*bool)),
@@ -818,19 +823,17 @@ impl Value {
 
     pub fn map_str<R>(
         &self,
-        vm: &mut Vm,
-        map: impl FnOnce(&mut Vm, &str) -> R,
+        vm: &mut VmContext<'_, '_>,
+        map: impl FnOnce(&mut VmContext<'_, '_>, &str) -> R,
     ) -> Result<R, Fault> {
-        if let Value::Dynamic(dynamic) = self {
-            if let Some(str) = dynamic.downcast_ref::<MuseString>() {
-                return Ok(map(vm, &str.lock()));
-            }
+        if let Some(str) = self.as_rooted::<MuseString>(vm.as_ref()) {
+            return Ok(map(vm, &str.lock()));
         }
 
         self.to_string(vm).map(|string| map(vm, &string))
     }
 
-    pub fn hash_into(&self, vm: &mut Vm, hasher: &mut ValueHasher) {
+    pub fn hash_into(&self, vm: &mut VmContext<'_, '_>, hasher: &mut ValueHasher) {
         core::mem::discriminant(self).hash(hasher);
         match self {
             Value::Nil => {}
@@ -843,7 +846,7 @@ impl Value {
         }
     }
 
-    pub fn hash(&self, vm: &mut Vm) -> u64 {
+    pub fn hash(&self, vm: &mut VmContext<'_, '_>) -> u64 {
         let mut hasher = ValueHasher::default();
 
         core::mem::discriminant(self).hash(&mut hasher);
@@ -860,7 +863,7 @@ impl Value {
         hasher.finish()
     }
 
-    pub fn equals(&self, vm: Option<&mut Vm>, other: &Self) -> Result<bool, Fault> {
+    pub fn equals(&self, vm: ContextOrGuard<'_, '_, '_>, other: &Self) -> Result<bool, Fault> {
         match (self, other) {
             (Self::Nil, Self::Nil) => Ok(true),
             (Self::Nil, _) | (_, Self::Nil) => Ok(false),
@@ -901,15 +904,15 @@ impl Value {
         }
     }
 
-    pub fn matches(&self, vm: &mut Vm, other: &Self) -> Result<bool, Fault> {
+    pub fn matches(&self, vm: &mut VmContext<'_, '_>, other: &Self) -> Result<bool, Fault> {
         match (self, other) {
             (Self::Dynamic(l0), _) => l0.matches(vm, other),
             (_, Self::Dynamic(r0)) => r0.matches(vm, self),
-            _ => self.equals(Some(vm), other),
+            _ => self.equals(ContextOrGuard::Context(vm), other),
         }
     }
 
-    pub fn total_cmp(&self, vm: &mut Vm, other: &Self) -> Result<Ordering, Fault> {
+    pub fn total_cmp(&self, vm: &mut VmContext<'_, '_>, other: &Self) -> Result<Ordering, Fault> {
         match (self, other) {
             (Value::Nil, Value::Nil) => Ok(Ordering::Equal),
 
@@ -964,7 +967,7 @@ impl Value {
         std::mem::take(self)
     }
 
-    pub fn deep_clone(&self) -> Option<Value> {
+    pub fn deep_clone(&self, guard: &CollectionGuard) -> Option<Value> {
         match self {
             Value::Nil => Some(Value::Nil),
             Value::Bool(value) => Some(Value::Bool(*value)),
@@ -972,14 +975,26 @@ impl Value {
             Value::UInt(value) => Some(Value::UInt(*value)),
             Value::Float(value) => Some(Value::Float(*value)),
             Value::Symbol(value) => Some(Value::Symbol(value.clone())),
-            Value::Dynamic(value) => value.deep_clone().map(Value::Dynamic),
+            Value::Dynamic(value) => value.deep_clone(guard).map(Value::Dynamic),
         }
     }
 }
 
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
-        self.equals(None, other).unwrap_or(false)
+        self.equals(ContextOrGuard::Guard(&CollectionGuard::acquire()), other)
+            .unwrap_or(false)
+    }
+}
+
+impl Trace for Value {
+    const MAY_CONTAIN_REFERENCES: bool = true;
+
+    fn trace(&self, tracer: &mut refuse::Tracer) {
+        let Some(dynamic) = self.as_any_dynamic() else {
+            return;
+        };
+        dynamic.trace(tracer);
     }
 }
 
@@ -1034,240 +1049,467 @@ impl_try_from!(Value, usize, UInt);
 impl_try_from!(Value, isize, Int);
 impl_try_from!(Value, i128, UInt);
 
-#[derive(Clone)]
-pub struct AnyDynamic(Arc<Box<dyn DynamicValue>>);
+#[derive(Clone, Copy, Hash, Eq, PartialEq)]
+pub struct AnyDynamic(pub(crate) AnyRef);
 
 impl AnyDynamic {
-    pub fn new<T>(value: T) -> Self
+    pub fn new<'guard, T>(value: T, guard: impl AsRef<CollectionGuard<'guard>>) -> Self
     where
-        T: DynamicValue,
+        T: DynamicValue + Trace,
     {
-        Self(Arc::new(Box::new(value)))
+        Self(Ref::new(Custom(value), guard).as_any())
     }
 
     #[must_use]
-    pub fn as_type<T>(&self) -> Option<Dynamic<T>>
+    pub fn as_dynamic<T>(&self) -> Option<Dynamic<T>>
     where
-        T: DynamicValue,
+        T: DynamicValue + Trace,
     {
-        self.downcast_ref::<T>().map(|_| Dynamic {
-            dynamic: self.clone(),
-            _t: PhantomData,
-        })
+        self.0.downcast_ref::<Custom<T>>().map(|cast| Dynamic(cast))
+    }
+
+    #[must_use]
+    pub fn as_rooted<T>(&self, guard: &CollectionGuard<'_>) -> Option<Rooted<T>>
+    where
+        T: DynamicValue + Trace,
+    {
+        self.0
+            .downcast_root::<Custom<T>>(guard)
+            .map(|cast| Rooted(cast))
     }
 
     pub fn try_into_type<T>(self) -> Result<Dynamic<T>, Self>
     where
-        T: DynamicValue,
+        T: DynamicValue + Trace,
     {
-        let Some(_) = self.downcast_ref::<T>() else {
+        let Some(cast) = self.0.downcast_ref::<Custom<T>>() else {
             return Err(self);
         };
 
-        Ok(Dynamic {
-            dynamic: self.clone(),
-            _t: PhantomData,
-        })
+        Ok(Dynamic(cast))
     }
 
     #[must_use]
-    pub fn downcast_ref<T>(&self) -> Option<&T>
+    pub fn downcast_ref<'guard, T>(&self, guard: &'guard CollectionGuard) -> Option<&'guard T>
     where
-        T: DynamicValue,
+        T: DynamicValue + Trace,
     {
-        let dynamic = &**self.0;
-        dynamic.as_any().downcast_ref()
+        self.0
+            .load::<Custom<T>>(guard)
+            .and_then(|d| d.0.as_any().downcast_ref())
     }
 
-    pub fn downcast_mut<T>(&mut self) -> Option<&mut T>
-    where
-        T: DynamicValue,
-    {
-        if Arc::get_mut(&mut self.0).is_none() {
-            *self = self.deep_clone()?;
+    #[must_use]
+    pub fn deep_clone(&self, guard: &CollectionGuard) -> Option<AnyDynamic> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(guard)?
+            .muse_type()
+            .vtable
+            .deep_clone)(self, guard)
+    }
+
+    pub fn call(
+        &self,
+        vm: &mut VmContext<'_, '_>,
+        arity: impl Into<Arity>,
+    ) -> Result<Value, Fault> {
+        if let Some(kind) = self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .map(|v| v.muse_type().clone())
+        {
+            (kind.vtable.call)(self, vm, arity.into())
+        } else {
+            Ok(Value::Nil)
         }
-
-        let dynamic = &mut *Arc::get_mut(&mut self.0).expect("always 1 ref");
-        dynamic.as_any_mut().downcast_mut()
-    }
-
-    #[must_use]
-    pub fn downgrade(&self) -> WeakAnyDynamic {
-        WeakAnyDynamic(Arc::downgrade(&self.0))
-    }
-
-    #[must_use]
-    pub fn ptr_eq(a: &AnyDynamic, b: &AnyDynamic) -> bool {
-        Arc::ptr_eq(&a.0, &b.0)
-    }
-
-    #[must_use]
-    pub fn deep_clone(&self) -> Option<AnyDynamic> {
-        (self.0.muse_type().vtable.deep_clone)(self)
-    }
-
-    pub fn call(&self, vm: &mut Vm, arity: impl Into<Arity>) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.call)(self, vm, arity.into())
     }
 
     pub fn invoke(
         &self,
-        vm: &mut Vm,
+        vm: &mut VmContext<'_, '_>,
         symbol: &Symbol,
         arity: impl Into<Arity>,
     ) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.invoke)(self, vm, symbol, arity.into())
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .invoke)(self, vm, symbol, arity.into())
     }
 
-    pub fn add(&self, vm: &mut Vm, rhs: &Value) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.add)(self, vm, rhs)
+    pub fn add(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Value, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .add)(self, vm, rhs)
     }
 
-    pub fn add_right(&self, vm: &mut Vm, lhs: &Value) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.add_right)(self, vm, lhs)
+    pub fn add_right(&self, vm: &mut VmContext<'_, '_>, lhs: &Value) -> Result<Value, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .add_right)(self, vm, lhs)
     }
 
-    pub fn sub(&self, vm: &mut Vm, rhs: &Value) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.sub)(self, vm, rhs)
+    pub fn sub(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Value, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .sub)(self, vm, rhs)
     }
 
-    pub fn sub_right(&self, vm: &mut Vm, lhs: &Value) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.sub_right)(self, vm, lhs)
+    pub fn sub_right(&self, vm: &mut VmContext<'_, '_>, lhs: &Value) -> Result<Value, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .sub_right)(self, vm, lhs)
     }
 
-    pub fn mul(&self, vm: &mut Vm, rhs: &Value) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.mul)(self, vm, rhs)
+    pub fn mul(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Value, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .mul)(self, vm, rhs)
     }
 
-    pub fn mul_right(&self, vm: &mut Vm, lhs: &Value) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.mul_right)(self, vm, lhs)
+    pub fn mul_right(&self, vm: &mut VmContext<'_, '_>, lhs: &Value) -> Result<Value, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .mul_right)(self, vm, lhs)
     }
 
-    pub fn div(&self, vm: &mut Vm, rhs: &Value) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.div)(self, vm, rhs)
+    pub fn div(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Value, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .div)(self, vm, rhs)
     }
 
-    pub fn div_right(&self, vm: &mut Vm, lhs: &Value) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.div_right)(self, vm, lhs)
+    pub fn div_right(&self, vm: &mut VmContext<'_, '_>, lhs: &Value) -> Result<Value, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .div_right)(self, vm, lhs)
     }
 
-    pub fn rem(&self, vm: &mut Vm, rhs: &Value) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.rem)(self, vm, rhs)
+    pub fn rem(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Value, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .rem)(self, vm, rhs)
     }
 
-    pub fn rem_right(&self, vm: &mut Vm, lhs: &Value) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.rem_right)(self, vm, lhs)
+    pub fn rem_right(&self, vm: &mut VmContext<'_, '_>, lhs: &Value) -> Result<Value, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .rem_right)(self, vm, lhs)
     }
 
-    pub fn idiv(&self, vm: &mut Vm, rhs: &Value) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.div)(self, vm, rhs)
+    pub fn idiv(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Value, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .div)(self, vm, rhs)
     }
 
-    pub fn idiv_right(&self, vm: &mut Vm, lhs: &Value) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.idiv_right)(self, vm, lhs)
+    pub fn idiv_right(&self, vm: &mut VmContext<'_, '_>, lhs: &Value) -> Result<Value, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .idiv_right)(self, vm, lhs)
     }
 
-    pub fn hash(&self, vm: &mut Vm, hasher: &mut ValueHasher) {
-        (self.0.muse_type().vtable.hash)(self, vm, hasher);
+    pub fn hash(&self, vm: &mut VmContext<'_, '_>, hasher: &mut ValueHasher) {
+        let Some(value) = self.0.load_mapped::<dyn CustomType>(vm.as_ref()) else {
+            return;
+        };
+        (value.muse_type().clone().vtable.hash)(self, vm, hasher);
     }
 
-    pub fn bitwise_not(&self, vm: &mut Vm) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.bitwise_not)(self, vm)
+    pub fn bitwise_not(&self, vm: &mut VmContext<'_, '_>) -> Result<Value, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .bitwise_not)(self, vm)
     }
 
-    pub fn bitwise_and(&self, vm: &mut Vm, other: &Value) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.bitwise_and)(self, vm, other)
+    pub fn bitwise_and(&self, vm: &mut VmContext<'_, '_>, other: &Value) -> Result<Value, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .bitwise_and)(self, vm, other)
     }
 
-    pub fn bitwise_or(&self, vm: &mut Vm, other: &Value) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.bitwise_or)(self, vm, other)
+    pub fn bitwise_or(&self, vm: &mut VmContext<'_, '_>, other: &Value) -> Result<Value, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .bitwise_or)(self, vm, other)
     }
 
-    pub fn bitwise_xor(&self, vm: &mut Vm, other: &Value) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.bitwise_xor)(self, vm, other)
+    pub fn bitwise_xor(&self, vm: &mut VmContext<'_, '_>, other: &Value) -> Result<Value, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .bitwise_xor)(self, vm, other)
     }
 
-    pub fn shift_left(&self, vm: &mut Vm, amount: &Value) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.shift_left)(self, vm, amount)
+    pub fn shift_left(&self, vm: &mut VmContext<'_, '_>, amount: &Value) -> Result<Value, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .shift_left)(self, vm, amount)
     }
 
-    pub fn shift_right(&self, vm: &mut Vm, amount: &Value) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.shift_right)(self, vm, amount)
+    pub fn shift_right(&self, vm: &mut VmContext<'_, '_>, amount: &Value) -> Result<Value, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .shift_right)(self, vm, amount)
     }
 
-    pub fn negate(&self, vm: &mut Vm) -> Result<Value, Fault> {
-        (self.0.muse_type().vtable.negate)(self, vm)
+    pub fn negate(&self, vm: &mut VmContext<'_, '_>) -> Result<Value, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .negate)(self, vm)
     }
 
-    pub fn to_string(&self, vm: &mut Vm) -> Result<Symbol, Fault> {
-        (self.0.muse_type().vtable.to_string)(self, vm)
+    pub fn to_string(&self, vm: &mut VmContext<'_, '_>) -> Result<Symbol, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .to_string)(self, vm)
     }
 
-    pub fn truthy(&self, vm: &mut Vm) -> bool {
-        (self.0.muse_type().vtable.truthy)(self, vm)
+    pub fn truthy(&self, vm: &mut VmContext<'_, '_>) -> bool {
+        let Some(value) = self.0.load_mapped::<dyn CustomType>(vm.as_ref()) else {
+            return false;
+        };
+        (value.muse_type().clone().vtable.truthy)(self, vm)
     }
 
-    pub fn eq(&self, vm: Option<&mut Vm>, rhs: &Value) -> Result<bool, Fault> {
+    pub fn eq(&self, vm: ContextOrGuard<'_, '_, '_>, rhs: &Value) -> Result<bool, Fault> {
         match rhs {
-            Value::Dynamic(dynamic) if Arc::ptr_eq(&self.0, &dynamic.0) => Ok(true),
-            _ => (self.0.muse_type().vtable.eq)(self, vm, rhs),
+            Value::Dynamic(dynamic) if self.0 == dynamic.0 => Ok(true),
+            _ => (self
+                .0
+                .load_mapped::<dyn CustomType>(vm.as_ref())
+                .ok_or(Fault::OperationOnNil)?
+                .muse_type()
+                .clone()
+                .vtable
+                .eq)(self, vm, rhs),
         }
     }
 
-    pub fn matches(&self, vm: &mut Vm, rhs: &Value) -> Result<bool, Fault> {
+    pub fn matches(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<bool, Fault> {
         match rhs {
-            Value::Dynamic(dynamic) if Arc::ptr_eq(&self.0, &dynamic.0) => Ok(true),
-            _ => (self.0.muse_type().vtable.matches)(self, vm, rhs),
+            Value::Dynamic(dynamic) if self.0 == dynamic.0 => Ok(true),
+            _ => (self
+                .0
+                .load_mapped::<dyn CustomType>(vm.as_ref())
+                .ok_or(Fault::OperationOnNil)?
+                .muse_type()
+                .clone()
+                .vtable
+                .matches)(self, vm, rhs),
         }
     }
 
-    pub fn cmp(&self, vm: &mut Vm, rhs: &Value) -> Result<Ordering, Fault> {
-        (self.0.muse_type().vtable.total_cmp)(self, vm, rhs)
+    pub fn cmp(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Ordering, Fault> {
+        (self
+            .0
+            .load_mapped::<dyn CustomType>(vm.as_ref())
+            .ok_or(Fault::OperationOnNil)?
+            .muse_type()
+            .clone()
+            .vtable
+            .total_cmp)(self, vm, rhs)
     }
 }
 
 impl Debug for AnyDynamic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Debug::fmt(&**self.0, f)
+        let guard = CollectionGuard::acquire();
+        let Some(value) = self.0.load_mapped::<dyn CustomType>(&guard) else {
+            return f.write_str("<Deallocated>");
+        };
+        Debug::fmt(value, f)
+    }
+}
+impl Trace for AnyDynamic {
+    const MAY_CONTAIN_REFERENCES: bool = true;
+
+    fn trace(&self, tracer: &mut refuse::Tracer) {
+        self.0.trace(tracer);
     }
 }
 
-pub struct Dynamic<T>
+pub struct Rooted<T: CustomType + Trace>(Root<Custom<T>>);
+impl<T> Rooted<T>
 where
-    T: CustomType,
+    T: CustomType + Trace,
 {
-    dynamic: AnyDynamic,
-    _t: PhantomData<T>,
+    #[must_use]
+    pub fn new<'guard>(value: T, guard: impl AsRef<CollectionGuard<'guard>>) -> Self {
+        Self(Root::new(Custom(value), guard))
+    }
+
+    #[must_use]
+    pub fn as_any_dynamic(&self) -> AnyDynamic {
+        AnyDynamic(self.0.as_any())
+    }
 }
+
+impl<T: CustomType + Trace> AsRef<T> for Rooted<T> {
+    fn as_ref(&self) -> &T {
+        &self.0 .0
+    }
+}
+
+impl<T: CustomType + Trace> Deref for Rooted<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
+}
+
+impl<T: CustomType + Trace> Clone for Rooted<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl From<AnyDynamic> for AnyRef {
+    fn from(value: AnyDynamic) -> Self {
+        value.0
+    }
+}
+
+pub struct Dynamic<T: CustomType>(Ref<Custom<T>>);
 
 impl<T> Dynamic<T>
 where
-    T: CustomType,
+    T: CustomType + Trace,
 {
     #[must_use]
-    pub fn new(value: T) -> Self {
-        Self {
-            dynamic: AnyDynamic::new(value),
-            _t: PhantomData,
-        }
+    pub fn new<'guard>(value: T, guard: impl AsRef<CollectionGuard<'guard>>) -> Self {
+        Self(Ref::new(Custom(value), guard))
     }
 
     #[must_use]
-    pub fn as_any_dynamic(&self) -> &AnyDynamic {
-        &self.dynamic
+    pub fn load<'guard>(&self, guard: &'guard CollectionGuard) -> Option<&'guard T> {
+        self.0.load(guard).map(|c| &c.0)
+    }
+
+    pub fn try_load<'guard>(
+        &self,
+        guard: &'guard CollectionGuard,
+    ) -> Result<&'guard T, ValueFreed> {
+        self.load(guard).ok_or(ValueFreed)
     }
 
     #[must_use]
-    pub fn downgrade(&self) -> WeakDynamic<T> {
-        WeakDynamic {
-            weak: self.dynamic.downgrade(),
-            _t: PhantomData,
-        }
+    pub fn as_rooted(&self, guard: &CollectionGuard<'_>) -> Option<Rooted<T>> {
+        self.0.as_root(guard).map(Rooted)
+    }
+
+    #[must_use]
+    pub fn as_any_dynamic(&self) -> AnyDynamic {
+        AnyDynamic(self.0.as_any())
     }
 
     #[must_use]
     pub fn to_value(&self) -> Value {
-        Value::Dynamic(self.dynamic.clone())
+        Value::Dynamic(self.as_any_dynamic())
     }
 
     #[must_use]
@@ -1277,48 +1519,75 @@ where
 
     #[must_use]
     pub fn into_any_dynamic(self) -> AnyDynamic {
-        self.dynamic
+        self.as_any_dynamic()
     }
 }
 
 impl<T> Debug for Dynamic<T>
 where
-    T: CustomType,
+    T: CustomType + Trace,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Debug::fmt(&self.dynamic, f)
+        let guard = CollectionGuard::acquire();
+        let Some(value) = self.0.load(&guard) else {
+            return f.write_str("<Deallocated>");
+        };
+        Debug::fmt(&value.0, f)
     }
 }
 
-impl<T> Deref for Dynamic<T>
+impl<T> From<Dynamic<T>> for AnyRef
 where
-    T: CustomType,
+    T: CustomType + Trace,
 {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.dynamic.downcast_ref().expect("type checked")
+    fn from(value: Dynamic<T>) -> Self {
+        value.0.as_any()
     }
 }
 
-impl<T> DerefMut for Dynamic<T>
-where
-    T: CustomType,
-{
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.dynamic.downcast_mut().expect("type checked")
-    }
-}
+// impl<T> Deref for Dynamic<T>
+// where
+//     T: CustomType,
+// {
+//     type Target = T;
+
+//     fn deref(&self) -> &Self::Target {
+//         self.dynamic.downcast_ref().expect("type checked")
+//     }
+// }
+
+// impl<T> DerefMut for Dynamic<T>
+// where
+//     T: CustomType,
+// {
+//     fn deref_mut(&mut self) -> &mut Self::Target {
+//         self.dynamic.downcast_mut().expect("type checked")
+//     }
+// }
 
 impl<T> Clone for Dynamic<T>
 where
     T: CustomType,
 {
     fn clone(&self) -> Self {
-        Self {
-            dynamic: self.dynamic.clone(),
-            _t: PhantomData,
-        }
+        *self
+    }
+}
+
+impl<T> Copy for Dynamic<T> where T: CustomType {}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct ValueFreed;
+
+impl From<ValueFreed> for Fault {
+    fn from(_value: ValueFreed) -> Self {
+        Self::ValueFreed
+    }
+}
+
+impl From<ValueFreed> for ExecutionError {
+    fn from(_value: ValueFreed) -> Self {
+        ExecutionError::Exception(Symbol::from("out-of-scope").into())
     }
 }
 
@@ -1334,7 +1603,8 @@ impl Deref for StaticType {
     type Target = TypeRef;
 
     fn deref(&self) -> &Self::Target {
-        self.0.get_or_init(|| self.1().seal())
+        self.0
+            .get_or_init(|| self.1().seal(&CollectionGuard::acquire()))
     }
 }
 
@@ -1355,13 +1625,13 @@ impl<T> RustType<T> {
 
 impl<T> Deref for RustType<T>
 where
-    T: CustomType,
+    T: CustomType + Trace,
 {
     type Target = TypeRef;
 
     fn deref(&self) -> &Self::Target {
         self.0
-            .get_or_init(|| self.2(TypedTypeBuilder::new(self.1)).seal())
+            .get_or_init(|| self.2(TypedTypeBuilder::new(self.1)).seal(&CollectionGuard::acquire()))
     }
 }
 
@@ -1382,7 +1652,7 @@ impl Type {
     #[must_use]
     pub fn with_construct<Func>(mut self, func: impl FnOnce(ConstructFn) -> Func) -> Self
     where
-        Func: Fn(&mut Vm, Arity) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(&mut VmContext<'_, '_>, Arity) -> Result<Value, Fault> + Send + Sync + 'static,
     {
         self.vtable.construct = Box::new(func(self.vtable.construct));
         self
@@ -1391,7 +1661,10 @@ impl Type {
     #[must_use]
     pub fn with_call<Func>(mut self, func: impl FnOnce(CallFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, Arity) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, Arity) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         self.vtable.call = Box::new(func(self.vtable.call));
         self
@@ -1400,7 +1673,7 @@ impl Type {
     #[must_use]
     pub fn with_invoke<Func>(mut self, func: impl FnOnce(InvokeFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &Symbol, Arity) -> Result<Value, Fault>
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Symbol, Arity) -> Result<Value, Fault>
             + Send
             + Sync
             + 'static,
@@ -1412,7 +1685,7 @@ impl Type {
     #[must_use]
     pub fn with_hash<Func>(mut self, func: impl FnOnce(HashFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &mut ValueHasher) + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &mut ValueHasher) + Send + Sync + 'static,
     {
         self.vtable.hash = Box::new(func(self.vtable.hash));
         self
@@ -1421,7 +1694,8 @@ impl Type {
     #[must_use]
     pub fn with_bitwise_not<Func>(mut self, func: impl FnOnce(UnaryFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func:
+            Fn(&AnyDynamic, &mut VmContext<'_, '_>) -> Result<Value, Fault> + Send + Sync + 'static,
     {
         self.vtable.bitwise_not = Box::new(func(self.vtable.bitwise_not));
         self
@@ -1430,7 +1704,10 @@ impl Type {
     #[must_use]
     pub fn with_bitwise_and<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &Value) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         self.vtable.bitwise_and = Box::new(func(self.vtable.bitwise_and));
         self
@@ -1439,7 +1716,10 @@ impl Type {
     #[must_use]
     pub fn with_bitwise_or<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &Value) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         self.vtable.bitwise_or = Box::new(func(self.vtable.bitwise_or));
         self
@@ -1448,7 +1728,10 @@ impl Type {
     #[must_use]
     pub fn with_bitwise_xor<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &Value) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         self.vtable.bitwise_xor = Box::new(func(self.vtable.bitwise_xor));
         self
@@ -1457,7 +1740,10 @@ impl Type {
     #[must_use]
     pub fn with_shift_left<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &Value) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         self.vtable.shift_left = Box::new(func(self.vtable.shift_left));
         self
@@ -1466,7 +1752,10 @@ impl Type {
     #[must_use]
     pub fn with_shift_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &Value) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         self.vtable.shift_right = Box::new(func(self.vtable.shift_right));
         self
@@ -1475,7 +1764,8 @@ impl Type {
     #[must_use]
     pub fn with_negate<Func>(mut self, func: impl FnOnce(UnaryFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func:
+            Fn(&AnyDynamic, &mut VmContext<'_, '_>) -> Result<Value, Fault> + Send + Sync + 'static,
     {
         self.vtable.negate = Box::new(func(self.vtable.negate));
         self
@@ -1484,8 +1774,10 @@ impl Type {
     #[must_use]
     pub fn with_eq<Func>(mut self, func: impl FnOnce(EqFn) -> Func) -> Self
     where
-        Func:
-            Fn(&AnyDynamic, Option<&mut Vm>, &Value) -> Result<bool, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, ContextOrGuard<'_, '_, '_>, &Value) -> Result<bool, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         let func = func(self.vtable.eq);
         self.vtable.eq = Box::new(move |this, vm, rhs| func(this, vm, rhs));
@@ -1495,7 +1787,10 @@ impl Type {
     #[must_use]
     pub fn with_matches<Func>(mut self, func: impl FnOnce(MatchesFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &Value) -> Result<bool, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<bool, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         let func = func(self.vtable.matches);
         self.vtable.matches = Box::new(move |this, vm, rhs| func(this, vm, rhs));
@@ -1505,7 +1800,10 @@ impl Type {
     #[must_use]
     pub fn with_total_cmp<Func>(mut self, func: impl FnOnce(TotalCmpFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &Value) -> Result<Ordering, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Ordering, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         let func = func(self.vtable.total_cmp);
         self.vtable.total_cmp = Box::new(move |this, vm, rhs| func(this, vm, rhs));
@@ -1515,7 +1813,10 @@ impl Type {
     #[must_use]
     pub fn with_add<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &Value) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         self.vtable.add = Box::new(func(self.vtable.add));
         self
@@ -1524,7 +1825,10 @@ impl Type {
     #[must_use]
     pub fn with_add_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &Value) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         self.vtable.add_right = Box::new(func(self.vtable.add_right));
         self
@@ -1533,7 +1837,10 @@ impl Type {
     #[must_use]
     pub fn with_sub<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &Value) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         self.vtable.sub = Box::new(func(self.vtable.sub));
         self
@@ -1542,7 +1849,10 @@ impl Type {
     #[must_use]
     pub fn with_sub_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &Value) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         self.vtable.sub_right = Box::new(func(self.vtable.sub_right));
         self
@@ -1551,7 +1861,10 @@ impl Type {
     #[must_use]
     pub fn with_mul<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &Value) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         self.vtable.mul = Box::new(func(self.vtable.mul));
         self
@@ -1560,7 +1873,10 @@ impl Type {
     #[must_use]
     pub fn with_mul_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &Value) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         self.vtable.mul_right = Box::new(func(self.vtable.mul_right));
         self
@@ -1569,7 +1885,10 @@ impl Type {
     #[must_use]
     pub fn with_div<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &Value) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         self.vtable.div = Box::new(func(self.vtable.div));
         self
@@ -1578,7 +1897,10 @@ impl Type {
     #[must_use]
     pub fn with_div_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &Value) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         self.vtable.div_right = Box::new(func(self.vtable.div_right));
         self
@@ -1587,7 +1909,10 @@ impl Type {
     #[must_use]
     pub fn with_idiv<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &Value) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         self.vtable.idiv = Box::new(func(self.vtable.idiv));
         self
@@ -1596,7 +1921,10 @@ impl Type {
     #[must_use]
     pub fn with_idiv_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &Value) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         self.vtable.idiv_right = Box::new(func(self.vtable.idiv_right));
         self
@@ -1605,7 +1933,10 @@ impl Type {
     #[must_use]
     pub fn with_rem<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &Value) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         self.vtable.rem = Box::new(func(self.vtable.rem));
         self
@@ -1614,7 +1945,10 @@ impl Type {
     #[must_use]
     pub fn with_rem_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm, &Value) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         self.vtable.rem_right = Box::new(func(self.vtable.rem_right));
         self
@@ -1623,7 +1957,7 @@ impl Type {
     #[must_use]
     pub fn with_truthy<Func>(mut self, func: impl FnOnce(TruthyFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm) -> bool + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>) -> bool + Send + Sync + 'static,
     {
         self.vtable.truthy = Box::new(func(self.vtable.truthy));
         self
@@ -1632,7 +1966,10 @@ impl Type {
     #[must_use]
     pub fn with_to_string<Func>(mut self, func: impl FnOnce(ToStringFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut Vm) -> Result<Symbol, Fault> + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>) -> Result<Symbol, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         self.vtable.to_string = Box::new(func(self.vtable.to_string));
         self
@@ -1641,7 +1978,12 @@ impl Type {
     #[must_use]
     pub fn with_deep_clone<Func>(mut self, func: impl FnOnce(DeepCloneFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic) -> Option<AnyDynamic> + Send + Sync + Send + Sync + 'static,
+        Func: Fn(&AnyDynamic, &CollectionGuard) -> Option<AnyDynamic>
+            + Send
+            + Sync
+            + Send
+            + Sync
+            + 'static,
     {
         self.vtable.deep_clone = Box::new(func(self.vtable.deep_clone));
         self
@@ -1651,7 +1993,7 @@ impl Type {
     #[allow(clippy::too_many_lines)]
     pub fn with_fallback<Mapping>(mut self, mapping: Mapping) -> Self
     where
-        Mapping: Fn(&AnyDynamic) -> Value + Send + Sync + Clone + 'static,
+        Mapping: Fn(&AnyDynamic, &CollectionGuard) -> Value + Send + Sync + Clone + 'static,
     {
         let mapping = Arc::new(mapping);
         // Entries that aren't mutable are not fallible or do not make sense to
@@ -1693,7 +2035,7 @@ impl Type {
             move |this, vm, arity| match call(this, vm, arity) {
                 Ok(value) => Ok(value),
                 Err(Fault::NotAFunction | Fault::UnsupportedOperation) => {
-                    mapping(this).call(vm, arity)
+                    mapping(this, vm.as_ref()).call(vm, arity)
                 }
                 Err(other) => Err(other),
             }
@@ -1704,7 +2046,7 @@ impl Type {
             move |this, vm| match bitwise_not(this, vm) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    mapping(this).bitwise_not(vm)
+                    mapping(this, vm.as_ref()).bitwise_not(vm)
                 }
                 Err(other) => Err(other),
             }
@@ -1715,7 +2057,7 @@ impl Type {
             move |this, vm, rhs| match bitwise_and(this, vm, rhs) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    mapping(this).bitwise_and(vm, rhs)
+                    mapping(this, vm.as_ref()).bitwise_and(vm, rhs)
                 }
                 Err(other) => Err(other),
             }
@@ -1726,7 +2068,7 @@ impl Type {
             move |this, vm, rhs| match bitwise_or(this, vm, rhs) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    mapping(this).bitwise_or(vm, rhs)
+                    mapping(this, vm.as_ref()).bitwise_or(vm, rhs)
                 }
                 Err(other) => Err(other),
             }
@@ -1737,7 +2079,7 @@ impl Type {
             move |this, vm, rhs| match bitwise_xor(this, vm, rhs) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    mapping(this).bitwise_xor(vm, rhs)
+                    mapping(this, vm.as_ref()).bitwise_xor(vm, rhs)
                 }
                 Err(other) => Err(other),
             }
@@ -1748,7 +2090,7 @@ impl Type {
             move |this, vm, rhs| match shift_left(this, vm, rhs) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    mapping(this).shift_left(vm, rhs)
+                    mapping(this, vm.as_ref()).shift_left(vm, rhs)
                 }
                 Err(other) => Err(other),
             }
@@ -1759,7 +2101,7 @@ impl Type {
             move |this, vm, rhs| match shift_right(this, vm, rhs) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    mapping(this).shift_right(vm, rhs)
+                    mapping(this, vm.as_ref()).shift_right(vm, rhs)
                 }
                 Err(other) => Err(other),
             }
@@ -1769,17 +2111,19 @@ impl Type {
             let mapping = mapping.clone();
             move |this, vm| match negate(this, vm) {
                 Ok(value) => Ok(value),
-                Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => mapping(this).negate(vm),
+                Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
+                    mapping(this, vm.as_ref()).negate(vm)
+                }
                 Err(other) => Err(other),
             }
         });
 
         eq = Box::new({
             let mapping = mapping.clone();
-            move |this, mut vm, rhs| match eq(this, vm.as_deref_mut(), rhs) {
+            move |this, mut vm, rhs| match eq(this, vm.borrowed(), rhs) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    mapping(this).equals(vm, rhs)
+                    mapping(this, vm.as_ref()).equals(vm, rhs)
                 }
                 Err(other) => Err(other),
             }
@@ -1790,7 +2134,7 @@ impl Type {
             move |this, vm, rhs| match matches(this, vm, rhs) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    mapping(this).matches(vm, rhs)
+                    mapping(this, vm.as_ref()).matches(vm, rhs)
                 }
                 Err(other) => Err(other),
             }
@@ -1801,7 +2145,7 @@ impl Type {
             move |this, vm, rhs| match total_cmp(this, vm, rhs) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    mapping(this).total_cmp(vm, rhs)
+                    mapping(this, vm.as_ref()).total_cmp(vm, rhs)
                 }
                 Err(other) => Err(other),
             }
@@ -1812,7 +2156,7 @@ impl Type {
             move |this, vm, name, arity| match invoke(this, vm, name, arity) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    mapping(this).invoke(vm, name, arity)
+                    mapping(this, vm.as_ref()).invoke(vm, name, arity)
                 }
                 Err(other) => Err(other),
             }
@@ -1823,7 +2167,7 @@ impl Type {
             move |this, vm, rhs| match add(this, vm, rhs) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    mapping(this).add(vm, rhs)
+                    mapping(this, vm.as_ref()).add(vm, rhs)
                 }
                 Err(other) => Err(other),
             }
@@ -1834,7 +2178,7 @@ impl Type {
             move |this, vm, lhs| match add_right(this, vm, lhs) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    lhs.add(vm, &mapping(this))
+                    lhs.add(vm, &mapping(this, vm.as_ref()))
                 }
                 Err(other) => Err(other),
             }
@@ -1845,7 +2189,7 @@ impl Type {
             move |this, vm, rhs| match sub(this, vm, rhs) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    mapping(this).sub(vm, rhs)
+                    mapping(this, vm.as_ref()).sub(vm, rhs)
                 }
                 Err(other) => Err(other),
             }
@@ -1856,7 +2200,7 @@ impl Type {
             move |this, vm, lhs| match sub_right(this, vm, lhs) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    lhs.sub(vm, &mapping(this))
+                    lhs.sub(vm, &mapping(this, vm.as_ref()))
                 }
                 Err(other) => Err(other),
             }
@@ -1867,7 +2211,7 @@ impl Type {
             move |this, vm, rhs| match mul(this, vm, rhs) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    mapping(this).mul(vm, rhs)
+                    mapping(this, vm.as_ref()).mul(vm, rhs)
                 }
                 Err(other) => Err(other),
             }
@@ -1878,7 +2222,7 @@ impl Type {
             move |this, vm, lhs| match mul_right(this, vm, lhs) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    lhs.mul(vm, &mapping(this))
+                    lhs.mul(vm, &mapping(this, vm.as_ref()))
                 }
                 Err(other) => Err(other),
             }
@@ -1889,7 +2233,7 @@ impl Type {
             move |this, vm, rhs| match div(this, vm, rhs) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    mapping(this).div(vm, rhs)
+                    mapping(this, vm.as_ref()).div(vm, rhs)
                 }
                 Err(other) => Err(other),
             }
@@ -1900,7 +2244,7 @@ impl Type {
             move |this, vm, lhs| match div_right(this, vm, lhs) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    lhs.div(vm, &mapping(this))
+                    lhs.div(vm, &mapping(this, vm.as_ref()))
                 }
                 Err(other) => Err(other),
             }
@@ -1911,7 +2255,7 @@ impl Type {
             move |this, vm, rhs| match idiv(this, vm, rhs) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    mapping(this).idiv(vm, rhs)
+                    mapping(this, vm.as_ref()).idiv(vm, rhs)
                 }
                 Err(other) => Err(other),
             }
@@ -1922,7 +2266,7 @@ impl Type {
             move |this, vm, lhs| match idiv_right(this, vm, lhs) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    lhs.idiv(vm, &mapping(this))
+                    lhs.idiv(vm, &mapping(this, vm.as_ref()))
                 }
                 Err(other) => Err(other),
             }
@@ -1933,7 +2277,7 @@ impl Type {
             move |this, vm, rhs| match rem(this, vm, rhs) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    mapping(this).rem(vm, rhs)
+                    mapping(this, vm.as_ref()).rem(vm, rhs)
                 }
                 Err(other) => Err(other),
             }
@@ -1944,7 +2288,7 @@ impl Type {
             move |this, vm, lhs| match rem_right(this, vm, lhs) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    lhs.rem(vm, &mapping(this))
+                    lhs.rem(vm, &mapping(this, vm.as_ref()))
                 }
                 Err(other) => Err(other),
             }
@@ -1955,7 +2299,7 @@ impl Type {
             move |this, vm| match to_string(this, vm) {
                 Ok(value) => Ok(value),
                 Err(Fault::UnknownSymbol | Fault::UnsupportedOperation) => {
-                    mapping(this).to_string(vm)
+                    mapping(this, vm.as_ref()).to_string(vm)
                 }
                 Err(other) => Err(other),
             }
@@ -1963,11 +2307,11 @@ impl Type {
 
         deep_clone = Box::new({
             let mapping = mapping.clone();
-            move |this| match deep_clone(this) {
+            move |this, guard| match deep_clone(this, guard) {
                 Some(value) => Some(value),
-                None => mapping(this)
-                    .deep_clone()
-                    .and_then(|value| value.as_any_dynamic().cloned()),
+                None => mapping(this, guard)
+                    .deep_clone(guard)
+                    .and_then(|value| value.as_any_dynamic()),
             }
         });
 
@@ -2006,8 +2350,8 @@ impl Type {
     }
 
     #[must_use]
-    pub fn seal(self) -> TypeRef {
-        TypeRef::new(self)
+    pub fn seal(self, guard: &CollectionGuard) -> TypeRef {
+        TypeRef::new(self, guard)
     }
 }
 
@@ -2019,6 +2363,8 @@ impl Debug for Type {
     }
 }
 
+impl SimpleType for Type {}
+
 pub struct TypedTypeBuilder<T> {
     t: Type,
     _t: PhantomData<T>,
@@ -2026,7 +2372,7 @@ pub struct TypedTypeBuilder<T> {
 
 impl<T> TypedTypeBuilder<T>
 where
-    T: CustomType,
+    T: CustomType + Trace,
 {
     fn new(name: &'static str) -> Self {
         Self {
@@ -2038,7 +2384,8 @@ where
     #[must_use]
     pub fn with_construct<Func>(mut self, func: impl FnOnce(ConstructFn) -> Func) -> Self
     where
-        Func: Fn(&mut Vm, Arity) -> Result<Dynamic<T>, Fault> + Send + Sync + 'static,
+        Func:
+            Fn(&mut VmContext<'_, '_>, Arity) -> Result<Dynamic<T>, Fault> + Send + Sync + 'static,
     {
         let func = func(self.t.vtable.construct);
         self.t.vtable.construct =
@@ -2049,11 +2396,16 @@ where
     #[must_use]
     pub fn with_call<Func>(mut self, func: impl FnOnce(CallFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, Arity) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, Arity) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         let func = func(self.t.vtable.call);
         self.t.vtable.call = Box::new(move |this, vm, arity| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, arity)
         });
         self
@@ -2062,12 +2414,16 @@ where
     #[must_use]
     pub fn with_invoke<Func>(mut self, func: impl FnOnce(InvokeFn) -> Func) -> Self
     where
-        Func:
-            Fn(Dynamic<T>, &mut Vm, &Symbol, Arity) -> Result<Value, Fault> + Send + Sync + 'static,
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Symbol, Arity) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         let func = func(self.t.vtable.invoke);
         self.t.vtable.invoke = Box::new(move |this, vm, name, arity| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, name, arity)
         });
         self
@@ -2076,11 +2432,16 @@ where
     #[must_use]
     pub fn with_hash<Func>(mut self, func: impl FnOnce(HashFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, &mut ValueHasher) + Send + Sync + Send + Sync + 'static,
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &mut ValueHasher)
+            + Send
+            + Sync
+            + Send
+            + Sync
+            + 'static,
     {
         let func = func(self.t.vtable.hash);
         self.t.vtable.hash = Box::new(move |this, vm, hasher| {
-            let Some(this) = this.as_type::<T>() else {
+            let Some(this) = this.as_rooted::<T>(vm.as_ref()) else {
                 return;
             };
             func(this, vm, hasher);
@@ -2091,11 +2452,18 @@ where
     #[must_use]
     pub fn with_bitwise_not<Func>(mut self, func: impl FnOnce(UnaryFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm) -> Result<Value, Fault> + Send + Sync + Send + Sync + 'static,
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + Send
+            + Sync
+            + 'static,
     {
         let func = func(self.t.vtable.bitwise_not);
         self.t.vtable.bitwise_not = Box::new(move |this, vm| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm)
         });
         self
@@ -2104,7 +2472,7 @@ where
     #[must_use]
     pub fn with_bitwise_and<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, &Value) -> Result<Value, Fault>
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
             + Send
             + Sync
             + Send
@@ -2113,7 +2481,9 @@ where
     {
         let func = func(self.t.vtable.bitwise_and);
         self.t.vtable.bitwise_and = Box::new(move |this, vm, rhs| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, rhs)
         });
         self
@@ -2122,7 +2492,7 @@ where
     #[must_use]
     pub fn with_bitwise_or<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, &Value) -> Result<Value, Fault>
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
             + Send
             + Sync
             + Send
@@ -2131,7 +2501,9 @@ where
     {
         let func = func(self.t.vtable.bitwise_or);
         self.t.vtable.bitwise_or = Box::new(move |this, vm, rhs| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, rhs)
         });
         self
@@ -2140,7 +2512,7 @@ where
     #[must_use]
     pub fn with_bitwise_xor<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, &Value) -> Result<Value, Fault>
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
             + Send
             + Sync
             + Send
@@ -2149,7 +2521,9 @@ where
     {
         let func = func(self.t.vtable.bitwise_xor);
         self.t.vtable.bitwise_xor = Box::new(move |this, vm, rhs| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, rhs)
         });
         self
@@ -2158,7 +2532,7 @@ where
     #[must_use]
     pub fn with_shift_left<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, &Value) -> Result<Value, Fault>
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
             + Send
             + Sync
             + Send
@@ -2167,7 +2541,9 @@ where
     {
         let func = func(self.t.vtable.shift_left);
         self.t.vtable.shift_left = Box::new(move |this, vm, rhs| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, rhs)
         });
         self
@@ -2176,7 +2552,7 @@ where
     #[must_use]
     pub fn with_shift_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, &Value) -> Result<Value, Fault>
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
             + Send
             + Sync
             + Send
@@ -2185,7 +2561,9 @@ where
     {
         let func = func(self.t.vtable.shift_right);
         self.t.vtable.shift_right = Box::new(move |this, vm, rhs| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, rhs)
         });
         self
@@ -2194,11 +2572,18 @@ where
     #[must_use]
     pub fn with_negate<Func>(mut self, func: impl FnOnce(UnaryFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm) -> Result<Value, Fault> + Send + Sync + Send + Sync + 'static,
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>) -> Result<Value, Fault>
+            + Send
+            + Sync
+            + Send
+            + Sync
+            + 'static,
     {
         let func = func(self.t.vtable.negate);
         self.t.vtable.negate = Box::new(move |this, vm| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm)
         });
         self
@@ -2207,12 +2592,16 @@ where
     #[must_use]
     pub fn with_eq<Func>(mut self, func: impl FnOnce(EqFn) -> Func) -> Self
     where
-        Func:
-            Fn(Dynamic<T>, Option<&mut Vm>, &Value) -> Result<bool, Fault> + Send + Sync + 'static,
+        Func: Fn(Rooted<T>, ContextOrGuard<'_, '_, '_>, &Value) -> Result<bool, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         let func = func(self.t.vtable.eq);
         self.t.vtable.eq = Box::new(move |this, vm, rhs| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, rhs)
         });
         self
@@ -2221,11 +2610,16 @@ where
     #[must_use]
     pub fn with_matches<Func>(mut self, func: impl FnOnce(MatchesFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, &Value) -> Result<bool, Fault> + Send + Sync + 'static,
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Value) -> Result<bool, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         let func = func(self.t.vtable.matches);
         self.t.vtable.matches = Box::new(move |this, vm, rhs| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, rhs)
         });
         self
@@ -2234,11 +2628,16 @@ where
     #[must_use]
     pub fn with_total_cmp<Func>(mut self, func: impl FnOnce(TotalCmpFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, &Value) -> Result<Ordering, Fault> + Send + Sync + 'static,
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Value) -> Result<Ordering, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         let func = func(self.t.vtable.total_cmp);
         self.t.vtable.total_cmp = Box::new(move |this, vm, rhs| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, rhs)
         });
         self
@@ -2247,7 +2646,7 @@ where
     #[must_use]
     pub fn with_add<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, &Value) -> Result<Value, Fault>
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
             + Send
             + Sync
             + Send
@@ -2256,7 +2655,9 @@ where
     {
         let func = func(self.t.vtable.add);
         self.t.vtable.add = Box::new(move |this, vm, rhs| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, rhs)
         });
         self
@@ -2265,7 +2666,7 @@ where
     #[must_use]
     pub fn with_add_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, &Value) -> Result<Value, Fault>
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
             + Send
             + Sync
             + Send
@@ -2274,7 +2675,9 @@ where
     {
         let func = func(self.t.vtable.add_right);
         self.t.vtable.add_right = Box::new(move |this, vm, rhs| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, rhs)
         });
         self
@@ -2283,7 +2686,7 @@ where
     #[must_use]
     pub fn with_sub<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, &Value) -> Result<Value, Fault>
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
             + Send
             + Sync
             + Send
@@ -2292,7 +2695,9 @@ where
     {
         let func = func(self.t.vtable.sub);
         self.t.vtable.sub = Box::new(move |this, vm, rhs| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, rhs)
         });
         self
@@ -2301,7 +2706,7 @@ where
     #[must_use]
     pub fn with_sub_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, &Value) -> Result<Value, Fault>
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
             + Send
             + Sync
             + Send
@@ -2310,7 +2715,9 @@ where
     {
         let func = func(self.t.vtable.sub_right);
         self.t.vtable.sub_right = Box::new(move |this, vm, rhs| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, rhs)
         });
         self
@@ -2319,7 +2726,7 @@ where
     #[must_use]
     pub fn with_mul<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, &Value) -> Result<Value, Fault>
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
             + Send
             + Sync
             + Send
@@ -2328,7 +2735,9 @@ where
     {
         let func = func(self.t.vtable.mul);
         self.t.vtable.mul = Box::new(move |this, vm, rhs| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, rhs)
         });
         self
@@ -2337,7 +2746,7 @@ where
     #[must_use]
     pub fn with_mul_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, &Value) -> Result<Value, Fault>
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
             + Send
             + Sync
             + Send
@@ -2346,7 +2755,9 @@ where
     {
         let func = func(self.t.vtable.mul_right);
         self.t.vtable.mul_right = Box::new(move |this, vm, rhs| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, rhs)
         });
         self
@@ -2355,7 +2766,7 @@ where
     #[must_use]
     pub fn with_div<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, &Value) -> Result<Value, Fault>
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
             + Send
             + Sync
             + Send
@@ -2364,7 +2775,9 @@ where
     {
         let func = func(self.t.vtable.div);
         self.t.vtable.div = Box::new(move |this, vm, rhs| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, rhs)
         });
         self
@@ -2373,7 +2786,7 @@ where
     #[must_use]
     pub fn with_div_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, &Value) -> Result<Value, Fault>
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
             + Send
             + Sync
             + Send
@@ -2382,7 +2795,9 @@ where
     {
         let func = func(self.t.vtable.div_right);
         self.t.vtable.div_right = Box::new(move |this, vm, rhs| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, rhs)
         });
         self
@@ -2391,7 +2806,7 @@ where
     #[must_use]
     pub fn with_idiv<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, &Value) -> Result<Value, Fault>
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
             + Send
             + Sync
             + Send
@@ -2400,7 +2815,9 @@ where
     {
         let func = func(self.t.vtable.idiv);
         self.t.vtable.idiv = Box::new(move |this, vm, rhs| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, rhs)
         });
         self
@@ -2409,7 +2826,7 @@ where
     #[must_use]
     pub fn with_idiv_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, &Value) -> Result<Value, Fault>
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
             + Send
             + Sync
             + Send
@@ -2418,7 +2835,9 @@ where
     {
         let func = func(self.t.vtable.idiv_right);
         self.t.vtable.idiv_right = Box::new(move |this, vm, rhs| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, rhs)
         });
         self
@@ -2427,7 +2846,7 @@ where
     #[must_use]
     pub fn with_rem<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, &Value) -> Result<Value, Fault>
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
             + Send
             + Sync
             + Send
@@ -2436,7 +2855,9 @@ where
     {
         let func = func(self.t.vtable.rem);
         self.t.vtable.rem = Box::new(move |this, vm, rhs| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, rhs)
         });
         self
@@ -2445,7 +2866,7 @@ where
     #[must_use]
     pub fn with_rem_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm, &Value) -> Result<Value, Fault>
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault>
             + Send
             + Sync
             + Send
@@ -2454,7 +2875,9 @@ where
     {
         let func = func(self.t.vtable.rem_right);
         self.t.vtable.rem_right = Box::new(move |this, vm, rhs| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm, rhs)
         });
         self
@@ -2463,11 +2886,11 @@ where
     #[must_use]
     pub fn with_truthy<Func>(mut self, func: impl FnOnce(TruthyFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm) -> bool + Send + Sync + 'static,
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>) -> bool + Send + Sync + 'static,
     {
         let func = func(self.t.vtable.truthy);
         self.t.vtable.truthy = Box::new(move |this, vm| {
-            let Some(this) = this.as_type::<T>() else {
+            let Some(this) = this.as_rooted::<T>(vm.as_ref()) else {
                 return true;
             };
             func(this, vm)
@@ -2478,11 +2901,14 @@ where
     #[must_use]
     pub fn with_to_string<Func>(mut self, func: impl FnOnce(ToStringFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>, &mut Vm) -> Result<Symbol, Fault> + Send + Sync + 'static,
+        Func:
+            Fn(Rooted<T>, &mut VmContext<'_, '_>) -> Result<Symbol, Fault> + Send + Sync + 'static,
     {
         let func = func(self.t.vtable.to_string);
         self.t.vtable.to_string = Box::new(move |this, vm| {
-            let this = this.as_type::<T>().ok_or(Fault::UnsupportedOperation)?;
+            let this = this
+                .as_rooted::<T>(vm.as_ref())
+                .ok_or(Fault::UnsupportedOperation)?;
             func(this, vm)
         });
         self
@@ -2491,12 +2917,17 @@ where
     #[must_use]
     pub fn with_deep_clone<Func>(mut self, func: impl FnOnce(DeepCloneFn) -> Func) -> Self
     where
-        Func: Fn(Dynamic<T>) -> Option<AnyDynamic> + Send + Sync + Send + Sync + 'static,
+        Func: Fn(Rooted<T>, &CollectionGuard) -> Option<AnyDynamic>
+            + Send
+            + Sync
+            + Send
+            + Sync
+            + 'static,
     {
         let func = func(self.t.vtable.deep_clone);
-        self.t.vtable.deep_clone = Box::new(move |this| {
-            let this = this.as_type::<T>()?;
-            func(this)
+        self.t.vtable.deep_clone = Box::new(move |this, guard| {
+            let this = this.as_rooted::<T>(guard)?;
+            func(this, guard)
         });
         self
     }
@@ -2506,23 +2937,25 @@ where
     where
         T: Clone,
     {
-        self.with_deep_clone(|_| |this| Some(AnyDynamic::new((*this).clone())))
+        self.with_deep_clone(|_| |this, guard| Some(AnyDynamic::new((*this).clone(), guard)))
     }
 
     #[must_use]
     #[allow(clippy::too_many_lines)]
     pub fn with_fallback<Mapping>(mut self, mapping: Mapping) -> Self
     where
-        Mapping: Fn(Dynamic<T>) -> Value + Send + Sync + Clone + 'static,
+        Mapping: Fn(Rooted<T>, &CollectionGuard) -> Value + Send + Sync + Clone + 'static,
     {
-        self.t = self
-            .t
-            .with_fallback(move |dynamic| dynamic.as_type::<T>().map_or(Value::Nil, &mapping));
+        self.t = self.t.with_fallback(move |dynamic, guard| {
+            dynamic
+                .as_rooted::<T>(guard)
+                .map_or(Value::Nil, |rooted| mapping(rooted, guard))
+        });
         self
     }
 
-    fn seal(self) -> TypeRef {
-        self.t.seal()
+    fn seal(self, guard: &CollectionGuard) -> TypeRef {
+        self.t.seal(guard)
     }
 }
 
@@ -2535,23 +2968,65 @@ impl CustomType for Type {
     }
 }
 
-pub type TypeRef = Dynamic<Type>;
+pub enum ContextOrGuard<'a, 'context, 'guard> {
+    Guard(&'a CollectionGuard<'guard>),
+    Context(&'a mut VmContext<'context, 'guard>),
+}
 
-pub type ConstructFn = Box<dyn Fn(&mut Vm, Arity) -> Result<Value, Fault> + Send + Sync>;
-pub type CallFn = Box<dyn Fn(&AnyDynamic, &mut Vm, Arity) -> Result<Value, Fault> + Send + Sync>;
-pub type HashFn = Box<dyn Fn(&AnyDynamic, &mut Vm, &mut ValueHasher) + Send + Sync>;
-pub type UnaryFn = Box<dyn Fn(&AnyDynamic, &mut Vm) -> Result<Value, Fault> + Send + Sync>;
-pub type BinaryFn = Box<dyn Fn(&AnyDynamic, &mut Vm, &Value) -> Result<Value, Fault> + Send + Sync>;
-pub type MatchesFn = Box<dyn Fn(&AnyDynamic, &mut Vm, &Value) -> Result<bool, Fault> + Send + Sync>;
-pub type EqFn =
-    Box<dyn Fn(&AnyDynamic, Option<&mut Vm>, &Value) -> Result<bool, Fault> + Send + Sync>;
-pub type TotalCmpFn =
-    Box<dyn Fn(&AnyDynamic, &mut Vm, &Value) -> Result<Ordering, Fault> + Send + Sync>;
-pub type InvokeFn =
-    Box<dyn Fn(&AnyDynamic, &mut Vm, &Symbol, Arity) -> Result<Value, Fault> + Send + Sync>;
-pub type DeepCloneFn = Box<dyn Fn(&AnyDynamic) -> Option<AnyDynamic> + Send + Sync>;
-pub type TruthyFn = Box<dyn Fn(&AnyDynamic, &mut Vm) -> bool + Send + Sync>;
-pub type ToStringFn = Box<dyn Fn(&AnyDynamic, &mut Vm) -> Result<Symbol, Fault> + Send + Sync>;
+impl<'context, 'guard> AsRef<CollectionGuard<'guard>> for ContextOrGuard<'_, 'context, 'guard> {
+    fn as_ref(&self) -> &CollectionGuard<'guard> {
+        match self {
+            ContextOrGuard::Guard(guard) => guard,
+            ContextOrGuard::Context(context) => context.as_ref(),
+        }
+    }
+}
+
+impl<'a, 'context, 'guard> ContextOrGuard<'a, 'context, 'guard> {
+    pub fn vm(&mut self) -> Option<&mut VmContext<'context, 'guard>> {
+        let Self::Context(context) = self else {
+            return None;
+        };
+        Some(context)
+    }
+
+    pub fn borrowed(&mut self) -> ContextOrGuard<'_, 'context, 'guard> {
+        match self {
+            ContextOrGuard::Guard(guard) => ContextOrGuard::Guard(guard),
+            ContextOrGuard::Context(vm) => ContextOrGuard::Context(vm),
+        }
+    }
+}
+
+pub type TypeRef = Rooted<Type>;
+
+pub type ConstructFn =
+    Box<dyn Fn(&mut VmContext<'_, '_>, Arity) -> Result<Value, Fault> + Send + Sync>;
+pub type CallFn =
+    Box<dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>, Arity) -> Result<Value, Fault> + Send + Sync>;
+pub type HashFn = Box<dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>, &mut ValueHasher) + Send + Sync>;
+pub type UnaryFn =
+    Box<dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>) -> Result<Value, Fault> + Send + Sync>;
+pub type BinaryFn =
+    Box<dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault> + Send + Sync>;
+pub type MatchesFn =
+    Box<dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<bool, Fault> + Send + Sync>;
+pub type EqFn = Box<
+    dyn Fn(&AnyDynamic, ContextOrGuard<'_, '_, '_>, &Value) -> Result<bool, Fault> + Send + Sync,
+>;
+pub type TotalCmpFn = Box<
+    dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Ordering, Fault> + Send + Sync,
+>;
+pub type InvokeFn = Box<
+    dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Symbol, Arity) -> Result<Value, Fault>
+        + Send
+        + Sync,
+>;
+pub type DeepCloneFn =
+    Box<dyn Fn(&AnyDynamic, &CollectionGuard) -> Option<AnyDynamic> + Send + Sync>;
+pub type TruthyFn = Box<dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>) -> bool + Send + Sync>;
+pub type ToStringFn =
+    Box<dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>) -> Result<Symbol, Fault> + Send + Sync>;
 
 #[allow(clippy::type_complexity)]
 pub struct TypeVtable {
@@ -2592,7 +3067,7 @@ impl Default for TypeVtable {
             construct: Box::new(|_vm, _arity| Err(Fault::UnsupportedOperation)),
             call: Box::new(|_this, _vm, _arity| Err(Fault::NotAFunction)),
             invoke: Box::new(|_this, _vm, _name, _arity| Err(Fault::UnknownSymbol)),
-            hash: Box::new(|this, _vm, hasher| Arc::as_ptr(&this.0).hash(hasher)),
+            hash: Box::new(|this, _vm, hasher| this.0.hash(hasher)),
             bitwise_not: Box::new(|_this, _vm| Err(Fault::UnsupportedOperation)),
             bitwise_and: Box::new(|_this, _vm, _rhs| Err(Fault::UnsupportedOperation)),
             bitwise_or: Box::new(|_this, _vm, _rhs| Err(Fault::UnsupportedOperation)),
@@ -2601,7 +3076,7 @@ impl Default for TypeVtable {
             shift_right: Box::new(|_this, _vm, _rhs| Err(Fault::UnsupportedOperation)),
             negate: Box::new(|_this, _vm| Err(Fault::UnsupportedOperation)),
             eq: Box::new(|_this, _vm, _rhs| Ok(false)),
-            matches: Box::new(|this, vm, rhs| this.eq(Some(vm), rhs)),
+            matches: Box::new(|this, vm, rhs| this.eq(ContextOrGuard::Context(vm), rhs)),
             total_cmp: Box::new(|_this, _vm, rhs| {
                 if rhs.as_any_dynamic().is_none() {
                     // Dynamics sort after primitive values
@@ -2624,7 +3099,7 @@ impl Default for TypeVtable {
             rem_right: Box::new(|_this, _vm, _rhs| Err(Fault::UnsupportedOperation)),
             truthy: Box::new(|_this, _vm| true),
             to_string: Box::new(|_this, _vm| Err(Fault::UnsupportedOperation)),
-            deep_clone: Box::new(|_this| None),
+            deep_clone: Box::new(|_this, _guard| None),
         }
     }
 }
@@ -2633,13 +3108,37 @@ pub trait CustomType: Send + Sync + Debug + 'static {
     fn muse_type(&self) -> &TypeRef;
 }
 
+struct Custom<T>(T);
+
+impl<T> Trace for Custom<T>
+where
+    T: Trace,
+{
+    const MAY_CONTAIN_REFERENCES: bool = T::MAY_CONTAIN_REFERENCES;
+
+    fn trace(&self, tracer: &mut refuse::Tracer) {
+        self.0.trace(tracer);
+    }
+}
+
+impl<T> MapAs for Custom<T>
+where
+    T: CustomType,
+{
+    type Target = dyn CustomType;
+
+    fn map_as(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 pub struct RustFunctionTable<T> {
     functions: Map<Symbol, Map<Arity, Arc<dyn RustFn<T>>>>,
 }
 
 impl<T> RustFunctionTable<T>
 where
-    T: 'static,
+    T: CustomType + Trace,
 {
     #[must_use]
     pub const fn new() -> Self {
@@ -2651,7 +3150,7 @@ where
     #[must_use]
     pub fn with_fn<F>(mut self, name: impl SymbolList, arity: impl Into<Arity>, func: F) -> Self
     where
-        F: Fn(&mut Vm, &T) -> Result<Value, Fault> + Send + Sync + 'static,
+        F: Fn(&mut VmContext<'_, '_>, &Rooted<T>) -> Result<Value, Fault> + Send + Sync + 'static,
     {
         let func = Arc::new(func);
         let arity = arity.into();
@@ -2666,10 +3165,10 @@ where
 
     pub fn invoke(
         &self,
-        vm: &mut Vm,
+        vm: &mut VmContext<'_, '_>,
         name: &Symbol,
         arity: Arity,
-        this: &T,
+        this: &Rooted<T>,
     ) -> Result<Value, Fault> {
         if let Some(by_arity) = self.functions.get(name) {
             if let Some(func) = by_arity.get(&arity) {
@@ -2696,7 +3195,7 @@ impl<T> StaticRustFunctionTable<T> {
 
 impl<T> Deref for StaticRustFunctionTable<T>
 where
-    T: 'static,
+    T: CustomType + Trace,
 {
     type Target = RustFunctionTable<T>;
 
@@ -2705,20 +3204,24 @@ where
     }
 }
 
-trait RustFn<T>: Send + Sync + 'static {
-    fn invoke(&self, vm: &mut Vm, this: &T) -> Result<Value, Fault>;
+trait RustFn<T>: Send + Sync + 'static
+where
+    T: CustomType + Trace,
+{
+    fn invoke(&self, vm: &mut VmContext<'_, '_>, this: &Rooted<T>) -> Result<Value, Fault>;
 }
 
 impl<T, F> RustFn<T> for F
 where
-    F: Fn(&mut Vm, &T) -> Result<Value, Fault> + Send + Sync + 'static,
+    F: Fn(&mut VmContext<'_, '_>, &Rooted<T>) -> Result<Value, Fault> + Send + Sync + 'static,
+    T: CustomType + Trace,
 {
-    fn invoke(&self, vm: &mut Vm, this: &T) -> Result<Value, Fault> {
+    fn invoke(&self, vm: &mut VmContext<'_, '_>, this: &Rooted<T>) -> Result<Value, Fault> {
         self(vm, this)
     }
 }
 
-type ArcRustFn = Arc<dyn Fn(&mut Vm, Arity) -> Result<Value, Fault> + Send + Sync>;
+type ArcRustFn = Arc<dyn Fn(&mut VmContext<'_, '_>, Arity) -> Result<Value, Fault> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct RustFunction(ArcRustFn);
@@ -2726,7 +3229,7 @@ pub struct RustFunction(ArcRustFn);
 impl RustFunction {
     pub fn new<F>(function: F) -> Self
     where
-        F: Fn(&mut Vm, Arity) -> Result<Value, Fault> + Send + Sync + 'static,
+        F: Fn(&mut VmContext<'_, '_>, Arity) -> Result<Value, Fault> + Send + Sync + 'static,
     {
         Self(Arc::new(function))
     }
@@ -2746,7 +3249,7 @@ impl CustomType for RustFunction {
             t.with_call(|_previous| {
                 |this, vm, arity| {
                     vm.enter_anonymous_frame()?;
-                    let result = this.0(vm, arity)?;
+                    let result = (*this).0(vm, arity)?;
                     vm.exit_frame()?;
                     Ok(result)
                 }
@@ -2756,8 +3259,13 @@ impl CustomType for RustFunction {
     }
 }
 
+impl ContainsNoRefs for RustFunction {}
+
 type ArcAsyncFunction = Arc<
-    dyn Fn(&mut Vm, Arity) -> Pin<Box<dyn Future<Output = Result<Value, Fault>> + Send + Sync>>
+    dyn Fn(
+            &mut VmContext<'_, '_>,
+            Arity,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, Fault>> + Send + Sync>>
         + Send
         + Sync,
 >;
@@ -2768,7 +3276,7 @@ pub struct AsyncFunction(ArcAsyncFunction);
 impl AsyncFunction {
     pub fn new<F, Fut>(function: F) -> Self
     where
-        F: Fn(&mut Vm, Arity) -> Fut + Send + Sync + 'static,
+        F: Fn(&mut VmContext<'_, '_>, Arity) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Value, Fault>> + Send + Sync + 'static,
     {
         Self(Arc::new(move |vm, arity| Box::pin(function(vm, arity))))
@@ -2790,16 +3298,18 @@ impl CustomType for AsyncFunction {
                 |this, vm, arity| {
                     vm.enter_anonymous_frame()?;
                     if vm.current_instruction() == 0 {
-                        let future = this.0(vm, arity);
+                        let future = (*this).0(vm, arity);
                         vm.allocate(1)?;
-                        vm.current_frame_mut()[0] =
-                            Value::dynamic(ValueFuture(Arc::new(Mutex::new(Box::pin(future)))));
+                        vm.current_frame_mut()[0] = Value::dynamic(
+                            ValueFuture(Arc::new(Mutex::new(Box::pin(future)))),
+                            &vm,
+                        );
                         vm.jump_to(1);
                     }
 
                     let Some(future) = vm.current_frame()[0]
                         .as_any_dynamic()
-                        .and_then(|d| d.downcast_ref::<ValueFuture>())
+                        .and_then(|d| d.downcast_ref::<ValueFuture>(vm.as_ref()))
                     else {
                         unreachable!("missing future")
                     };
@@ -2823,6 +3333,8 @@ impl CustomType for AsyncFunction {
     }
 }
 
+impl ContainsNoRefs for AsyncFunction {}
+
 type ArcFuture = Arc<Mutex<Pin<Box<dyn Future<Output = Result<Value, Fault>> + Send + Sync>>>>;
 
 struct ValueFuture(ArcFuture);
@@ -2839,6 +3351,8 @@ impl CustomType for ValueFuture {
         &TYPE
     }
 }
+
+impl ContainsNoRefs for ValueFuture {}
 
 impl Debug for ValueFuture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -2864,34 +3378,6 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct WeakAnyDynamic(Weak<Box<dyn DynamicValue>>);
-
-impl WeakAnyDynamic {
-    pub fn upgrade(&self) -> Option<AnyDynamic> {
-        self.0.upgrade().map(AnyDynamic)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct WeakDynamic<T> {
-    weak: WeakAnyDynamic,
-    _t: PhantomData<T>,
-}
-
-impl<T> WeakDynamic<T>
-where
-    T: CustomType,
-{
-    #[must_use]
-    pub fn upgrade(&self) -> Option<Dynamic<T>> {
-        self.weak.upgrade().map(|dynamic| Dynamic {
-            dynamic,
-            _t: PhantomData,
-        })
-    }
-}
-
 #[test]
 fn dynamic() {
     impl CustomType for usize {
@@ -2900,22 +3386,25 @@ fn dynamic() {
             &TYPE
         }
     }
-    let mut dynamic = AnyDynamic::new(1_usize);
-    assert_eq!(dynamic.downcast_ref::<usize>(), Some(&1));
-    let dynamic2 = dynamic.clone();
-    assert!(AnyDynamic::ptr_eq(&dynamic, &dynamic2));
-    *dynamic.downcast_mut::<usize>().unwrap() = 2;
-    assert!(!AnyDynamic::ptr_eq(&dynamic, &dynamic2));
-    assert_eq!(dynamic2.downcast_ref::<usize>(), Some(&1));
+    let guard = CollectionGuard::acquire();
+    let dynamic = AnyDynamic::new(1_usize, &guard);
+    assert_eq!(dynamic.downcast_ref::<usize>(&guard), Some(&1));
+    let dynamic2 = dynamic;
+    assert_eq!(dynamic, dynamic2);
 }
 
 #[test]
 fn functions() {
-    let func = Value::Dynamic(AnyDynamic::new(RustFunction::new(
-        |_vm: &mut Vm, _arity| Ok(Value::Int(1)),
-    )));
-    let mut runtime = Vm::default();
-    let Value::Int(i) = func.call(&mut runtime, 0).unwrap() else {
+    let mut guard = CollectionGuard::acquire();
+    let func = Value::Dynamic(AnyDynamic::new(
+        RustFunction::new(|_vm: &mut VmContext<'_, '_>, _arity| Ok(Value::Int(1))),
+        &guard,
+    ));
+    let runtime = crate::vm::Vm::new(&guard);
+    let Value::Int(i) = func
+        .call(&mut VmContext::new(&runtime, &mut guard), 0)
+        .unwrap()
+    else {
         unreachable!()
     };
     assert_eq!(i, 1);

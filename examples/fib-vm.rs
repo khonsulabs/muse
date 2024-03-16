@@ -1,10 +1,12 @@
 use muse::symbol::Symbol;
 use muse::syntax::CompareKind::LessThanOrEqual;
 use muse::vm::bitcode::BitcodeBlock;
-use muse::vm::{Code, Function, Register as R, Vm};
+use muse::vm::{Function, Register as R, Vm, VmContext};
+use refuse::CollectionGuard;
 
 fn main() {
-    let mut vm = Vm::default();
+    let mut guard = CollectionGuard::acquire();
+    let vm = Vm::new(&guard);
     let mut fib = BitcodeBlock::default();
 
     // Special case two or less
@@ -32,15 +34,17 @@ fn main() {
     // Less than two
     fib.label(two_or_less);
     fib.copy(1, R(0));
-    let fib = Code::from(&fib);
-
-    vm.declare_function(dbg!(Function::new("fib").when(1, fib)))
-        .unwrap();
+    let fib = fib.to_code(&guard);
 
     let mut main = BitcodeBlock::default();
     main.copy(35, R(0));
     main.resolve(Symbol::from("fib"), R(1));
     main.call(R(1), 1);
-    let code = Code::from(&main);
-    dbg!(vm.execute(&code).unwrap());
+    let code = main.to_code(&guard);
+
+    let mut context = VmContext::new(&vm, &mut guard);
+    context
+        .declare_function(dbg!(Function::new("fib").when(1, fib)))
+        .unwrap();
+    dbg!(context.execute(&code).unwrap());
 }

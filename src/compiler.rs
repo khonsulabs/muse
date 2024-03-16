@@ -5,6 +5,7 @@ use std::slice;
 use std::sync::Arc;
 
 use kempt::{Map, Set};
+use refuse::CollectionGuard;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -81,11 +82,14 @@ impl Compiler {
         self
     }
 
-    pub fn compile(source: &SourceCode<'_>) -> Result<Code, Vec<Ranged<Error>>> {
-        Self::default().with(source).build()
+    pub fn compile(
+        source: &SourceCode<'_>,
+        guard: &CollectionGuard,
+    ) -> Result<Code, Vec<Ranged<Error>>> {
+        Self::default().with(source).build(guard)
     }
 
-    pub fn build(&mut self) -> Result<Code, Vec<Ranged<Error>>> {
+    pub fn build(&mut self, guard: &CollectionGuard) -> Result<Code, Vec<Ranged<Error>>> {
         self.code.clear();
         let mut expressions = Vec::with_capacity(self.parsed.len());
 
@@ -102,7 +106,7 @@ impl Compiler {
             .compile_expression(&expression, OpDestination::Register(Register(0)));
 
         if self.errors.is_empty() {
-            Ok(Code::from(&self.code))
+            Ok(self.code.to_code(guard))
         } else {
             Err(std::mem::take(&mut self.errors))
         }

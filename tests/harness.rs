@@ -13,6 +13,7 @@ use muse::syntax::token::RegexLiteral;
 use muse::syntax::{Ranged, SourceCode, SourceRange};
 use muse::value::Value;
 use muse::vm::{Code, ExecutionError, StackFrame, Vm};
+use refuse::CollectionGuard;
 use serde::de::Visitor;
 use serde::Deserialize;
 
@@ -102,8 +103,9 @@ struct Case {
 
 impl Case {
     fn run(&self) -> (Option<Code>, TestOutput) {
-        match Compiler::compile(&SourceCode::anonymous(&self.src)) {
-            Ok(code) => match Vm::default().execute(&code) {
+        let mut guard = CollectionGuard::acquire();
+        match Compiler::compile(&SourceCode::anonymous(&self.src), &guard) {
+            Ok(code) => match Vm::new(&guard).execute(&code, &mut guard) {
                 Ok(value) => (Some(code), TestOutput::from(value)),
                 Err(fault) => (Some(code), TestOutput::Fault(VmFault::from(fault))),
             },
@@ -114,6 +116,7 @@ impl Case {
 
 impl From<Value> for TestOutput {
     fn from(value: Value) -> Self {
+        let guard = CollectionGuard::acquire();
         match value {
             Value::Nil => TestOutput::Nil,
             Value::Bool(bool) => TestOutput::Bool(bool),
@@ -122,11 +125,11 @@ impl From<Value> for TestOutput {
             Value::Float(v) => TestOutput::Float(v),
             Value::Symbol(v) => TestOutput::Symbol(v),
             Value::Dynamic(v) => {
-                if let Some(str) = v.downcast_ref::<MuseString>() {
+                if let Some(str) = v.downcast_ref::<MuseString>(&guard) {
                     TestOutput::String(str.to_string())
-                } else if let Some(regex) = v.downcast_ref::<MuseRegex>() {
+                } else if let Some(regex) = v.downcast_ref::<MuseRegex>(&guard) {
                     TestOutput::Regex(regex.literal().clone())
-                } else if let Some(map) = v.downcast_ref::<Map>() {
+                } else if let Some(map) = v.downcast_ref::<Map>(&guard) {
                     TestOutput::Map(TestMap(
                         map.to_vec()
                             .into_iter()
@@ -136,18 +139,18 @@ impl From<Value> for TestOutput {
                             })
                             .collect(),
                     ))
-                } else if let Some(list) = v.downcast_ref::<List>() {
+                } else if let Some(list) = v.downcast_ref::<List>(&guard) {
                     TestOutput::List(list.to_vec().into_iter().map(TestOutput::from).collect())
-                } else if let Some(m) = v.downcast_ref::<MuseMatch>() {
+                } else if let Some(m) = v.downcast_ref::<MuseMatch>(&guard) {
                     TestOutput::RegexMatch {
                         content: m
                             .content
-                            .downcast_ref::<MuseString>()
+                            .downcast_ref::<MuseString>(&guard)
                             .expect("capture is string")
                             .to_string(),
                         start: m.start,
                     }
-                } else if let Some(m) = v.downcast_ref::<Exception>() {
+                } else if let Some(m) = v.downcast_ref::<Exception>(&guard) {
                     TestOutput::Exception {
                         value: Box::new(Self::from(m.value().clone())),
                         backtrace: m

@@ -255,7 +255,7 @@ impl CodeData {
 }
 
 pub trait Instruction: Send + Sync + Debug + 'static {
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault>;
+    fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault>;
     fn as_op(&self) -> Op;
 }
 
@@ -263,7 +263,7 @@ pub trait Instruction: Send + Sync + Debug + 'static {
 pub struct Return;
 
 impl Instruction for Return {
-    fn execute(&self, _vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+    fn execute(&self, _vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         Ok(ControlFlow::Break(()))
     }
 
@@ -276,7 +276,7 @@ impl Instruction for Return {
 pub struct Throw(pub FaultKind);
 
 impl Instruction for Throw {
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+    fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         Err(Fault::from_kind(self.0, vm))
     }
 
@@ -296,7 +296,7 @@ where
     From: Source,
     Dest: Destination,
 {
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+    fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         let source = self.source.load(vm)?;
 
         self.dest.store(vm, source)?;
@@ -324,7 +324,7 @@ where
     From: Source,
     Dest: Destination,
 {
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+    fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         let source = self.source.load(vm)?.truthy(vm);
 
         self.dest.store(vm, Value::Bool(source))?;
@@ -352,7 +352,7 @@ where
     From: Source,
     Dest: Destination,
 {
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+    fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         let source = self.source.load(vm)?.not(vm)?;
 
         self.dest.store(vm, source)?;
@@ -380,7 +380,7 @@ where
     From: Source,
     Dest: Destination,
 {
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+    fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         let source = self.source.load(vm)?.bitwise_not(vm)?;
 
         self.dest.store(vm, source)?;
@@ -408,7 +408,7 @@ where
     From: Source,
     Dest: Destination,
 {
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+    fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         let source = self.source.load(vm)?.negate(vm)?;
 
         self.dest.store(vm, source)?;
@@ -436,7 +436,7 @@ where
     From: Source,
     Dest: Destination,
 {
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+    fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         let current_instruction = u64::try_from(vm.current_instruction())
             .map_err(|_| Fault::InvalidInstructionAddress)?;
 
@@ -475,7 +475,7 @@ where
     Condition: Source,
     PreviousAddr: Destination,
 {
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+    fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         let mut condition = self.condition.load(vm)?.truthy(vm);
 
         if NOT {
@@ -526,12 +526,12 @@ where
     Handler: Source,
     Dest: Destination,
 {
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+    fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         let handler = self.handler.load(vm)?;
         let handler = handler.as_usize().and_then(NonZeroUsize::new);
 
         let previous_handler_address =
-            std::mem::replace(&mut vm.frames[vm.current_frame].exception_handler, handler);
+            std::mem::replace(vm.frames[vm.current_frame].exception_handler, handler);
         self.previous_handler
             .store(
                 vm,
@@ -562,7 +562,7 @@ where
     From: Source,
     Dest: Destination,
 {
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+    fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         let source = self.source.load(vm)?;
         let Some(source) = source.as_symbol() else {
             return Err(Fault::ExpectedSymbol);
@@ -594,7 +594,7 @@ where
     Func: Source,
     NumArgs: Source,
 {
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+    fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         let (function, arity) = try_all!(self.function.load(vm), self.arity.load(vm));
         let arity = match arity.as_u64() {
             Some(int) => u8::try_from(int).map_err(|_| Fault::InvalidArity)?,
@@ -625,7 +625,7 @@ where
     Func: Source,
     NumArgs: Source,
 {
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+    fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         let (target, arity) = try_all!(self.target.load(vm), self.arity.load(vm));
         let arity = match arity.as_u64() {
             Some(int) => u8::try_from(int).map_err(|_| Fault::InvalidArity)?,
@@ -660,7 +660,7 @@ macro_rules! declare_comparison_instruction {
             NumArgs: Source,
             Dest: Destination,
         {
-            fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+            fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
                 let (lhs, rhs) = try_all!(self.lhs.load(vm), self.rhs.load(vm));
                 let ordering = lhs.total_cmp(vm, &rhs)?;
                 self.dest
@@ -701,7 +701,7 @@ macro_rules! declare_binop_instruction {
             Rhs: Source,
             Dest: Destination,
         {
-            fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+            fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
                 let (lhs, rhs) = try_all!(self.lhs.load(vm), self.rhs.load(vm));
                 let result = lhs.$function(vm, &rhs)?;
                 self.dest.store(vm, result)?;
@@ -734,7 +734,7 @@ where
     Rhs: Source,
     Dest: Destination,
 {
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+    fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         let (lhs, rhs) = try_all!(self.lhs.load(vm), self.rhs.load(vm));
         let (lhs, rhs) = (lhs.truthy(vm), rhs.truthy(vm));
         self.dest.store(vm, Value::Bool(lhs ^ rhs))?;
@@ -765,7 +765,7 @@ where
     Rhs: Source,
     Dest: Destination,
 {
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+    fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         let (lhs, rhs) = try_all!(self.lhs.load(vm), self.rhs.load(vm));
 
         let equals = lhs.equals(Some(vm), &rhs)?;
@@ -805,7 +805,7 @@ where
     Rhs: Source,
     Dest: Destination,
 {
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+    fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         let lhs = self.lhs.load(vm)?;
         let rhs = self.rhs.load(vm)?;
         let matches = lhs.matches(vm, &rhs)?;
@@ -837,7 +837,7 @@ where
     Rhs: Source,
     Dest: Destination,
 {
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+    fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         let name = self.lhs.load(vm)?;
         let name = name.as_symbol().ok_or(Fault::ExpectedSymbol)?;
         let value = self.rhs.load(vm)?;
@@ -991,12 +991,12 @@ impl Source for Function {
 }
 
 trait Destination: Send + Sync + Debug + 'static {
-    fn store(&self, vm: &mut Vm, value: Value) -> Result<(), Fault>;
+    fn store(&self, vm: &mut VmContext<'_, '_>, value: Value) -> Result<(), Fault>;
     fn as_dest(&self) -> OpDestination;
 }
 
 impl Destination for () {
-    fn store(&self, _vm: &mut Vm, _value: Value) -> Result<(), Fault> {
+    fn store(&self, _vm: &mut VmContext<'_, '_>, _value: Value) -> Result<(), Fault> {
         Ok(())
     }
 
@@ -1019,7 +1019,7 @@ impl Source for Stack {
 }
 
 impl Destination for Stack {
-    fn store(&self, vm: &mut Vm, value: Value) -> Result<(), Fault> {
+    fn store(&self, vm: &mut VmContext<'_, '_>, value: Value) -> Result<(), Fault> {
         *vm.current_frame_mut()
             .get_mut(self.0)
             .ok_or(Fault::OutOfBounds)? = value;
@@ -1042,7 +1042,7 @@ impl Source for Register {
 }
 
 impl Destination for Register {
-    fn store(&self, vm: &mut Vm, value: Value) -> Result<(), Fault> {
+    fn store(&self, vm: &mut VmContext<'_, '_>, value: Value) -> Result<(), Fault> {
         vm[*self] = value;
         Ok(())
     }
@@ -1423,7 +1423,7 @@ impl<Dest> Instruction for LoadModule<Dest>
 where
     Dest: Destination,
 {
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+    fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         let loading_module = if let Some(index) = vm.frames[vm.current_frame].loading_module.take()
         {
             index
@@ -1473,7 +1473,7 @@ where
     Value: Source,
     Dest: Destination,
 {
-    fn execute(&self, vm: &mut Vm) -> Result<ControlFlow<()>, Fault> {
+    fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         let value = self.declaration.load(vm)?;
         vm.declare_inner(self.name.clone(), value.clone(), self.mutable)?;
 

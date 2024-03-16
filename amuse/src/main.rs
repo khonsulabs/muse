@@ -8,14 +8,16 @@ use cushy::widgets::list::ListStyle;
 use cushy::widgets::Label;
 use cushy::{Open, PendingApp};
 use muse::compiler::Compiler;
+use muse::refuse::CollectionGuard;
 use muse::syntax::{SourceCode, SourceId, Sources};
 use muse::value::Value as MuseValue;
-use muse::vm::{ExecutionError, Vm};
+use muse::vm::{ExecutionError, Vm, VmContext};
 use muse_ui::VmUi;
 
 fn main() {
+    let mut guard = CollectionGuard::acquire();
     let runtime = Dynamic::new(Runtime {
-        vm: Vm::default().with_ui(),
+        vm: Vm::new(&guard).with_ui(&mut guard),
         compiler: Compiler::default(),
         sources: Sources::default(),
     });
@@ -56,7 +58,12 @@ fn main() {
                 .on_key(move |key| {
                     if matches!(key.logical_key, Key::Named(NamedKey::Enter)) {
                         if key.state.is_pressed() {
-                            execute_input(input.take(), &runtime, &history);
+                            execute_input(
+                                input.take(),
+                                &runtime,
+                                &history,
+                                &mut CollectionGuard::acquire(),
+                            );
                         }
                         HANDLED
                     } else {
@@ -80,7 +87,9 @@ struct History {
 
 impl History {
     fn make_widget(&self, runtime: &Dynamic<Runtime>) -> WidgetInstance {
-        let mut runtime = runtime.lock();
+        let runtime = runtime.lock();
+        let mut guard = CollectionGuard::acquire();
+        let mut context = VmContext::new(&runtime.vm, &mut guard);
         Label::new(
             runtime
                 .sources
@@ -92,7 +101,7 @@ impl History {
         .align_left()
         .and(
             match &self.result {
-                Ok(value) => match value.to_string(&mut runtime.vm) {
+                Ok(value) => match value.to_string(&mut context) {
                     Ok(formatted) => formatted.to_string(),
                     Err(_) => format!("{:?}", value),
                 }
@@ -116,16 +125,21 @@ struct Runtime {
     sources: Sources,
 }
 
-fn execute_input(source: String, runtime: &Dynamic<Runtime>, history: &Dynamic<Vec<History>>) {
+fn execute_input(
+    source: String,
+    runtime: &Dynamic<Runtime>,
+    history: &Dynamic<Vec<History>>,
+    guard: &mut CollectionGuard,
+) {
     let mut runtime = runtime.lock();
     let runtime = &mut *runtime;
     let source = runtime.sources.push(source);
     runtime.compiler.push(&source);
-    match runtime.compiler.build() {
+    match runtime.compiler.build(guard) {
         Ok(code) => {
             let entry = History {
                 source: source.id,
-                result: runtime.vm.execute(&code),
+                result: runtime.vm.execute(&code, guard),
             };
             history.lock().push(entry);
         }

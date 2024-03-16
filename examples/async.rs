@@ -2,11 +2,13 @@ use muse::compiler::Compiler;
 use muse::symbol::Symbol;
 use muse::syntax::SourceCode;
 use muse::value::{AsyncFunction, Value};
-use muse::vm::{Arity, Fault, Register, Vm};
+use muse::vm::{Arity, Fault, Register, Vm, VmContext};
+use refuse::CollectionGuard;
 
 fn main() {
     let (input_sender, input_receiver) = flume::unbounded();
     let (output_sender, output_receiver) = flume::unbounded();
+    let mut guard = CollectionGuard::acquire();
 
     std::thread::spawn(move || {
         while let Ok(input) = input_receiver.recv() {
@@ -14,7 +16,7 @@ fn main() {
         }
     });
 
-    let async_func = AsyncFunction::new(move |vm: &mut Vm, _arity: Arity| {
+    let async_func = AsyncFunction::new(move |vm: &mut VmContext<'_, '_>, _arity: Arity| {
         input_sender
             .send(vm[Register(0)].as_i64().expect("invalid arg"))
             .unwrap();
@@ -22,22 +24,30 @@ fn main() {
         async move { Ok::<_, Fault>(Value::Int(output_receiver.recv_async().await.unwrap())) }
     });
 
-    let code = Compiler::compile(&SourceCode::anonymous(
-        r"
+    let code = Compiler::compile(
+        &SourceCode::anonymous(
+            r"
             var a = increment_async(0);
             a = increment_async(a);
             a = increment_async(a);
             a = increment_async(a);
             increment_async(a)
         ",
-    ))
+        ),
+        &guard,
+    )
     .unwrap();
-    let mut vm = Vm::default();
-    vm.declare(Symbol::from("increment_async"), Value::dynamic(async_func))
+    let vm = Vm::new(&guard);
+    let mut context = VmContext::new(&vm, &mut guard);
+    context
+        .declare(
+            Symbol::from("increment_async"),
+            Value::dynamic(async_func, context.guard()),
+        )
         .unwrap();
 
     assert_eq!(
-        pollster::block_on(vm.execute_async(&code).unwrap()).unwrap(),
+        pollster::block_on(context.execute_async(&code).unwrap()).unwrap(),
         Value::Int(5)
     );
 }

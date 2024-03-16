@@ -37,6 +37,7 @@ rustyline = { version = "14.0.0", optional = true, default-features = false, fea
 ] }
 serde = { version = "1.0.195", features = ["derive", "rc"] }
 unicode-ident = "1.0.12"
+refuse = { git = "https://github.com/khonsulabs/refuse" }
 
 [dev-dependencies]
 rsn = "0.1"
@@ -61,6 +62,6 @@ harness = false
 name = "hosted"
 harness = false
 
-# [profile.release]
-# debug = true
-# lto = true
+[profile.release]
+debug = true
+lto = true

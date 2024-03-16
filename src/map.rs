@@ -1,10 +1,14 @@
 use std::cmp::Ordering;
 use std::sync::Mutex;
 
+use refuse::{CollectionGuard, Trace};
+
 use crate::list::List;
 use crate::symbol::Symbol;
-use crate::value::{CustomType, Dynamic, RustType, StaticRustFunctionTable, TypeRef, Value};
-use crate::vm::{Fault, Register, Vm};
+use crate::value::{
+    ContextOrGuard, CustomType, Dynamic, RustType, StaticRustFunctionTable, TypeRef, Value,
+};
+use crate::vm::{Fault, Register, VmContext};
 
 #[derive(Debug)]
 pub struct Map(Mutex<Vec<Field>>);
@@ -18,7 +22,7 @@ pub static MAP_TYPE: RustType<Map> = RustType::new("Map", |t| {
                 let value = vm[Register(reg_index + 1)].take();
                 map.insert(vm, key, value)?;
             }
-            Ok(Dynamic::new(map))
+            Ok(Dynamic::new(map, vm))
         }
     })
     .with_invoke(|_| {
@@ -44,7 +48,7 @@ pub static MAP_TYPE: RustType<Map> = RustType::new("Map", |t| {
                         })
                         .with_fn(Symbol::nth_symbol(), 1, |vm, this| {
                             let index = vm[Register(0)].take();
-                            this.nth(&index)
+                            this.nth(&index, vm.as_ref())
                         })
                         .with_fn(Symbol::len_symbol(), 0, |_vm, this| {
                             let contents = this.0.lock().expect("poisoned");
@@ -56,13 +60,27 @@ pub static MAP_TYPE: RustType<Map> = RustType::new("Map", |t| {
     })
 });
 
+impl Trace for Map {
+    const MAY_CONTAIN_REFERENCES: bool = true;
+
+    fn trace(&self, tracer: &mut refuse::Tracer) {
+        for field in &*self.0.lock().expect("poisoned") {
+            field.key.value.trace(tracer);
+            field.value.trace(tracer);
+        }
+    }
+}
+
 impl Map {
     #[must_use]
     pub const fn new() -> Self {
         Self(Mutex::new(Vec::new()))
     }
 
-    pub fn from_iterator(vm: &mut Vm, iter: impl IntoIterator<Item = (Value, Value)>) -> Self {
+    pub fn from_iterator(
+        vm: &mut VmContext<'_, '_>,
+        iter: impl IntoIterator<Item = (Value, Value)>,
+    ) -> Self {
         let mut fields: Vec<_> = iter
             .into_iter()
             .map(|(key, value)| Field {
@@ -74,14 +92,14 @@ impl Map {
         Self(Mutex::new(fields))
     }
 
-    pub fn get(&self, vm: &mut Vm, key: &Value) -> Result<Option<Value>, Fault> {
+    pub fn get(&self, vm: &mut VmContext<'_, '_>, key: &Value) -> Result<Option<Value>, Fault> {
         let hash = key.hash(vm);
         let contents = self.0.lock().expect("poisoned");
         for field in &*contents {
             match hash.cmp(&field.key.hash) {
                 Ordering::Less => continue,
                 Ordering::Equal => {
-                    if key.equals(Some(vm), &field.key.value)? {
+                    if key.equals(ContextOrGuard::Context(vm), &field.key.value)? {
                         return Ok(Some(field.value.clone()));
                     }
                 }
@@ -92,7 +110,7 @@ impl Map {
         Ok(None)
     }
 
-    pub fn nth(&self, index: &Value) -> Result<Value, Fault> {
+    pub fn nth(&self, index: &Value, guard: &CollectionGuard) -> Result<Value, Fault> {
         let Some(index) = index.as_usize() else {
             return Err(Fault::OutOfBounds);
         };
@@ -100,15 +118,20 @@ impl Map {
         contents
             .get(index)
             .map(|field| {
-                Value::dynamic(List::from_iter([
-                    field.key.value.clone(),
-                    field.value.clone(),
-                ]))
+                Value::dynamic(
+                    List::from_iter([field.key.value.clone(), field.value.clone()]),
+                    guard,
+                )
             })
             .ok_or(Fault::OutOfBounds)
     }
 
-    pub fn insert(&self, vm: &mut Vm, key: Value, value: Value) -> Result<Option<Value>, Fault> {
+    pub fn insert(
+        &self,
+        vm: &mut VmContext<'_, '_>,
+        key: Value,
+        value: Value,
+    ) -> Result<Option<Value>, Fault> {
         let key = MapKey::new(vm, key);
         let mut contents = self.0.lock().expect("poisoned");
         let mut insert_at = contents.len();
@@ -116,7 +139,10 @@ impl Map {
             match key.hash.cmp(&field.key.hash) {
                 Ordering::Less => continue,
                 Ordering::Equal => {
-                    if key.value.equals(Some(vm), &field.key.value)? {
+                    if key
+                        .value
+                        .equals(ContextOrGuard::Context(vm), &field.key.value)?
+                    {
                         return Ok(Some(std::mem::replace(&mut field.value, value)));
                     }
                 }
@@ -163,7 +189,7 @@ struct MapKey {
 }
 
 impl MapKey {
-    pub fn new(vm: &mut Vm, key: Value) -> Self {
+    pub fn new(vm: &mut VmContext<'_, '_>, key: Value) -> Self {
         Self {
             hash: key.hash(vm),
             value: key,

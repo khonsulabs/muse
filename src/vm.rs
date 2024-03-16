@@ -3,8 +3,8 @@ use std::fmt::{Debug, Write};
 use std::future::Future;
 use std::hash::Hash;
 use std::num::{NonZeroUsize, TryFromIntError};
-use std::ops::{Deref, Index, IndexMut};
-use std::pin::{pin, Pin};
+use std::ops::{Deref, DerefMut, Index, IndexMut};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::task::{Poll, Wake, Waker};
 use std::time::{Duration, Instant};
@@ -14,6 +14,7 @@ use ahash::AHashMap;
 use crossbeam_utils::sync::{Parker, Unparker};
 use kempt::map::Entry;
 use kempt::Map;
+use refuse::{CollectionGuard, ContainsNoRefs, NoMapping, Root, Trace};
 use serde::{Deserialize, Serialize};
 
 #[cfg(not(feature = "dispatched"))]
@@ -29,7 +30,7 @@ use crate::symbol::{IntoOptionSymbol, Symbol};
 use crate::syntax::token::RegexLiteral;
 use crate::syntax::{BitwiseKind, CompareKind, SourceRange};
 use crate::value::{
-    AnyDynamic, CustomType, Dynamic, RustType, StaticRustFunctionTable, Value, WeakDynamic,
+    AnyDynamic, ContextOrGuard, CustomType, Dynamic, RustType, StaticRustFunctionTable, Value,
 };
 
 pub mod bitcode;
@@ -52,7 +53,201 @@ macro_rules! try_all {
 #[cfg(feature = "dispatched")]
 mod dispatched;
 
+#[derive(Clone)]
 pub struct Vm {
+    memory: Root<VmMemory>,
+}
+
+impl Vm {
+    #[must_use]
+    pub fn new(guard: &CollectionGuard) -> Self {
+        let parker = Parker::new();
+        let unparker = parker.unparker().clone();
+        Self {
+            memory: Root::new(
+                VmMemory(Mutex::new(VmState {
+                    registers: array::from_fn(|_| Value::Nil),
+                    frames: vec![Frame::default()],
+                    stack: Vec::new(),
+                    current_frame: 0,
+                    has_anonymous_frame: false,
+                    max_stack: usize::MAX,
+                    max_depth: usize::MAX,
+                    budget: Budget::default(),
+                    execute_until: None,
+                    modules: vec![Module::with_core(guard)],
+                    waker: Waker::from(Arc::new(VmWaker(unparker))),
+                    parker,
+                    code: Vec::new(),
+                    code_map: Map::new(),
+                })),
+                guard,
+            ),
+        }
+    }
+
+    pub fn execute(
+        &self,
+        code: &Code,
+        guard: &mut CollectionGuard,
+    ) -> Result<Value, ExecutionError> {
+        self.context(guard).execute(code)
+    }
+
+    pub fn execute_for(
+        &self,
+        code: &Code,
+        duration: Duration,
+        guard: &mut CollectionGuard,
+    ) -> Result<Value, ExecutionError> {
+        self.context(guard).execute_for(code, duration)
+    }
+
+    pub fn execute_until(
+        &self,
+        code: &Code,
+        instant: Instant,
+        guard: &mut CollectionGuard,
+    ) -> Result<Value, ExecutionError> {
+        self.context(guard).execute_until(code, instant)
+    }
+
+    pub fn execute_async<'context, 'guard>(
+        &'context self,
+        code: &Code,
+        guard: &'context mut CollectionGuard<'guard>,
+    ) -> Result<ExecuteAsync<'context, 'guard>, ExecutionError> {
+        self.context(guard).execute_async(code)
+    }
+
+    pub fn resume_async<'context, 'guard>(
+        &'context self,
+        guard: &'context mut CollectionGuard<'guard>,
+    ) -> Result<ExecuteAsync<'context, 'guard>, ExecutionError> {
+        self.context(guard).resume_async()
+    }
+
+    pub fn increase_budget(&mut self, amount: usize) {
+        self.memory
+            .0
+            .lock()
+            .expect("poisoned")
+            .budget
+            .allocate(amount);
+    }
+
+    pub fn resume(&mut self, guard: &mut CollectionGuard) -> Result<Value, ExecutionError> {
+        self.context(guard).resume()
+    }
+
+    pub fn invoke(
+        &mut self,
+        name: &Symbol,
+        params: impl InvokeArgs,
+        guard: &mut CollectionGuard,
+    ) -> Result<Value, ExecutionError> {
+        self.context(guard).invoke(name, params)
+    }
+
+    fn context<'context, 'guard>(
+        &'context self,
+        guard: &'context mut CollectionGuard<'guard>,
+    ) -> VmContext<'context, 'guard> {
+        VmContext {
+            guard,
+            vm: self.memory.0.lock().expect("poisoned"),
+        }
+    }
+
+    #[must_use]
+    pub fn register(&self, register: Register) -> Value {
+        self.memory.0.lock().expect("poisoned")[register].clone()
+    }
+
+    #[allow(clippy::must_use_candidate)]
+    pub fn set_register(&self, register: Register, value: Value) -> Value {
+        std::mem::replace(
+            &mut self.memory.0.lock().expect("poisoned")[register],
+            value,
+        )
+    }
+
+    #[must_use]
+    pub fn stack(&self, index: usize) -> Value {
+        self.memory.0.lock().expect("poisoned")[index].clone()
+    }
+
+    #[must_use]
+    pub fn set_stack(&self, index: usize, value: Value) -> Value {
+        std::mem::replace(&mut self.memory.0.lock().expect("poisoned")[index], value)
+    }
+
+    pub fn declare_variable(
+        &self,
+        name: Symbol,
+        mutable: bool,
+        guard: &mut CollectionGuard<'_>,
+    ) -> Result<Stack, Fault> {
+        VmContext::new(self, guard).declare_variable(name, mutable)
+    }
+
+    pub fn declare(
+        &self,
+        name: impl Into<Symbol>,
+        value: Value,
+        guard: &mut CollectionGuard<'_>,
+    ) -> Result<Option<Value>, Fault> {
+        VmContext::new(self, guard).declare_inner(name, value, false)
+    }
+
+    pub fn declare_mut(
+        &self,
+        name: impl Into<Symbol>,
+        value: Value,
+        guard: &mut CollectionGuard<'_>,
+    ) -> Result<Option<Value>, Fault> {
+        VmContext::new(self, guard).declare_inner(name, value, true)
+    }
+
+    pub fn declare_function(
+        &self,
+        function: Function,
+        guard: &mut CollectionGuard<'_>,
+    ) -> Result<Option<Value>, Fault> {
+        VmContext::new(self, guard).declare_function(function)
+    }
+}
+
+#[derive(Clone)]
+struct RegisteredCode {
+    code: Code,
+    owner: Option<AnyDynamic>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct CodeIndex(usize);
+
+struct VmMemory(Mutex<VmState>);
+
+impl refuse::Trace for VmMemory {
+    const MAY_CONTAIN_REFERENCES: bool = true;
+
+    fn trace(&self, tracer: &mut refuse::Tracer) {
+        let state = self.0.lock().expect("poisoned");
+        for register in state
+            .registers
+            .iter()
+            .chain(state.stack[0..state.frames[state.current_frame].end].iter())
+            .filter_map(Value::as_any_dynamic)
+        {
+            tracer.mark(register.0);
+        }
+    }
+}
+
+impl NoMapping for VmMemory {}
+
+pub struct VmState {
     registers: [Value; 256],
     stack: Vec<Value>,
     max_stack: usize,
@@ -69,71 +264,16 @@ pub struct Vm {
     code_map: Map<usize, CodeIndex>,
 }
 
-impl Default for Vm {
-    fn default() -> Self {
-        let parker = Parker::new();
-        let unparker = parker.unparker().clone();
-        Self {
-            registers: array::from_fn(|_| Value::Nil),
-            frames: vec![Frame::default()],
-            stack: Vec::new(),
-            current_frame: 0,
-            has_anonymous_frame: false,
-            max_stack: usize::MAX,
-            max_depth: usize::MAX,
-            budget: Budget::default(),
-            execute_until: None,
-            modules: vec![Module::with_core()],
-            waker: Waker::from(Arc::new(VmWaker(unparker))),
-            parker,
-            code: Vec::new(),
-            code_map: Map::new(),
-        }
-    }
-}
-
-impl Clone for Vm {
-    fn clone(&self) -> Self {
-        let parker = Parker::new();
-        let unparker = parker.unparker().clone();
-        Self {
-            registers: self.registers.clone(),
-            stack: self.stack.clone(),
-            max_stack: self.max_stack,
-            frames: self.frames.clone(),
-            current_frame: self.current_frame,
-            has_anonymous_frame: self.has_anonymous_frame,
-            max_depth: self.max_depth,
-            budget: self.budget,
-            execute_until: self.execute_until,
-            modules: self.modules.clone(),
-            waker: Waker::from(Arc::new(VmWaker(unparker))),
-            parker,
-            code: self.code.clone(),
-            code_map: self.code_map.clone(),
-        }
-    }
-}
-
-#[derive(Clone)]
-struct RegisteredCode {
-    code: Code,
-    owner: Option<AnyDynamic>,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-struct CodeIndex(usize);
-
-impl Vm {
-    fn push_code(&mut self, code: &Code, owner: Option<&AnyDynamic>) -> CodeIndex {
-        *self
-            .code_map
+impl<'context, 'guard> VmContext<'context, 'guard> {
+    fn push_code(&mut self, code: &Code, owner: Option<AnyDynamic>) -> CodeIndex {
+        let vm = &mut *self.vm;
+        *vm.code_map
             .entry(Arc::as_ptr(&code.data) as usize)
             .or_insert_with(|| {
-                let index = CodeIndex(self.code.len());
-                self.code.push(RegisteredCode {
+                let index = CodeIndex(vm.code.len());
+                vm.code.push(RegisteredCode {
                     code: code.clone(),
-                    owner: owner.cloned(),
+                    owner,
                 });
                 index
             })
@@ -168,8 +308,9 @@ impl Vm {
     }
 
     fn prepare_owned(&mut self, code: CodeIndex) -> Result<(), ExecutionError> {
-        self.frames[self.current_frame].code = Some(code);
-        self.frames[self.current_frame].instruction = 0;
+        let vm = &mut *self.vm;
+        vm.frames[vm.current_frame].code = Some(code);
+        vm.frames[vm.current_frame].instruction = 0;
 
         self.allocate(self.code[code.0].code.data.stack_requirement)
             .map_err(|err| ExecutionError::new(err, self))?;
@@ -182,31 +323,18 @@ impl Vm {
         self.resume()
     }
 
-    pub fn execute_async(&mut self, code: &Code) -> Result<ExecuteAsync<'_>, ExecutionError> {
+    pub fn execute_async(
+        mut self,
+        code: &Code,
+    ) -> Result<ExecuteAsync<'context, 'guard>, ExecutionError> {
         let code = self.push_code(code, None);
         self.prepare_owned(code)?;
 
         Ok(ExecuteAsync(self))
     }
 
-    pub fn resume_async(&mut self) -> Result<ExecuteAsync<'_>, ExecutionError> {
+    pub fn resume_async(self) -> Result<ExecuteAsync<'context, 'guard>, ExecutionError> {
         Ok(ExecuteAsync(self))
-    }
-
-    pub fn block_on<R>(&self, mut future: impl Future<Output = R> + Unpin) -> R {
-        let mut context = task::Context::from_waker(&self.waker);
-
-        loop {
-            match Future::poll(pin!(&mut future), &mut context) {
-                Poll::Ready(result) => return result,
-                Poll::Pending => self.parker.park(),
-            }
-        }
-    }
-
-    #[must_use]
-    pub const fn waker(&self) -> &Waker {
-        &self.waker
     }
 
     pub fn increase_budget(&mut self, amount: usize) {
@@ -235,7 +363,9 @@ impl Vm {
     ) -> Result<Value, ExecutionError> {
         let arity = params.load(self)?;
 
-        let module_dynamic = self.modules[0].clone();
+        let module_dynamic = self.modules[0]
+            .as_rooted(self.guard)
+            .expect("module missing");
         let module_declarations = module_dynamic.declarations();
         let function = module_declarations
             .get(name)
@@ -253,6 +383,11 @@ impl Vm {
             Err(Fault::FrameChanged) => self.resume(),
             Err(other) => Err(ExecutionError::new(other, self)),
         }
+    }
+
+    #[must_use]
+    pub fn waker(&self) -> &Waker {
+        &self.waker
     }
 
     #[cfg(feature = "dispatched")]
@@ -346,12 +481,13 @@ impl Vm {
     fn execute_function(
         &mut self,
         body: &Code,
-        function: &AnyDynamic,
+        function: AnyDynamic,
         module: usize,
     ) -> Result<Value, Fault> {
         let body_index = self.push_code(body, Some(function));
         self.enter_frame(Some(body_index))?;
-        self.frames[self.current_frame].module = module;
+        let vm = &mut *self.vm;
+        vm.frames[vm.current_frame].module = module;
 
         self.allocate(body.data.stack_requirement)?;
 
@@ -364,14 +500,14 @@ impl Vm {
             .expect("missing function")
             .0]
             .owner
-            .clone()
             .ok_or(Fault::NotAFunction)?;
         current_function.call(self, arity)
     }
 
     pub fn declare_variable(&mut self, name: Symbol, mutable: bool) -> Result<Stack, Fault> {
-        let current_frame = &mut self.frames[self.current_frame];
-        if current_frame.end < self.max_stack {
+        let vm = &mut *self.vm;
+        let current_frame = &mut vm.frames[vm.current_frame];
+        if current_frame.end < vm.max_stack {
             Ok(current_frame
                 .variables
                 .entry(name)
@@ -412,6 +548,8 @@ impl Vm {
         mutable: bool,
     ) -> Result<Option<Value>, Fault> {
         match self.modules[self.frames[self.current_frame].module]
+            .load(self.guard)
+            .ok_or(Fault::ValueFreed)?
             .declarations()
             .entry(name.into())
         {
@@ -426,21 +564,23 @@ impl Vm {
         }
     }
 
-    pub fn declare_function(&mut self, function: Function) -> Result<Option<Value>, Fault> {
+    pub fn declare_function(&mut self, mut function: Function) -> Result<Option<Value>, Fault> {
         let Some(name) = function.name().clone() else {
             return Ok(None);
         };
 
-        self.declare_inner(name, Value::dynamic(function), true)
+        function.module = Some(0);
+        self.declare_inner(name, Value::dynamic(function, &self), true)
     }
 
     pub fn resolve(&mut self, name: &Symbol) -> Result<Value, Fault> {
         if let Some(path) = name.strip_prefix('$') {
-            let mut module = self.modules[0].clone();
+            let mut module_dynamic = self.modules[0];
+            let mut module = module_dynamic.try_load(self.guard)?;
             let mut path = path.split('.').peekable();
             path.next();
             return if path.peek().is_none() {
-                Ok(module.to_value())
+                Ok(module_dynamic.to_value())
             } else {
                 let name = loop {
                     let Some(name) = path.next() else {
@@ -454,14 +594,16 @@ impl Vm {
                             return Err(Fault::MissingModule);
                         };
                         drop(declarations);
-                        module = inner;
+                        module_dynamic = inner;
+                        module = module_dynamic.try_load(self.guard)?;
                     } else {
                         // Final path component
                         break name;
                     }
                 };
 
-                Ok(module
+                Ok(module_dynamic
+                    .try_load(self.guard)?
                     .declarations()
                     .get(&name)
                     .ok_or(Fault::UnknownSymbol)?
@@ -477,7 +619,8 @@ impl Vm {
                 .cloned()
                 .ok_or(Fault::OutOfBounds)
         } else {
-            let module = &self.modules[self.frames[self.current_frame].module];
+            let module =
+                self.modules[self.frames[self.current_frame].module].try_load(self.guard)?;
             if let Some(value) = module
                 .declarations()
                 .get(name)
@@ -488,7 +631,7 @@ impl Vm {
                 Ok(module
                     .parent
                     .as_ref()
-                    .and_then(|parent| parent.upgrade().map(|parent| parent.to_value()))
+                    .map(Dynamic::to_value)
                     .unwrap_or_default())
             } else {
                 Err(Fault::UnknownSymbol)
@@ -497,7 +640,8 @@ impl Vm {
     }
 
     pub fn assign(&mut self, name: &Symbol, value: Value) -> Result<(), Fault> {
-        let current_frame = &mut self.frames[self.current_frame];
+        let vm = &mut *self.vm;
+        let current_frame = &mut vm.frames[vm.current_frame];
         if let Some(decl) = current_frame.variables.get_mut(name) {
             if decl.mutable {
                 let stack = decl.stack;
@@ -510,8 +654,8 @@ impl Vm {
                 Err(Fault::NotMutable)
             }
         } else {
-            let module = &self.modules[self.frames[self.current_frame].module];
-            if let Some(decl) = module.declarations().get_mut(name) {
+            let module = &vm.modules[vm.frames[vm.current_frame].module];
+            if let Some(decl) = module.try_load(self.guard)?.declarations().get_mut(name) {
                 if decl.mutable {
                     decl.value = value;
                     Ok(())
@@ -525,20 +669,21 @@ impl Vm {
     }
 
     fn enter_frame(&mut self, code: Option<CodeIndex>) -> Result<(), Fault> {
-        if self.current_frame < self.max_depth {
-            let current_frame_end = self.frames[self.current_frame].end;
-            let current_frame_module = self.frames[self.current_frame].module;
+        let vm = &mut *self.vm;
+        if vm.current_frame < vm.max_depth {
+            let current_frame_end = vm.frames[vm.current_frame].end;
+            let current_frame_module = vm.frames[vm.current_frame].module;
 
-            self.current_frame += 1;
-            if self.current_frame < self.frames.len() {
-                self.frames[self.current_frame].clear();
-                self.frames[self.current_frame].start = current_frame_end;
-                self.frames[self.current_frame].end = current_frame_end;
-                self.frames[self.current_frame].module = current_frame_module;
-                self.frames[self.current_frame].code = code;
-                self.frames[self.current_frame].instruction = 0;
+            vm.current_frame += 1;
+            if vm.current_frame < vm.frames.len() {
+                vm.frames[vm.current_frame].clear();
+                vm.frames[vm.current_frame].start = current_frame_end;
+                vm.frames[vm.current_frame].end = current_frame_end;
+                vm.frames[vm.current_frame].module = current_frame_module;
+                vm.frames[vm.current_frame].code = code;
+                vm.frames[vm.current_frame].instruction = 0;
             } else {
-                self.frames.push(Frame {
+                vm.frames.push(Frame {
                     start: current_frame_end,
                     end: current_frame_end,
                     code,
@@ -556,11 +701,12 @@ impl Vm {
     }
 
     pub fn exit_frame(&mut self) -> Result<(), Fault> {
-        if self.current_frame >= 1 {
-            self.has_anonymous_frame = false;
-            let current_frame = &self.frames[self.current_frame];
-            self.stack[current_frame.start..current_frame.end].fill_with(|| Value::Nil);
-            self.current_frame -= 1;
+        let vm = &mut *self.vm;
+        if vm.current_frame >= 1 {
+            vm.has_anonymous_frame = false;
+            let current_frame = &vm.frames[vm.current_frame];
+            vm.stack[current_frame.start..current_frame.end].fill_with(|| Value::Nil);
+            vm.current_frame -= 1;
             Ok(())
         } else {
             Err(Fault::StackUnderflow)
@@ -568,13 +714,14 @@ impl Vm {
     }
 
     pub fn allocate(&mut self, count: usize) -> Result<Stack, Fault> {
-        let current_frame = &mut self.frames[self.current_frame];
+        let vm = &mut *self.vm;
+        let current_frame = &mut vm.frames[vm.current_frame];
         let index = Stack(current_frame.end - current_frame.start);
         match current_frame.end.checked_add(count) {
-            Some(end) if end < self.max_stack => {
+            Some(end) if end < vm.max_stack => {
                 current_frame.end += count;
-                if self.stack.len() < current_frame.end {
-                    self.stack.resize_with(current_frame.end, || Value::Nil);
+                if vm.stack.len() < current_frame.end {
+                    vm.stack.resize_with(current_frame.end, || Value::Nil);
                 }
                 Ok(index)
             }
@@ -595,7 +742,8 @@ impl Vm {
     }
 
     pub fn jump_to(&mut self, instruction: usize) {
-        self.frames[self.current_frame].instruction = instruction;
+        let vm = &mut *self.vm;
+        vm.frames[vm.current_frame].instruction = instruction;
     }
 
     #[must_use]
@@ -605,7 +753,8 @@ impl Vm {
 
     #[must_use]
     pub fn current_frame_mut(&mut self) -> &mut [Value] {
-        &mut self.stack[self.frames[self.current_frame].start..self.frames[self.current_frame].end]
+        let vm = &mut *self.vm;
+        &mut vm.stack[vm.frames[vm.current_frame].start..vm.frames[vm.current_frame].end]
     }
 
     #[must_use]
@@ -642,7 +791,8 @@ impl Vm {
         while self.current_frame >= base_frame {
             if let Some(exception_target) = self.frames[self.current_frame].exception_handler {
                 self[Register(0)] = err.as_exception(self);
-                self.frames[self.current_frame].instruction = exception_target.get();
+                let vm = &mut *self.vm;
+                vm.frames[vm.current_frame].instruction = exception_target.get();
                 handled = true;
                 break;
             }
@@ -662,8 +812,80 @@ impl Vm {
     }
 }
 
+impl Index<Register> for VmState {
+    type Output = Value;
+
+    fn index(&self, index: Register) -> &Self::Output {
+        &self.registers[usize::from(index)]
+    }
+}
+
+impl IndexMut<Register> for VmState {
+    fn index_mut(&mut self, index: Register) -> &mut Self::Output {
+        &mut self.registers[usize::from(index)]
+    }
+}
+
+impl Index<usize> for VmState {
+    type Output = Value;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.stack[index]
+    }
+}
+
+impl IndexMut<usize> for VmState {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.stack[index]
+    }
+}
+
+pub struct VmContext<'a, 'guard> {
+    guard: &'a mut CollectionGuard<'guard>,
+    vm: MutexGuard<'a, VmState>,
+}
+
+impl<'a, 'guard> VmContext<'a, 'guard> {
+    pub fn new(vm: &'a Vm, guard: &'a mut CollectionGuard<'guard>) -> Self {
+        Self {
+            guard,
+            vm: vm.memory.0.lock().expect("poisoned"),
+        }
+    }
+
+    #[must_use]
+    pub fn guard_mut(&mut self) -> &mut CollectionGuard<'guard> {
+        self.guard
+    }
+
+    #[must_use]
+    pub fn guard(&self) -> &CollectionGuard<'guard> {
+        self.guard
+    }
+}
+
+impl<'guard> AsRef<CollectionGuard<'guard>> for VmContext<'_, 'guard> {
+    fn as_ref(&self) -> &CollectionGuard<'guard> {
+        self.guard()
+    }
+}
+
+impl Deref for VmContext<'_, '_> {
+    type Target = VmState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.vm
+    }
+}
+
+impl DerefMut for VmContext<'_, '_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.vm
+    }
+}
+
 #[cfg(not(feature = "dispatched"))]
-impl Vm {
+impl VmContext<'_, '_> {
     fn resume_async_inner(&mut self, base_frame: usize) -> Result<Value, Fault> {
         if self.has_anonymous_frame {
             self.current_frame -= 1;
@@ -823,7 +1045,10 @@ impl Vm {
                 loaded.op1,
                 loaded.op2,
                 loaded.dest,
-                |vm, lhs, rhs| lhs.equals(Some(vm), &rhs).map(Value::Bool),
+                |vm, lhs, rhs| {
+                    lhs.equals(ContextOrGuard::Context(vm), &rhs)
+                        .map(Value::Bool)
+                },
             ),
             LoadedOp::NotEqual(loaded) => self.op_binop(
                 code_index,
@@ -831,7 +1056,7 @@ impl Vm {
                 loaded.op2,
                 loaded.dest,
                 |vm, lhs, rhs| {
-                    lhs.equals(Some(vm), &rhs)
+                    lhs.equals(ContextOrGuard::Context(vm), &rhs)
                         .map(|result| Value::Bool(!result))
                 },
             ),
@@ -905,25 +1130,30 @@ impl Vm {
         module: usize,
         dest: OpDestination,
     ) -> Result<(), Fault> {
-        let loading_module = if let Some(index) =
-            self.frames[self.current_frame].loading_module.take()
+        let vm = &mut *self.vm;
+        let loading_module = if let Some(index) = vm.frames[vm.current_frame].loading_module.take()
         {
             index
         } else {
             // Replace the current module and stage the initializer
-            let executing_frame = self.current_frame;
-            let initializer =
-                Code::from(&self.code[code_index].code.data.modules[module].initializer);
+            let executing_frame = vm.current_frame;
+            let initializer = vm.code[code_index].code.data.modules[module]
+                .initializer
+                .to_code(self.guard);
             let code = self.push_code(&initializer, None);
             self.enter_frame(Some(code))?;
             self.allocate(initializer.data.stack_requirement)?;
             let module_index = NonZeroUsize::new(self.modules.len()).expect("always at least one");
-            self.modules.push(Dynamic::new(Module {
-                parent: Some(self.modules[self.frames[executing_frame].module].downgrade()),
-                ..Module::default()
-            }));
-            self.frames[self.current_frame].module = module_index.get();
-            self.frames[executing_frame].loading_module = Some(module_index);
+            let vm = &mut *self.vm;
+            vm.modules.push(Dynamic::new(
+                Module {
+                    parent: Some(vm.modules[vm.frames[executing_frame].module]),
+                    ..Module::default()
+                },
+                &*self.guard,
+            ));
+            vm.frames[vm.current_frame].module = module_index.get();
+            vm.frames[executing_frame].loading_module = Some(module_index);
             let _init_result = self.resume_async_inner(self.current_frame)?;
             module_index
         };
@@ -1174,10 +1404,9 @@ impl Vm {
             .as_usize()
             .and_then(NonZeroUsize::new);
 
-        let previous_handler_address = std::mem::replace(
-            &mut self.frames[self.current_frame].exception_handler,
-            handler,
-        );
+        let vm = &mut *self.vm;
+        let previous_handler_address =
+            std::mem::replace(&mut vm.frames[vm.current_frame].exception_handler, handler);
         self.op_store(
             code_index,
             previous_handler_address
@@ -1233,7 +1462,10 @@ impl Vm {
                 .get(v)
                 .map(|function| {
                     Value::dynamic(
-                        Function::from(function).in_module(self.frames[self.current_frame].module),
+                        function
+                            .to_function(self.guard)
+                            .in_module(self.frames[self.current_frame].module),
+                        &self,
                     )
                 })
                 .ok_or(Fault::InvalidOpcode),
@@ -1342,34 +1574,6 @@ impl From<Register> for usize {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct InvalidRegister;
 
-impl Index<Register> for Vm {
-    type Output = Value;
-
-    fn index(&self, index: Register) -> &Self::Output {
-        &self.registers[usize::from(index)]
-    }
-}
-
-impl IndexMut<Register> for Vm {
-    fn index_mut(&mut self, index: Register) -> &mut Self::Output {
-        &mut self.registers[usize::from(index)]
-    }
-}
-
-impl Index<usize> for Vm {
-    type Output = Value;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.stack[index]
-    }
-}
-
-impl IndexMut<usize> for Vm {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        &mut self.stack[index]
-    }
-}
-
 #[derive(Default, Debug, Clone)]
 struct Frame {
     start: usize,
@@ -1402,7 +1606,7 @@ pub enum ExecutionError {
 }
 
 impl ExecutionError {
-    fn new(fault: Fault, vm: &mut Vm) -> Self {
+    fn new(fault: Fault, vm: &mut VmContext<'_, '_>) -> Self {
         match fault {
             Fault::NoBudget => Self::NoBudget,
             Fault::Waiting => Self::Waiting,
@@ -1419,6 +1623,7 @@ pub enum Fault {
     IncorrectNumberOfArguments,
     PatternMismatch,
     OperationOnNil,
+    ValueFreed,
     MissingModule,
     NotAFunction,
     StackOverflow,
@@ -1448,11 +1653,12 @@ impl Fault {
     }
 
     #[must_use]
-    pub fn as_exception(&self, vm: &mut Vm) -> Value {
+    pub fn as_exception(&self, vm: &mut VmContext<'_, '_>) -> Value {
         let exception = match self {
             Fault::UnknownSymbol => Symbol::from("undefined").into(),
             Fault::IncorrectNumberOfArguments => Symbol::from("args").into(),
             Fault::OperationOnNil => Symbol::from("nil").into(),
+            Fault::ValueFreed => Symbol::from("out-of-scope").into(),
             Fault::NotAFunction => Symbol::from("not_invokable").into(),
             Fault::MissingModule => Symbol::from("internal").into(),
             Fault::StackOverflow => Symbol::from("overflow").into(),
@@ -1476,12 +1682,12 @@ impl Fault {
             Fault::Exception(value) => return value.clone(),
             Fault::PatternMismatch => Symbol::from("mismatch").into(),
         };
-        Value::dynamic(Exception::new(exception, vm))
+        Value::dynamic(Exception::new(exception, vm), vm)
     }
 
-    fn from_kind(kind: FaultKind, vm: &mut Vm) -> Self {
+    fn from_kind(kind: FaultKind, vm: &mut VmContext<'_, '_>) -> Self {
         let exception = match kind {
-            FaultKind::Exception => Value::dynamic(Exception::new(vm[Register(0)].take(), vm)),
+            FaultKind::Exception => Value::dynamic(Exception::new(vm[Register(0)].take(), vm), vm),
             FaultKind::PatternMismatch => Self::PatternMismatch.as_exception(vm),
         };
         Self::Exception(exception)
@@ -1552,6 +1758,8 @@ impl CustomType for Function {
     }
 }
 
+impl ContainsNoRefs for Function {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub struct Arity(pub u8);
 
@@ -1587,8 +1795,8 @@ pub struct Code {
 }
 
 impl Code {
-    pub fn push(&mut self, op: &Op, range: SourceRange) {
-        Arc::make_mut(&mut self.data).push(op, range);
+    pub fn push(&mut self, op: &Op, range: SourceRange, guard: &CollectionGuard) {
+        Arc::make_mut(&mut self.data).push(op, range, guard);
     }
 }
 
@@ -1630,7 +1838,7 @@ struct CodeData {
 
 impl CodeData {
     #[allow(clippy::too_many_lines)]
-    pub fn push(&mut self, op: &Op, range: SourceRange) {
+    pub fn push(&mut self, op: &Op, range: SourceRange, guard: &CollectionGuard) {
         match op {
             Op::Return => self.push_loaded(LoadedOp::Return, range),
             Op::Label(label) => {
@@ -1646,7 +1854,7 @@ impl CodeData {
                 dest,
             } => {
                 let name = self.push_symbol(name.clone());
-                let value = self.load_source(value);
+                let value = self.load_source(value, guard);
                 let dest = self.load_dest(dest);
                 self.push_loaded(
                     LoadedOp::Declare {
@@ -1664,7 +1872,7 @@ impl CodeData {
                 ..
             } => {}
             Op::Unary { op, dest, kind } => {
-                let op = self.load_source(op);
+                let op = self.load_source(op, guard);
                 let dest = self.load_dest(dest);
                 let unary = LoadedUnary { op, dest };
                 self.push_loaded(
@@ -1687,8 +1895,8 @@ impl CodeData {
                 dest,
                 kind,
             } => {
-                let op1 = self.load_source(op1);
-                let op2 = self.load_source(op2);
+                let op1 = self.load_source(op1, guard);
+                let op2 = self.load_source(op2, guard);
                 let dest = self.load_dest(dest);
                 let binary = LoadedBinary { op1, op2, dest };
                 self.push_loaded(
@@ -1725,8 +1933,8 @@ impl CodeData {
                 );
             }
             Op::Call { name, arity } => {
-                let name = self.load_source(name);
-                let arity = self.load_source(arity);
+                let name = self.load_source(name, guard);
+                let arity = self.load_source(arity, guard);
                 self.push_loaded(LoadedOp::Call { name, arity }, range);
             }
             Op::Invoke {
@@ -1734,9 +1942,9 @@ impl CodeData {
                 name,
                 arity,
             } => {
-                let target = self.load_source(target);
+                let target = self.load_source(target, guard);
                 let name = self.push_symbol(name.clone());
-                let arity = self.load_source(arity);
+                let arity = self.load_source(arity, guard);
                 self.push_loaded(
                     LoadedOp::Invoke {
                         target,
@@ -1781,13 +1989,13 @@ impl CodeData {
         index
     }
 
-    fn push_regex(&mut self, regex: &RegexLiteral) -> usize {
+    fn push_regex(&mut self, regex: &RegexLiteral, guard: &CollectionGuard) -> usize {
         let index = self.regexes.len();
-        self.regexes.push(precompiled_regex(regex));
+        self.regexes.push(precompiled_regex(regex, guard));
         index
     }
 
-    fn load_source(&mut self, source: &ValueOrSource) -> LoadedSource {
+    fn load_source(&mut self, source: &ValueOrSource, guard: &CollectionGuard) -> LoadedSource {
         match source {
             ValueOrSource::Nil => LoadedSource::Nil,
             ValueOrSource::Bool(bool) => LoadedSource::Bool(*bool),
@@ -1796,7 +2004,7 @@ impl CodeData {
             ValueOrSource::UInt(uint) => LoadedSource::UInt(*uint),
             ValueOrSource::Float(float) => LoadedSource::Float(*float),
             ValueOrSource::Symbol(sym) => LoadedSource::Symbol(self.push_symbol(sym.clone())),
-            ValueOrSource::Regex(regex) => LoadedSource::Regex(self.push_regex(regex)),
+            ValueOrSource::Regex(regex) => LoadedSource::Regex(self.push_regex(regex, guard)),
             ValueOrSource::Register(reg) => LoadedSource::Register(*reg),
             ValueOrSource::Stack(stack) => {
                 self.stack_requirement = self.stack_requirement.max(stack.0 + 1);
@@ -1850,27 +2058,31 @@ impl From<Option<usize>> for StepResult {
 
 #[derive(Default, Debug)]
 pub struct Module {
-    parent: Option<WeakDynamic<Module>>,
+    parent: Option<Dynamic<Module>>,
     declarations: Mutex<Map<Symbol, ModuleDeclaration>>,
 }
 
 impl Module {
     #[must_use]
-    pub fn with_core() -> Dynamic<Self> {
-        let module = Dynamic::new(Self::default());
+    pub fn with_core(guard: &CollectionGuard) -> Dynamic<Self> {
+        let module = Dynamic::new(Self::default(), guard);
 
         let core = Self {
-            parent: Some(module.downgrade()),
+            parent: Some(module),
             ..Self::core()
         };
 
-        module.declarations().insert(
-            Symbol::from("core"),
-            ModuleDeclaration {
-                mutable: false,
-                value: Value::dynamic(core),
-            },
-        );
+        module
+            .load(guard)
+            .expect("guard held")
+            .declarations()
+            .insert(
+                Symbol::from("core"),
+                ModuleDeclaration {
+                    mutable: false,
+                    value: Value::dynamic(core, guard),
+                },
+            );
 
         module
     }
@@ -1883,21 +2095,21 @@ impl Module {
             Symbol::from("Map"),
             ModuleDeclaration {
                 mutable: false,
-                value: Value::Dynamic(crate::map::MAP_TYPE.as_any_dynamic().clone()),
+                value: Value::Dynamic(crate::map::MAP_TYPE.as_any_dynamic()),
             },
         );
         declarations.insert(
             Symbol::from("List"),
             ModuleDeclaration {
                 mutable: false,
-                value: Value::Dynamic(crate::list::LIST_TYPE.as_any_dynamic().clone()),
+                value: Value::Dynamic(crate::list::LIST_TYPE.as_any_dynamic()),
             },
         );
         declarations.insert(
             Symbol::from("String"),
             ModuleDeclaration {
                 mutable: false,
-                value: Value::Dynamic(crate::string::STRING_TYPE.as_any_dynamic().clone()),
+                value: Value::Dynamic(crate::string::STRING_TYPE.as_any_dynamic()),
             },
         );
         drop(declarations);
@@ -1957,6 +2169,22 @@ impl CustomType for Module {
     }
 }
 
+impl Trace for Module {
+    const MAY_CONTAIN_REFERENCES: bool = true;
+
+    fn trace(&self, tracer: &mut refuse::Tracer) {
+        if let Some(parent) = self.parent {
+            tracer.mark(parent);
+        }
+
+        for decl in &*self.declarations() {
+            if let Some(dynamic) = decl.value.value.as_any_dynamic() {
+                tracer.mark(dynamic);
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ModuleDeclaration {
     mutable: bool,
@@ -1982,9 +2210,9 @@ impl Budget {
     }
 }
 
-pub struct ExecuteAsync<'a>(&'a mut Vm);
+pub struct ExecuteAsync<'context, 'guard>(VmContext<'context, 'guard>);
 
-impl Future for ExecuteAsync<'_> {
+impl Future for ExecuteAsync<'_, '_> {
     type Output = Result<Value, ExecutionError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
@@ -1992,7 +2220,7 @@ impl Future for ExecuteAsync<'_> {
         let previous_waker = std::mem::replace(&mut self.0.waker, cx.waker().clone());
         let result = match self.0.resume_async_inner(0) {
             Err(Fault::Waiting) => Poll::Pending,
-            Err(other) => Poll::Ready(Err(ExecutionError::new(other, self.0))),
+            Err(other) => Poll::Ready(Err(ExecutionError::new(other, &mut self.0))),
             Ok(value) => Poll::Ready(Ok(value)),
         };
         // Restore the VM's waker.
@@ -2121,12 +2349,14 @@ struct PrecompiledRegex {
     literal: RegexLiteral,
     result: Result<Value, Fault>,
 }
-fn precompiled_regex(regex: &RegexLiteral) -> PrecompiledRegex {
+fn precompiled_regex(regex: &RegexLiteral, guard: &CollectionGuard) -> PrecompiledRegex {
     PrecompiledRegex {
         literal: regex.clone(),
         result: MuseRegex::new(regex)
-            .map(Value::dynamic)
-            .map_err(|err| Fault::Exception(Value::dynamic(MuseString::from(err.to_string())))),
+            .map(|r| Value::dynamic(r, guard))
+            .map_err(|err| {
+                Fault::Exception(Value::dynamic(MuseString::from(err.to_string()), guard))
+            }),
     }
 }
 
@@ -2162,11 +2392,11 @@ impl Debug for StackFrame {
 }
 
 pub trait InvokeArgs {
-    fn load(self, vm: &mut Vm) -> Result<Arity, ExecutionError>;
+    fn load(self, vm: &mut VmContext<'_, '_>) -> Result<Arity, ExecutionError>;
 }
 
 impl<const N: usize> InvokeArgs for [Value; N] {
-    fn load(self, vm: &mut Vm) -> Result<Arity, ExecutionError> {
+    fn load(self, vm: &mut VmContext<'_, '_>) -> Result<Arity, ExecutionError> {
         let arity = Arity::try_from(N)
             .map_err(|_| ExecutionError::Exception(Fault::InvalidArity.as_exception(vm)))?;
 
