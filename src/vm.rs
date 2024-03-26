@@ -29,9 +29,9 @@ use crate::string::MuseString;
 use crate::symbol::{IntoOptionSymbol, Symbol, SymbolRef};
 use crate::syntax::token::RegexLiteral;
 use crate::syntax::{BitwiseKind, CompareKind, SourceRange};
-use crate::value::{
-    AnyDynamic, ContextOrGuard, CustomType, Dynamic, RustType, StaticRustFunctionTable, Value,
-};
+#[cfg(not(feature = "dispatched"))]
+use crate::value::ContextOrGuard;
+use crate::value::{AnyDynamic, CustomType, Dynamic, RustType, StaticRustFunctionTable, Value};
 
 pub mod bitcode;
 
@@ -1849,7 +1849,7 @@ impl CodeData {
     #[allow(clippy::too_many_lines)]
     pub fn push(&mut self, op: &Op, range: SourceRange, guard: &CollectionGuard) {
         match op {
-            Op::Return => self.push_loaded(LoadedOp::Return, range),
+            Op::Return => self.push_loaded(LoadedOp::Return, range, guard),
             Op::Label(label) => {
                 if self.labels.len() <= label.0 {
                     self.labels.resize(label.0 + 1, usize::MAX);
@@ -1873,6 +1873,7 @@ impl CodeData {
                         dest,
                     },
                     range,
+                    guard,
                 );
             }
             Op::Unary {
@@ -1896,6 +1897,7 @@ impl CodeData {
                         UnaryKind::SetExceptionHandler => LoadedOp::SetExceptionHandler(unary),
                     },
                     range,
+                    guard,
                 );
             }
             Op::BinOp {
@@ -1939,12 +1941,13 @@ impl CodeData {
                         },
                     },
                     range,
+                    guard,
                 );
             }
             Op::Call { name, arity } => {
                 let name = self.load_source(name, guard);
                 let arity = self.load_source(arity, guard);
-                self.push_loaded(LoadedOp::Call { name, arity }, range);
+                self.push_loaded(LoadedOp::Call { name, arity }, range, guard);
             }
             Op::Invoke {
                 target,
@@ -1961,19 +1964,20 @@ impl CodeData {
                         arity,
                     },
                     range,
+                    guard,
                 );
             }
             Op::LoadModule { module, dest } => {
                 let module = self.push_module(module);
                 let dest = self.load_dest(dest);
-                self.push_loaded(LoadedOp::LoadModule { module, dest }, range);
+                self.push_loaded(LoadedOp::LoadModule { module, dest }, range, guard);
             }
-            Op::Throw(kind) => self.push_loaded(LoadedOp::Throw(*kind), range),
+            Op::Throw(kind) => self.push_loaded(LoadedOp::Throw(*kind), range, guard),
         }
     }
 
     #[cfg(not(feature = "dispatched"))]
-    fn push_loaded(&mut self, loaded: LoadedOp, range: SourceRange) {
+    fn push_loaded(&mut self, loaded: LoadedOp, range: SourceRange, _guard: &CollectionGuard<'_>) {
         self.instructions.push(loaded);
         self.map.push(range);
     }

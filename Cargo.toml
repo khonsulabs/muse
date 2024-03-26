@@ -66,6 +66,6 @@ harness = false
 debug = true
 lto = true
 
-[patch."https://github.com/khonsulabs/refuse"]
-refuse = { path = "../refuse" }
-refuse-pool = { path = "../refuse/refuse-pool" }
+# [patch."https://github.com/khonsulabs/refuse"]
+# refuse = { path = "../refuse" }
+# refuse-pool = { path = "../refuse/refuse-pool" }

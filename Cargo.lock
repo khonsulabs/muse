@@ -2379,6 +2379,7 @@ dependencies = [
 [[package]]
 name = "refuse"
 version = "0.0.1"
+source = "git+https://github.com/khonsulabs/refuse#40f8853ff4d2606f9e450e9635b5463162e6419a"
 dependencies = [
  "crossbeam-utils",
  "flume",
@@ -2391,6 +2392,7 @@ dependencies = [
 [[package]]
 name = "refuse-macros"
 version = "0.1.0"
+source = "git+https://github.com/khonsulabs/refuse#40f8853ff4d2606f9e450e9635b5463162e6419a"
 dependencies = [
  "attribute-derive 0.9.1",
  "manyhow 0.11.1",
@@ -2402,6 +2404,7 @@ dependencies = [
 [[package]]
 name = "refuse-pool"
 version = "0.1.0"
+source = "git+https://github.com/khonsulabs/refuse#40f8853ff4d2606f9e450e9635b5463162e6419a"
 dependencies = [
  "ahash",
  "hashbrown",

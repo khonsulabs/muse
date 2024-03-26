@@ -155,6 +155,135 @@ pub struct BitcodeBlock {
 }
 
 impl BitcodeBlock {
+    #[allow(clippy::too_many_lines)]
+    #[must_use]
+    pub fn from_code(code: &'_ Code, guard: &CollectionGuard<'_>) -> Self {
+        #[cfg(not(feature = "dispatched"))]
+        let _ = guard;
+
+        let mut ops = Vec::with_capacity(code.data.instructions.len() + code.data.labels.len());
+        let mut label_addrs = code.data.labels.iter().copied().peekable();
+        let mut labels = 0;
+        let mut map = SourceMap::default();
+        let mut current_location = map.get(0).unwrap_or_default();
+
+        for (index, instruction) in code.data.instructions.iter().enumerate() {
+            if label_addrs.peek().map_or(false, |label| label == &index) {
+                label_addrs.next();
+                let label = Label(labels);
+                labels += 1;
+                map.push(current_location);
+                ops.push(Op::Label(label));
+            }
+
+            current_location = code.data.map.get(index).unwrap_or_default();
+            map.push(current_location);
+
+            #[cfg(feature = "dispatched")]
+            ops.push(instruction.as_op(guard));
+
+            #[cfg(not(feature = "dispatched"))]
+            ops.push(match instruction {
+                LoadedOp::Return => Op::Return,
+                LoadedOp::Declare {
+                    name,
+                    mutable,
+                    value,
+                    dest,
+                } => Op::Declare {
+                    name: code.data.symbols[*name].clone(),
+                    mutable: *mutable,
+                    value: trusted_loaded_source_to_value(value, &code.data),
+                    dest: *dest,
+                },
+                LoadedOp::Truthy(loaded) => loaded.as_op(UnaryKind::Truthy, code),
+                LoadedOp::LogicalNot(loaded) => loaded.as_op(UnaryKind::LogicalNot, code),
+                LoadedOp::BitwiseNot(loaded) => loaded.as_op(UnaryKind::BitwiseNot, code),
+                LoadedOp::Negate(loaded) => loaded.as_op(UnaryKind::Negate, code),
+                LoadedOp::Copy(loaded) => loaded.as_op(UnaryKind::Copy, code),
+                LoadedOp::Resolve(loaded) => loaded.as_op(UnaryKind::Resolve, code),
+                LoadedOp::Jump(loaded) => loaded.as_op(UnaryKind::Jump, code),
+                LoadedOp::SetExceptionHandler(loaded) => {
+                    loaded.as_op(UnaryKind::SetExceptionHandler, code)
+                }
+                LoadedOp::LogicalXor(loaded) => loaded.as_op(BinaryKind::LogicalXor, code),
+                LoadedOp::Assign(loaded) => loaded.as_op(BinaryKind::Assign, code),
+                LoadedOp::Add(loaded) => loaded.as_op(BinaryKind::Add, code),
+                LoadedOp::Subtract(loaded) => loaded.as_op(BinaryKind::Subtract, code),
+                LoadedOp::Multiply(loaded) => loaded.as_op(BinaryKind::Multiply, code),
+                LoadedOp::Divide(loaded) => loaded.as_op(BinaryKind::Divide, code),
+                LoadedOp::IntegerDivide(loaded) => loaded.as_op(BinaryKind::IntegerDivide, code),
+                LoadedOp::Remainder(loaded) => loaded.as_op(BinaryKind::Remainder, code),
+                LoadedOp::Power(loaded) => loaded.as_op(BinaryKind::Power, code),
+                LoadedOp::JumpIf(loaded) => loaded.as_op(BinaryKind::JumpIf, code),
+                LoadedOp::JumpIfNot(loaded) => loaded.as_op(BinaryKind::JumpIfNot, code),
+                LoadedOp::LessThanOrEqual(loaded) => {
+                    loaded.as_op(BinaryKind::Compare(CompareKind::LessThanOrEqual), code)
+                }
+                LoadedOp::LessThan(loaded) => {
+                    loaded.as_op(BinaryKind::Compare(CompareKind::LessThan), code)
+                }
+                LoadedOp::Equal(loaded) => {
+                    loaded.as_op(BinaryKind::Compare(CompareKind::Equal), code)
+                }
+                LoadedOp::NotEqual(loaded) => {
+                    loaded.as_op(BinaryKind::Compare(CompareKind::NotEqual), code)
+                }
+                LoadedOp::GreaterThan(loaded) => {
+                    loaded.as_op(BinaryKind::Compare(CompareKind::GreaterThan), code)
+                }
+                LoadedOp::GreaterThanOrEqual(loaded) => {
+                    loaded.as_op(BinaryKind::Compare(CompareKind::GreaterThanOrEqual), code)
+                }
+                LoadedOp::Matches(loaded) => loaded.as_op(BinaryKind::Matches, code),
+                LoadedOp::Call { name, arity } => Op::Call {
+                    name: trusted_loaded_source_to_value(name, &code.data),
+                    arity: trusted_loaded_source_to_value(arity, &code.data),
+                },
+                LoadedOp::Invoke {
+                    target,
+                    name,
+                    arity,
+                } => Op::Invoke {
+                    target: trusted_loaded_source_to_value(target, &code.data),
+                    name: code.data.symbols[*name].clone(),
+                    arity: trusted_loaded_source_to_value(arity, &code.data),
+                },
+                LoadedOp::BitwiseAnd(loaded) => {
+                    loaded.as_op(BinaryKind::Bitwise(BitwiseKind::And), code)
+                }
+                LoadedOp::BitwiseOr(loaded) => {
+                    loaded.as_op(BinaryKind::Bitwise(BitwiseKind::Or), code)
+                }
+                LoadedOp::BitwiseXor(loaded) => {
+                    loaded.as_op(BinaryKind::Bitwise(BitwiseKind::Xor), code)
+                }
+                LoadedOp::BitwiseShiftLeft(loaded) => {
+                    loaded.as_op(BinaryKind::Bitwise(BitwiseKind::ShiftLeft), code)
+                }
+                LoadedOp::BitwiseShiftRight(loaded) => {
+                    loaded.as_op(BinaryKind::Bitwise(BitwiseKind::ShiftRight), code)
+                }
+                LoadedOp::LoadModule {
+                    module: initializer,
+                    dest,
+                } => Op::LoadModule {
+                    module: code.data.modules[*initializer].clone(),
+                    dest: *dest,
+                },
+                LoadedOp::Throw(kind) => Op::Throw(*kind),
+            });
+        }
+
+        BitcodeBlock {
+            ops,
+            stack_requirement: code.data.stack_requirement,
+            labels,
+            current_location: SourceRange::default(),
+            map,
+        }
+    }
+
     pub fn new_label(&mut self) -> Label {
         let label = Label(self.labels);
         self.labels += 1;
@@ -525,133 +654,6 @@ pub(super) fn trusted_loaded_source_to_value(
     }
 }
 
-impl From<&'_ Code> for BitcodeBlock {
-    #[allow(clippy::too_many_lines)]
-    fn from(code: &'_ Code) -> Self {
-        let mut ops = Vec::with_capacity(code.data.instructions.len() + code.data.labels.len());
-        let mut label_addrs = code.data.labels.iter().copied().peekable();
-        let mut labels = 0;
-        let mut map = SourceMap::default();
-        let mut current_location = map.get(0).unwrap_or_default();
-
-        for (index, instruction) in code.data.instructions.iter().enumerate() {
-            if label_addrs.peek().map_or(false, |label| label == &index) {
-                label_addrs.next();
-                let label = Label(labels);
-                labels += 1;
-                map.push(current_location);
-                ops.push(Op::Label(label));
-            }
-
-            current_location = code.data.map.get(index).unwrap_or_default();
-            map.push(current_location);
-
-            #[cfg(feature = "dispatched")]
-            ops.push(instruction.as_op());
-
-            #[cfg(not(feature = "dispatched"))]
-            ops.push(match instruction {
-                LoadedOp::Return => Op::Return,
-                LoadedOp::Declare {
-                    name,
-                    mutable,
-                    value,
-                    dest,
-                } => Op::Declare {
-                    name: code.data.symbols[*name].clone(),
-                    mutable: *mutable,
-                    value: trusted_loaded_source_to_value(value, &code.data),
-                    dest: *dest,
-                },
-                LoadedOp::Truthy(loaded) => loaded.as_op(UnaryKind::Truthy, code),
-                LoadedOp::LogicalNot(loaded) => loaded.as_op(UnaryKind::LogicalNot, code),
-                LoadedOp::BitwiseNot(loaded) => loaded.as_op(UnaryKind::BitwiseNot, code),
-                LoadedOp::Negate(loaded) => loaded.as_op(UnaryKind::Negate, code),
-                LoadedOp::Copy(loaded) => loaded.as_op(UnaryKind::Copy, code),
-                LoadedOp::Resolve(loaded) => loaded.as_op(UnaryKind::Resolve, code),
-                LoadedOp::Jump(loaded) => loaded.as_op(UnaryKind::Jump, code),
-                LoadedOp::SetExceptionHandler(loaded) => {
-                    loaded.as_op(UnaryKind::SetExceptionHandler, code)
-                }
-                LoadedOp::LogicalXor(loaded) => loaded.as_op(BinaryKind::LogicalXor, code),
-                LoadedOp::Assign(loaded) => loaded.as_op(BinaryKind::Assign, code),
-                LoadedOp::Add(loaded) => loaded.as_op(BinaryKind::Add, code),
-                LoadedOp::Subtract(loaded) => loaded.as_op(BinaryKind::Subtract, code),
-                LoadedOp::Multiply(loaded) => loaded.as_op(BinaryKind::Multiply, code),
-                LoadedOp::Divide(loaded) => loaded.as_op(BinaryKind::Divide, code),
-                LoadedOp::IntegerDivide(loaded) => loaded.as_op(BinaryKind::IntegerDivide, code),
-                LoadedOp::Remainder(loaded) => loaded.as_op(BinaryKind::Remainder, code),
-                LoadedOp::Power(loaded) => loaded.as_op(BinaryKind::Power, code),
-                LoadedOp::JumpIf(loaded) => loaded.as_op(BinaryKind::JumpIf, code),
-                LoadedOp::JumpIfNot(loaded) => loaded.as_op(BinaryKind::JumpIfNot, code),
-                LoadedOp::LessThanOrEqual(loaded) => {
-                    loaded.as_op(BinaryKind::Compare(CompareKind::LessThanOrEqual), code)
-                }
-                LoadedOp::LessThan(loaded) => {
-                    loaded.as_op(BinaryKind::Compare(CompareKind::LessThan), code)
-                }
-                LoadedOp::Equal(loaded) => {
-                    loaded.as_op(BinaryKind::Compare(CompareKind::Equal), code)
-                }
-                LoadedOp::NotEqual(loaded) => {
-                    loaded.as_op(BinaryKind::Compare(CompareKind::NotEqual), code)
-                }
-                LoadedOp::GreaterThan(loaded) => {
-                    loaded.as_op(BinaryKind::Compare(CompareKind::GreaterThan), code)
-                }
-                LoadedOp::GreaterThanOrEqual(loaded) => {
-                    loaded.as_op(BinaryKind::Compare(CompareKind::GreaterThanOrEqual), code)
-                }
-                LoadedOp::Matches(loaded) => loaded.as_op(BinaryKind::Matches, code),
-                LoadedOp::Call { name, arity } => Op::Call {
-                    name: trusted_loaded_source_to_value(name, &code.data),
-                    arity: trusted_loaded_source_to_value(arity, &code.data),
-                },
-                LoadedOp::Invoke {
-                    target,
-                    name,
-                    arity,
-                } => Op::Invoke {
-                    target: trusted_loaded_source_to_value(target, &code.data),
-                    name: code.data.symbols[*name].clone(),
-                    arity: trusted_loaded_source_to_value(arity, &code.data),
-                },
-                LoadedOp::BitwiseAnd(loaded) => {
-                    loaded.as_op(BinaryKind::Bitwise(BitwiseKind::And), code)
-                }
-                LoadedOp::BitwiseOr(loaded) => {
-                    loaded.as_op(BinaryKind::Bitwise(BitwiseKind::Or), code)
-                }
-                LoadedOp::BitwiseXor(loaded) => {
-                    loaded.as_op(BinaryKind::Bitwise(BitwiseKind::Xor), code)
-                }
-                LoadedOp::BitwiseShiftLeft(loaded) => {
-                    loaded.as_op(BinaryKind::Bitwise(BitwiseKind::ShiftLeft), code)
-                }
-                LoadedOp::BitwiseShiftRight(loaded) => {
-                    loaded.as_op(BinaryKind::Bitwise(BitwiseKind::ShiftRight), code)
-                }
-                LoadedOp::LoadModule {
-                    module: initializer,
-                    dest,
-                } => Op::LoadModule {
-                    module: code.data.modules[*initializer].clone(),
-                    dest: *dest,
-                },
-                LoadedOp::Throw(kind) => Op::Throw(*kind),
-            });
-        }
-
-        BitcodeBlock {
-            ops,
-            stack_requirement: code.data.stack_requirement,
-            labels,
-            current_location: SourceRange::default(),
-            map,
-        }
-    }
-}
-
 impl Deref for BitcodeBlock {
     type Target = Vec<Op>;
 
@@ -679,6 +681,23 @@ impl BitcodeFunction {
             name: name.into(),
             bodies: Map::new(),
             varg_bodies: Map::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn from_function(bit: &'_ Function, guard: &CollectionGuard<'_>) -> Self {
+        Self {
+            name: bit.name.clone(),
+            bodies: bit
+                .bodies
+                .iter()
+                .map(|f| (*f.key(), BitcodeBlock::from_code(&f.value, guard)))
+                .collect(),
+            varg_bodies: bit
+                .bodies
+                .iter()
+                .map(|f| (*f.key(), BitcodeBlock::from_code(&f.value, guard)))
+                .collect(),
         }
     }
 
@@ -719,24 +738,6 @@ impl BitcodeFunction {
                 .varg_bodies
                 .iter()
                 .map(|f| (*f.key(), f.value.to_code(guard)))
-                .collect(),
-        }
-    }
-}
-
-impl From<&'_ Function> for BitcodeFunction {
-    fn from(bit: &'_ Function) -> Self {
-        Self {
-            name: bit.name.clone(),
-            bodies: bit
-                .bodies
-                .iter()
-                .map(|f| (*f.key(), BitcodeBlock::from(&f.value)))
-                .collect(),
-            varg_bodies: bit
-                .bodies
-                .iter()
-                .map(|f| (*f.key(), BitcodeBlock::from(&f.value)))
                 .collect(),
         }
     }
