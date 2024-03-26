@@ -164,7 +164,7 @@ impl MuseCaptures {
         regex: &Regex,
         guard: &CollectionGuard,
     ) -> Self {
-        let named_captures = regex.capture_names().filter(Option::is_some).count();
+        let named_captures = regex.capture_names().flatten().count();
         let by_name = if named_captures == 0 {
             Map::new()
         } else {

@@ -300,6 +300,7 @@ impl CustomType for MuseWidget {
 impl SimpleType for MuseWidget {}
 
 #[derive(Debug)]
+#[allow(dead_code)] // TODO
 pub struct OpenWindow(WindowHandle);
 
 impl CustomType for OpenWindow {

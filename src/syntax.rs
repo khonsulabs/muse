@@ -3654,7 +3654,7 @@ fn parse_variable(
     ))
 }
 
-struct Var(Symbol);
+struct Var;
 
 impl Parselet for Var {
     fn matches(&self, token: &Token, _tokens: &mut TokenReader<'_>) -> bool {
@@ -3917,8 +3917,7 @@ fn parselets() -> Parselets {
         Mod,
         Pub,
         Fn,
-        Var(Symbol::var_symbol().clone()),
-        Var(Symbol::let_symbol().clone()),
+        Var,
         If,
         True,
         False,
