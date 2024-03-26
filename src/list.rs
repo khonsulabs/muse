@@ -34,7 +34,7 @@ pub static LIST_TYPE: RustType<List> = RustType::new("List", |t| {
                         .with_fn(Symbol::set_symbol(), 2, |vm, this| {
                             let index = vm[Register(0)].take();
                             let value = vm[Register(1)].take();
-                            this.set(&index, value.clone())?;
+                            this.set(&index, value)?;
                             Ok(value)
                         })
                         .with_fn(
@@ -66,7 +66,7 @@ impl List {
         };
         let contents = self.0.lock().expect("poisoned");
 
-        contents.get(index).cloned().ok_or(Fault::OutOfBounds)
+        contents.get(index).copied().ok_or(Fault::OutOfBounds)
     }
 
     pub fn insert(&self, index: &Value, value: Value) -> Result<(), Fault> {

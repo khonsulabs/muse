@@ -3,15 +3,78 @@ use std::ops::{Add, Deref};
 use std::sync::OnceLock;
 use std::{array, iter};
 
-use ahash::RandomState;
-use interner::global::{GlobalString, StringPool};
+use refuse::{CollectionGuard, Trace};
+use refuse_pool::{RefString, RootString};
 use serde::de::Visitor;
 use serde::{Deserialize, Serialize};
 
-static SYMBOLS: StringPool<RandomState> = StringPool::with_hasher_init(RandomState::new);
+use crate::value::ValueFreed;
 
-#[derive(Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
-pub struct Symbol(GlobalString<RandomState>);
+#[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Hash, Trace)]
+pub struct SymbolRef(RefString);
+impl SymbolRef {
+    #[must_use]
+    pub fn load<'guard>(&self, guard: &'guard CollectionGuard<'_>) -> Option<&'guard str> {
+        self.0.load(guard)
+    }
+
+    pub fn try_load<'guard>(
+        &self,
+        guard: &'guard CollectionGuard<'_>,
+    ) -> Result<&'guard str, ValueFreed> {
+        self.load(guard).ok_or(ValueFreed)
+    }
+
+    pub fn upgrade(&self, guard: &CollectionGuard<'_>) -> Option<Symbol> {
+        self.0.as_root(guard).map(Symbol)
+    }
+
+    pub fn try_upgrade(&self, guard: &CollectionGuard<'_>) -> Result<Symbol, ValueFreed> {
+        self.upgrade(guard).ok_or(ValueFreed)
+    }
+}
+
+impl kempt::Sort<SymbolRef> for Symbol {
+    fn compare(&self, other: &SymbolRef) -> std::cmp::Ordering {
+        self.0.as_any().cmp(&other.0.as_any())
+    }
+}
+
+#[derive(Clone, Trace)]
+pub struct Symbol(RootString);
+
+impl Symbol {
+    #[must_use]
+    pub const fn downgrade(&self) -> SymbolRef {
+        SymbolRef(self.0.downgrade())
+    }
+}
+
+impl Eq for Symbol {}
+
+impl PartialEq for Symbol {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.downgrade() == other.0.downgrade()
+    }
+}
+
+impl Ord for Symbol {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.downgrade().cmp(&other.0.downgrade())
+    }
+}
+
+impl PartialOrd for Symbol {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::hash::Hash for Symbol {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.downgrade().hash(state);
+    }
+}
 
 macro_rules! static_symbols {
     ($($name:ident => $string:literal),+ $(,)?) => {
@@ -64,26 +127,45 @@ static_symbols!(
     xor_symbol => "xor",
 );
 
-impl From<String> for Symbol {
-    fn from(value: String) -> Self {
-        Symbol(SYMBOLS.get(value))
-    }
+macro_rules! impl_froms {
+    ($type:ty, $inner:ty) => {
+        impl From<String> for $type {
+            fn from(value: String) -> Self {
+                Self(<$inner>::from(value))
+            }
+        }
+        impl From<&'_ $type> for $type {
+            fn from(value: &'_ $type) -> Self {
+                value.clone()
+            }
+        }
+
+        impl From<&'_ String> for $type {
+            fn from(value: &'_ String) -> Self {
+                Self(<$inner>::from(value))
+            }
+        }
+
+        impl From<&'_ str> for $type {
+            fn from(value: &'_ str) -> Self {
+                Self(<$inner>::from(value))
+            }
+        }
+    };
 }
-impl From<&'_ Symbol> for Symbol {
+
+impl_froms!(Symbol, RootString);
+impl_froms!(SymbolRef, RefString);
+
+impl From<&'_ Symbol> for SymbolRef {
     fn from(value: &'_ Symbol) -> Self {
-        value.clone()
+        value.downgrade()
     }
 }
 
-impl From<&'_ String> for Symbol {
-    fn from(value: &'_ String) -> Self {
-        Symbol(SYMBOLS.get(value))
-    }
-}
-
-impl From<&'_ str> for Symbol {
-    fn from(value: &'_ str) -> Self {
-        Symbol(SYMBOLS.get(value))
+impl From<Symbol> for SymbolRef {
+    fn from(value: Symbol) -> Self {
+        value.downgrade()
     }
 }
 
@@ -118,12 +200,34 @@ impl PartialEq<str> for Symbol {
     }
 }
 
+impl PartialEq<SymbolRef> for Symbol {
+    fn eq(&self, other: &SymbolRef) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl PartialEq<Symbol> for SymbolRef {
+    fn eq(&self, other: &Symbol) -> bool {
+        self.0 == other.0
+    }
+}
+
 impl From<bool> for Symbol {
     fn from(bool: bool) -> Self {
         if bool {
             Symbol::true_symbol().clone()
         } else {
             Symbol::false_symbol().clone()
+        }
+    }
+}
+
+impl From<bool> for SymbolRef {
+    fn from(bool: bool) -> Self {
+        if bool {
+            Symbol::true_symbol().downgrade()
+        } else {
+            Symbol::false_symbol().downgrade()
         }
     }
 }
@@ -147,6 +251,7 @@ impl Display for Symbol {
         Display::fmt(&self.0, f)
     }
 }
+
 impl<'a, 'b> Add<&'a Symbol> for &'b Symbol {
     type Output = Symbol;
 
@@ -202,6 +307,7 @@ impl<'de> Deserialize<'de> for Symbol {
         deserializer.deserialize_str(SymbolVisitor)
     }
 }
+
 struct SymbolVisitor;
 
 impl<'de> Visitor<'de> for SymbolVisitor {

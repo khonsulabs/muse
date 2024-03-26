@@ -29,7 +29,7 @@ impl Exception {
 impl CustomType for Exception {
     fn muse_type(&self) -> &TypeRef {
         static EXCEPTION_TYPE: RustType<Exception> = RustType::new("Exception", |t| {
-            t.with_fallback(|this, _guard| this.value.clone())
+            t.with_fallback(|this, _guard| this.value)
                 .with_eq(|_| {
                     |this, vm, rhs| {
                         if let Some(rhs) = rhs.as_rooted::<Exception>(vm.as_ref()) {

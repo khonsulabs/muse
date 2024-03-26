@@ -7,7 +7,7 @@ use refuse::{CollectionGuard, ContainsNoRefs};
 use regex::{Captures, Regex};
 
 use crate::string::MuseString;
-use crate::symbol::Symbol;
+use crate::symbol::{Symbol, SymbolRef};
 use crate::syntax::token::RegexLiteral;
 use crate::value::{
     AnyDynamic, CustomType, Rooted, RustType, StaticRustFunctionTable, TypeRef, Value,
@@ -127,7 +127,7 @@ impl CustomType for MuseRegex {
                 }
             })
             .with_truthy(|_| |this, _vm| !this.expr.as_str().is_empty())
-            .with_to_string(|_| |this, _vm| Ok(Symbol::from(this.expr.as_str().to_string())))
+            .with_to_string(|_| |this, _vm| Ok(SymbolRef::from(this.expr.as_str().to_string())))
             .with_clone()
             .with_matches(|_| {
                 |this, vm, rhs| {
@@ -215,14 +215,15 @@ impl CustomType for MuseCaptures {
                                         let index = if let Some(index) = index.as_usize() {
                                             index
                                         } else {
-                                            let name = index.to_string(vm)?;
+                                            let name =
+                                                index.to_string(vm)?.try_upgrade(vm.guard())?;
                                             let Some(index) = this.by_name.get(&name).copied()
                                             else {
                                                 return Ok(Value::Nil);
                                             };
                                             index
                                         };
-                                        this.matches.get(index).cloned().ok_or(Fault::OutOfBounds)
+                                        this.matches.get(index).copied().ok_or(Fault::OutOfBounds)
                                     },
                                 )
                                 .with_fn(
@@ -231,7 +232,7 @@ impl CustomType for MuseCaptures {
                                     |vm: &mut VmContext<'_, '_>, this: &Rooted<MuseCaptures>| {
                                         let index =
                                             vm[Register(0)].as_usize().ok_or(Fault::OutOfBounds)?;
-                                        this.matches.get(index).cloned().ok_or(Fault::OutOfBounds)
+                                        this.matches.get(index).copied().ok_or(Fault::OutOfBounds)
                                     },
                                 )
                         });

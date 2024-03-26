@@ -102,7 +102,9 @@ impl History {
         .and(
             match &self.result {
                 Ok(value) => match value.to_string(&mut context) {
-                    Ok(formatted) => formatted.to_string(),
+                    Ok(formatted) => formatted
+                        .load(context.guard())
+                        .map_or_else(String::new, ToString::to_string),
                     Err(_) => format!("{:?}", value),
                 }
                 .with(&FontFamily, FamilyOwned::Monospace)

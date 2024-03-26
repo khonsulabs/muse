@@ -6,7 +6,7 @@ use refuse::ContainsNoRefs;
 
 use crate::list::List;
 use crate::regex::MuseRegex;
-use crate::symbol::Symbol;
+use crate::symbol::{Symbol, SymbolRef};
 use crate::value::{
     AnyDynamic, CustomType, Dynamic, Rooted, RustType, StaticRustFunctionTable, TypeRef, Value,
 };
@@ -42,27 +42,30 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
                 if let Some(dynamic) = vm[Register(0)].as_dynamic::<MuseString>() {
                     Ok(dynamic)
                 } else {
-                    let value = vm[Register(0)].take().to_string(vm)?;
-                    Ok(Dynamic::new(MuseString::from(&*value), vm))
+                    let value = vm[Register(0)].take().to_string(vm)?.try_load(vm.guard())?;
+                    Ok(Dynamic::new(MuseString::from(value), vm))
                 }
             } else if let Ok(length) = (0..arity.0).try_fold(0_usize, |accum, r| {
                 vm[Register(r)]
-                    .as_symbol()
+                    .as_symbol(vm.guard())
                     .map_or(Err(()), |sym| Ok(accum + sym.len()))
             }) {
                 let mut joined = String::with_capacity(length);
                 for r in 0..arity.0 {
-                    let Some(sym) = vm[Register(r)].as_symbol() else {
+                    let Some(sym) = vm[Register(r)].as_symbol(vm.guard()) else {
                         unreachable!()
                     };
-                    joined.push_str(sym);
+                    joined.push_str(&sym);
                 }
 
                 Ok(Dynamic::new(MuseString::from(joined), vm))
             } else {
                 let mut joined = String::new();
                 for r in 0..arity.0 {
-                    let sym = vm[Register(r)].take().to_string(vm)?;
+                    let sym = vm[Register(r)]
+                        .take()
+                        .to_string(vm)?
+                        .try_upgrade(vm.guard())?;
                     joined.push_str(&sym);
                 }
 
@@ -79,8 +82,8 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
         |this, vm, rhs| {
             if let Some(rhs) = rhs.as_downcast_ref::<MuseString>(vm.as_ref()) {
                 Ok(*this.0.lock().expect("poisoned") == *rhs.0.lock().expect("poisoned"))
-            } else if let Some(rhs) = rhs.as_symbol() {
-                Ok(*this.0.lock().expect("poisoned") == **rhs)
+            } else if let Some(rhs) = rhs.as_symbol(vm.as_ref()) {
+                Ok(*this.0.lock().expect("poisoned") == *rhs)
             } else {
                 Ok(false)
             }
@@ -182,7 +185,7 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
                     Ok(Value::dynamic(MuseString::from(combined), &vm))
                 }
             } else {
-                let rhs = rhs.to_string(vm)?;
+                let rhs = rhs.to_string(vm)?.try_upgrade(vm.guard())?;
                 let mut combined = String::with_capacity(lhs.len() + rhs.len());
                 combined.push_str(&lhs);
                 combined.push_str(&rhs);
@@ -192,7 +195,7 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
     })
     .with_add_right(|_| {
         |this, vm, lhs| {
-            let lhs = lhs.to_string(vm)?;
+            let lhs = lhs.to_string(vm)?.try_upgrade(vm.guard())?;
             let rhs = this.0.lock().expect("poisoned");
             let mut combined = String::with_capacity(rhs.len() + lhs.len());
             combined.push_str(&lhs);
@@ -221,7 +224,7 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
         }
     })
     .with_truthy(|_| |this, _vm| !this.0.lock().expect("poisoned").is_empty())
-    .with_to_string(|_| |this, _vm| Ok(Symbol::from(&*this.0.lock().expect("poisoned"))))
+    .with_to_string(|_| |this, _vm| Ok(SymbolRef::from(&*this.0.lock().expect("poisoned"))))
     .with_deep_clone(|_| {
         |this, guard| {
             Some(AnyDynamic::new(

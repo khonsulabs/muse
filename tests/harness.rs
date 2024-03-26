@@ -19,7 +19,7 @@ use serde::Deserialize;
 
 fn main() {
     let filter = std::env::args().nth(1).unwrap_or_default();
-    // let filter = String::from("raw_format");
+    // let filter = String::from("regex_captures");
     for entry in std::fs::read_dir("tests/cases").unwrap() {
         let entry = entry.unwrap().path();
         if entry.extension().map_or(false, |ext| ext == "rsn") {
@@ -123,7 +123,7 @@ impl From<Value> for TestOutput {
             Value::Int(v) => TestOutput::Int(v),
             Value::UInt(v) => TestOutput::UInt(v),
             Value::Float(v) => TestOutput::Float(v),
-            Value::Symbol(v) => TestOutput::Symbol(v),
+            Value::Symbol(v) => TestOutput::Symbol(v.upgrade(&guard).expect("missing symbol")),
             Value::Dynamic(v) => {
                 if let Some(str) = v.downcast_ref::<MuseString>(&guard) {
                     TestOutput::String(str.to_string())
@@ -152,7 +152,7 @@ impl From<Value> for TestOutput {
                     }
                 } else if let Some(m) = v.downcast_ref::<Exception>(&guard) {
                     TestOutput::Exception {
-                        value: Box::new(Self::from(m.value().clone())),
+                        value: Box::new(Self::from(*m.value())),
                         backtrace: m
                             .backtrace()
                             .iter()

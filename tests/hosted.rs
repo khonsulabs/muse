@@ -90,11 +90,17 @@ fn run_test_cases(path: &Path, filter: &str) {
                         return Err(Fault::InvalidArity);
                     };
                     let name = vm[Register(0)].take();
-                    let name_string = name.to_string(vm).expect("invalid name");
+                    let name_string = name
+                        .to_string(vm)
+                        .expect("invalid name")
+                        .try_upgrade(vm.guard())?;
                     println!("running case {name_string}");
                     let offset = vm[Register(1)].take();
                     let source = vm[Register(2)].take();
-                    let code = vm[Register(3)].take().to_string(vm)?;
+                    let code = vm[Register(3)]
+                        .take()
+                        .to_string(vm)?
+                        .try_upgrade(vm.guard())?;
 
                     let code =
                         Compiler::compile(&SourceCode::anonymous(&code), vm.guard()).unwrap();
@@ -138,7 +144,10 @@ fn run_test_cases(path: &Path, filter: &str) {
                 })
                 .expect("invalid source offset")
                 + 1;
-            let name = exc.name.as_symbol().expect("expected name to be a symbol");
+            let name = exc
+                .name
+                .as_symbol(context.guard())
+                .expect("expected name to be a symbol");
             eprintln!("error in {name} @ {path}:{line_number}");
 
             let ExecutionError::Exception(inner_exception) = &exc.err else {
@@ -147,7 +156,12 @@ fn run_test_cases(path: &Path, filter: &str) {
 
             if let Some(inner_exception) = inner_exception.as_rooted::<Exception>(context.guard()) {
                 eprintln!("exception: {exc:?}", exc = inner_exception.value());
-                let Ok(source) = exc.source.to_string(&mut context) else {
+                let Some(source) = exc
+                    .source
+                    .to_string(&mut context)
+                    .ok()
+                    .and_then(|source| source.upgrade(context.guard()))
+                else {
                     unreachable!("source was not a string")
                 };
                 let mut line_offset = 0;

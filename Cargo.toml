@@ -29,7 +29,6 @@ alot = "0.3.1"
 ariadne = { version = "0.4.0", optional = true }
 crossbeam-utils = "0.8.19"
 dirs = { version = "5.0.1", optional = true }
-interner = "0.2.1"
 kempt = { version = "0.2.3", features = ["serde"] }
 regex = "1.10.3"
 rustyline = { version = "14.0.0", optional = true, default-features = false, features = [
@@ -38,6 +37,7 @@ rustyline = { version = "14.0.0", optional = true, default-features = false, fea
 serde = { version = "1.0.195", features = ["derive", "rc"] }
 unicode-ident = "1.0.12"
 refuse = { git = "https://github.com/khonsulabs/refuse" }
+refuse-pool = { git = "https://github.com/khonsulabs/refuse" }
 
 [dev-dependencies]
 rsn = "0.1"
@@ -65,3 +65,7 @@ harness = false
 [profile.release]
 debug = true
 lto = true
+
+[patch."https://github.com/khonsulabs/refuse"]
+refuse = { path = "../refuse" }
+refuse-pool = { path = "../refuse/refuse-pool" }

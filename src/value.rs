@@ -15,10 +15,10 @@ use kempt::Map;
 use refuse::{AnyRef, CollectionGuard, ContainsNoRefs, MapAs, Ref, Root, SimpleType, Trace};
 
 use crate::string::MuseString;
-use crate::symbol::{Symbol, SymbolList};
+use crate::symbol::{Symbol, SymbolList, SymbolRef};
 use crate::vm::{Arity, ExecutionError, Fault, VmContext};
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Copy, Debug)]
 pub enum Value {
     #[default]
     Nil,
@@ -26,7 +26,7 @@ pub enum Value {
     Int(i64),
     UInt(u64),
     Float(f64),
-    Symbol(Symbol),
+    Symbol(SymbolRef),
     Dynamic(AnyDynamic),
 }
 
@@ -164,9 +164,17 @@ impl Value {
     }
 
     #[must_use]
-    pub fn as_symbol(&self) -> Option<&Symbol> {
+    pub fn as_symbol_ref(&self) -> Option<&SymbolRef> {
         match self {
             Value::Symbol(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_symbol(&self, guard: &CollectionGuard<'_>) -> Option<Symbol> {
+        match self {
+            Value::Symbol(value) => value.upgrade(guard),
             _ => None,
         }
     }
@@ -185,7 +193,7 @@ impl Value {
         T: DynamicValue + Trace,
     {
         match self {
-            Value::Dynamic(value) => value.as_dynamic(),
+            Value::Dynamic(value) => Some(value.as_dynamic()),
             _ => None,
         }
     }
@@ -219,7 +227,7 @@ impl Value {
             Value::Int(value) => value != &0,
             Value::UInt(value) => value != &0,
             Value::Float(value) => value.abs() >= f64::EPSILON,
-            Value::Symbol(sym) => !sym.is_empty(),
+            Value::Symbol(sym) => sym.load(vm.as_ref()).map_or(false, |sym| !sym.is_empty()),
             Value::Dynamic(value) => value.truthy(vm),
         }
     }
@@ -231,7 +239,10 @@ impl Value {
     ) -> Result<Value, Fault> {
         match self {
             Value::Dynamic(dynamic) => dynamic.call(vm, arity),
-            Value::Symbol(name) => vm.resolve(name).and_then(|named| named.call(vm, arity)),
+            Value::Symbol(name) => {
+                let name = name.try_upgrade(vm.guard())?;
+                vm.resolve(&name).and_then(|named| named.call(vm, arity))
+            }
             Value::Nil => vm.recurse_current_function(arity.into()),
             _ => Err(Fault::NotAFunction),
         }
@@ -240,20 +251,13 @@ impl Value {
     pub fn invoke(
         &self,
         vm: &mut VmContext<'_, '_>,
-        name: &Symbol,
+        name: &SymbolRef,
         arity: impl Into<Arity>,
     ) -> Result<Value, Fault> {
-        match (self, &**name) {
-            (_, "add") => {
-                let rhs = vm
-                    .current_frame()
-                    .first()
-                    .ok_or(Fault::IncorrectNumberOfArguments)?
-                    .clone();
-                self.add(vm, &rhs)
-            }
-            (Value::Dynamic(dynamic), _) => dynamic.invoke(vm, name, arity.into()),
-            (Value::Nil, _) => Err(Fault::OperationOnNil),
+        match self {
+            Value::Dynamic(dynamic) => dynamic.invoke(vm, name, arity.into()),
+            Value::Nil => Err(Fault::OperationOnNil),
+            // TODO we should pass through to the appropriate Type
             _ => Err(Fault::UnknownSymbol),
         }
     }
@@ -265,10 +269,12 @@ impl Value {
             (Value::Bool(_), _) | (_, Value::Bool(_)) => Err(Fault::UnsupportedOperation),
 
             (Value::Symbol(lhs), rhs) => {
-                rhs.map_str(vm, |_vm, rhs| Value::Symbol(Symbol::from(lhs + rhs)))
+                let lhs = lhs.try_upgrade(vm.guard())?;
+                rhs.map_str(vm, |_vm, rhs| Value::Symbol(SymbolRef::from(&lhs + rhs)))
             }
             (lhs, Value::Symbol(rhs)) => {
-                lhs.map_str(vm, |_vm, lhs| Value::Symbol(Symbol::from(lhs + rhs)))
+                let rhs = rhs.try_upgrade(vm.guard())?;
+                lhs.map_str(vm, |_vm, lhs| Value::Symbol(SymbolRef::from(lhs + &rhs)))
             }
 
             (Value::Int(lhs), Value::Int(rhs)) => Ok(Self::Int(lhs.saturating_add(*rhs))),
@@ -323,9 +329,12 @@ impl Value {
             (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
 
             (Value::Int(count), Value::Symbol(string))
-            | (Value::Symbol(string), Value::Int(count)) => Ok(Value::Symbol(Symbol::from(
-                string.repeat(usize::try_from(*count).map_err(|_| Fault::OutOfMemory)?),
-            ))),
+            | (Value::Symbol(string), Value::Int(count)) => {
+                let string = string.try_upgrade(vm.guard())?;
+                Ok(Value::Symbol(SymbolRef::from(string.repeat(
+                    usize::try_from(*count).map_err(|_| Fault::OutOfMemory)?,
+                ))))
+            }
 
             (Value::Int(lhs), Value::Int(rhs)) => Ok(Self::Int(lhs.saturating_mul(*rhs))),
             (Value::Int(lhs), Value::UInt(rhs)) => Ok(Self::Int(
@@ -809,14 +818,14 @@ impl Value {
         }
     }
 
-    pub fn to_string(&self, vm: &mut VmContext<'_, '_>) -> Result<Symbol, Fault> {
+    pub fn to_string(&self, vm: &mut VmContext<'_, '_>) -> Result<SymbolRef, Fault> {
         match self {
-            Value::Nil => Ok(Symbol::empty().clone()),
-            Value::Bool(bool) => Ok(Symbol::from(*bool)),
-            Value::Int(value) => Ok(Symbol::from(value.to_string())),
-            Value::UInt(value) => Ok(Symbol::from(value.to_string())),
-            Value::Float(value) => Ok(Symbol::from(value.to_string())),
-            Value::Symbol(value) => Ok(value.clone()),
+            Value::Nil => Ok(Symbol::empty().downgrade()),
+            Value::Bool(bool) => Ok(SymbolRef::from(*bool)),
+            Value::Int(value) => Ok(SymbolRef::from(value.to_string())),
+            Value::UInt(value) => Ok(SymbolRef::from(value.to_string())),
+            Value::Float(value) => Ok(SymbolRef::from(value.to_string())),
+            Value::Symbol(value) => Ok(*value),
             Value::Dynamic(value) => value.to_string(vm),
         }
     }
@@ -830,7 +839,8 @@ impl Value {
             return Ok(map(vm, &str.lock()));
         }
 
-        self.to_string(vm).map(|string| map(vm, &string))
+        let str = self.to_string(vm)?.try_upgrade(vm.guard())?;
+        Ok(map(vm, &str))
     }
 
     pub fn hash_into(&self, vm: &mut VmContext<'_, '_>, hasher: &mut ValueHasher) {
@@ -894,7 +904,7 @@ impl Value {
 
             (Self::Symbol(l0), Self::Symbol(r0)) => Ok(l0 == r0),
             (Self::Symbol(s), Self::Bool(b)) | (Self::Bool(b), Self::Symbol(s)) => {
-                Ok(s == &Symbol::from(*b))
+                Ok(s == &SymbolRef::from(*b))
             }
 
             (Self::Dynamic(l0), _) => l0.eq(vm, other),
@@ -974,7 +984,7 @@ impl Value {
             Value::Int(value) => Some(Value::Int(*value)),
             Value::UInt(value) => Some(Value::UInt(*value)),
             Value::Float(value) => Some(Value::Float(*value)),
-            Value::Symbol(value) => Some(Value::Symbol(value.clone())),
+            Value::Symbol(value) => Some(Value::Symbol(*value)),
             Value::Dynamic(value) => value.deep_clone(guard).map(Value::Dynamic),
         }
     }
@@ -1061,11 +1071,11 @@ impl AnyDynamic {
     }
 
     #[must_use]
-    pub fn as_dynamic<T>(&self) -> Option<Dynamic<T>>
+    pub fn as_dynamic<T>(&self) -> Dynamic<T>
     where
         T: DynamicValue + Trace,
     {
-        self.0.downcast_ref::<Custom<T>>().map(|cast| Dynamic(cast))
+        Dynamic(self.0.downcast_ref::<Custom<T>>())
     }
 
     #[must_use]
@@ -1076,17 +1086,6 @@ impl AnyDynamic {
         self.0
             .downcast_root::<Custom<T>>(guard)
             .map(|cast| Rooted(cast))
-    }
-
-    pub fn try_into_type<T>(self) -> Result<Dynamic<T>, Self>
-    where
-        T: DynamicValue + Trace,
-    {
-        let Some(cast) = self.0.downcast_ref::<Custom<T>>() else {
-            return Err(self);
-        };
-
-        Ok(Dynamic(cast))
     }
 
     #[must_use]
@@ -1128,7 +1127,7 @@ impl AnyDynamic {
     pub fn invoke(
         &self,
         vm: &mut VmContext<'_, '_>,
-        symbol: &Symbol,
+        symbol: &SymbolRef,
         arity: impl Into<Arity>,
     ) -> Result<Value, Fault> {
         (self
@@ -1357,7 +1356,7 @@ impl AnyDynamic {
             .negate)(self, vm)
     }
 
-    pub fn to_string(&self, vm: &mut VmContext<'_, '_>) -> Result<Symbol, Fault> {
+    pub fn to_string(&self, vm: &mut VmContext<'_, '_>) -> Result<SymbolRef, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
@@ -1673,7 +1672,7 @@ impl Type {
     #[must_use]
     pub fn with_invoke<Func>(mut self, func: impl FnOnce(InvokeFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Symbol, Arity) -> Result<Value, Fault>
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>, &SymbolRef, Arity) -> Result<Value, Fault>
             + Send
             + Sync
             + 'static,
@@ -1966,7 +1965,7 @@ impl Type {
     #[must_use]
     pub fn with_to_string<Func>(mut self, func: impl FnOnce(ToStringFn) -> Func) -> Self
     where
-        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>) -> Result<Symbol, Fault>
+        Func: Fn(&AnyDynamic, &mut VmContext<'_, '_>) -> Result<SymbolRef, Fault>
             + Send
             + Sync
             + 'static,
@@ -2414,7 +2413,7 @@ where
     #[must_use]
     pub fn with_invoke<Func>(mut self, func: impl FnOnce(InvokeFn) -> Func) -> Self
     where
-        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &Symbol, Arity) -> Result<Value, Fault>
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &SymbolRef, Arity) -> Result<Value, Fault>
             + Send
             + Sync
             + 'static,
@@ -2901,8 +2900,10 @@ where
     #[must_use]
     pub fn with_to_string<Func>(mut self, func: impl FnOnce(ToStringFn) -> Func) -> Self
     where
-        Func:
-            Fn(Rooted<T>, &mut VmContext<'_, '_>) -> Result<Symbol, Fault> + Send + Sync + 'static,
+        Func: Fn(Rooted<T>, &mut VmContext<'_, '_>) -> Result<SymbolRef, Fault>
+            + Send
+            + Sync
+            + 'static,
     {
         let func = func(self.t.vtable.to_string);
         self.t.vtable.to_string = Box::new(move |this, vm| {
@@ -3018,7 +3019,7 @@ pub type TotalCmpFn = Box<
     dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Ordering, Fault> + Send + Sync,
 >;
 pub type InvokeFn = Box<
-    dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Symbol, Arity) -> Result<Value, Fault>
+    dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>, &SymbolRef, Arity) -> Result<Value, Fault>
         + Send
         + Sync,
 >;
@@ -3026,7 +3027,7 @@ pub type DeepCloneFn =
     Box<dyn Fn(&AnyDynamic, &CollectionGuard) -> Option<AnyDynamic> + Send + Sync>;
 pub type TruthyFn = Box<dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>) -> bool + Send + Sync>;
 pub type ToStringFn =
-    Box<dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>) -> Result<Symbol, Fault> + Send + Sync>;
+    Box<dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>) -> Result<SymbolRef, Fault> + Send + Sync>;
 
 #[allow(clippy::type_complexity)]
 pub struct TypeVtable {
@@ -3166,7 +3167,7 @@ where
     pub fn invoke(
         &self,
         vm: &mut VmContext<'_, '_>,
-        name: &Symbol,
+        name: &SymbolRef,
         arity: Arity,
         this: &Rooted<T>,
     ) -> Result<Value, Fault> {

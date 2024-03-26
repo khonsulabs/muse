@@ -26,7 +26,7 @@ use crate::compiler::{BitcodeModule, BlockDeclaration, SourceMap, UnaryKind};
 use crate::exception::Exception;
 use crate::regex::MuseRegex;
 use crate::string::MuseString;
-use crate::symbol::{IntoOptionSymbol, Symbol};
+use crate::symbol::{IntoOptionSymbol, Symbol, SymbolRef};
 use crate::syntax::token::RegexLiteral;
 use crate::syntax::{BitwiseKind, CompareKind, SourceRange};
 use crate::value::{
@@ -142,7 +142,7 @@ impl Vm {
 
     pub fn invoke(
         &mut self,
-        name: &Symbol,
+        name: &SymbolRef,
         params: impl InvokeArgs,
         guard: &mut CollectionGuard,
     ) -> Result<Value, ExecutionError> {
@@ -161,7 +161,7 @@ impl Vm {
 
     #[must_use]
     pub fn register(&self, register: Register) -> Value {
-        self.memory.0.lock().expect("poisoned")[register].clone()
+        self.memory.0.lock().expect("poisoned")[register]
     }
 
     #[allow(clippy::must_use_candidate)]
@@ -174,7 +174,7 @@ impl Vm {
 
     #[must_use]
     pub fn stack(&self, index: usize) -> Value {
-        self.memory.0.lock().expect("poisoned")[index].clone()
+        self.memory.0.lock().expect("poisoned")[index]
     }
 
     #[must_use]
@@ -184,7 +184,7 @@ impl Vm {
 
     pub fn declare_variable(
         &self,
-        name: Symbol,
+        name: SymbolRef,
         mutable: bool,
         guard: &mut CollectionGuard<'_>,
     ) -> Result<Stack, Fault> {
@@ -193,7 +193,7 @@ impl Vm {
 
     pub fn declare(
         &self,
-        name: impl Into<Symbol>,
+        name: impl Into<SymbolRef>,
         value: Value,
         guard: &mut CollectionGuard<'_>,
     ) -> Result<Option<Value>, Fault> {
@@ -202,7 +202,7 @@ impl Vm {
 
     pub fn declare_mut(
         &self,
-        name: impl Into<Symbol>,
+        name: impl Into<SymbolRef>,
         value: Value,
         guard: &mut CollectionGuard<'_>,
     ) -> Result<Option<Value>, Fault> {
@@ -241,6 +241,12 @@ impl refuse::Trace for VmMemory {
             .filter_map(Value::as_any_dynamic)
         {
             tracer.mark(register.0);
+        }
+
+        for frame in &state.frames {
+            for key in frame.variables.keys() {
+                key.trace(tracer);
+            }
         }
     }
 }
@@ -358,7 +364,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
 
     pub fn invoke(
         &mut self,
-        name: &Symbol,
+        name: &SymbolRef,
         params: impl InvokeArgs,
     ) -> Result<Value, ExecutionError> {
         let arity = params.load(self)?;
@@ -370,8 +376,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         let function = module_declarations
             .get(name)
             .ok_or_else(|| ExecutionError::new(Fault::UnknownSymbol, self))?
-            .value
-            .clone();
+            .value;
         drop(module_declarations);
 
         let Some(function) = function.as_dynamic::<Function>() else {
@@ -504,7 +509,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         current_function.call(self, arity)
     }
 
-    pub fn declare_variable(&mut self, name: Symbol, mutable: bool) -> Result<Stack, Fault> {
+    pub fn declare_variable(&mut self, name: SymbolRef, mutable: bool) -> Result<Stack, Fault> {
         let vm = &mut *self.vm;
         let current_frame = &mut vm.frames[vm.current_frame];
         if current_frame.end < vm.max_stack {
@@ -527,7 +532,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
 
     pub fn declare(
         &mut self,
-        name: impl Into<Symbol>,
+        name: impl Into<SymbolRef>,
         value: Value,
     ) -> Result<Option<Value>, Fault> {
         self.declare_inner(name, value, false)
@@ -535,7 +540,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
 
     pub fn declare_mut(
         &mut self,
-        name: impl Into<Symbol>,
+        name: impl Into<SymbolRef>,
         value: Value,
     ) -> Result<Option<Value>, Fault> {
         self.declare_inner(name, value, true)
@@ -543,7 +548,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
 
     fn declare_inner(
         &mut self,
-        name: impl Into<Symbol>,
+        name: impl Into<SymbolRef>,
         value: Value,
         mutable: bool,
     ) -> Result<Option<Value>, Fault> {
@@ -589,7 +594,10 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
                     let name = Symbol::from(name);
                     if path.peek().is_some() {
                         let declarations = module.declarations();
-                        let value = &declarations.get(&name).ok_or(Fault::UnknownSymbol)?.value;
+                        let value = &declarations
+                            .get(&name.downgrade())
+                            .ok_or(Fault::UnknownSymbol)?
+                            .value;
                         let Some(inner) = value.as_dynamic::<Module>() else {
                             return Err(Fault::MissingModule);
                         };
@@ -605,26 +613,25 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
                 Ok(module_dynamic
                     .try_load(self.guard)?
                     .declarations()
-                    .get(&name)
+                    .get(&name.downgrade())
                     .ok_or(Fault::UnknownSymbol)?
-                    .value
-                    .clone())
+                    .value)
             };
         }
 
         let current_frame = &self.frames[self.current_frame];
-        if let Some(decl) = current_frame.variables.get(name) {
+        if let Some(decl) = current_frame.variables.get(&name.downgrade()) {
             self.current_frame()
                 .get(decl.stack.0)
-                .cloned()
+                .copied()
                 .ok_or(Fault::OutOfBounds)
         } else {
             let module =
                 self.modules[self.frames[self.current_frame].module].try_load(self.guard)?;
             if let Some(value) = module
                 .declarations()
-                .get(name)
-                .map(|decl| decl.value.clone())
+                .get(&name.downgrade())
+                .map(|decl| decl.value)
             {
                 Ok(value)
             } else if name == Symbol::super_symbol() {
@@ -639,7 +646,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         }
     }
 
-    pub fn assign(&mut self, name: &Symbol, value: Value) -> Result<(), Fault> {
+    pub fn assign(&mut self, name: &SymbolRef, value: Value) -> Result<(), Fault> {
         let vm = &mut *self.vm;
         let current_frame = &mut vm.frames[vm.current_frame];
         if let Some(decl) = current_frame.variables.get_mut(name) {
@@ -939,7 +946,7 @@ impl VmContext<'_, '_> {
             Ordering::Equal => return Ok(StepResult::Complete),
             Ordering::Greater => return Err(Fault::InvalidInstructionAddress),
         };
-        println!("Executing {instruction:?}");
+        // println!("Executing {instruction:?}");
         let next_instruction = StepResult::from(address.checked_add(1));
         let result = match instruction {
             LoadedOp::Return => return Ok(StepResult::Complete),
@@ -1183,7 +1190,7 @@ impl VmContext<'_, '_> {
             .cloned()
             .ok_or(Fault::InvalidOpcode)?;
 
-        self.op_store(code_index, &value, dest)?;
+        self.op_store(code_index, value, dest)?;
         self.declare_inner(name, value, mutable)?;
         Ok(())
     }
@@ -1248,7 +1255,7 @@ impl VmContext<'_, '_> {
         value: LoadedSource,
         dest: OpDestination,
     ) -> Result<(), Fault> {
-        let Value::Symbol(name) = self.op_load(code_index, value)? else {
+        let Some(name) = self.op_load(code_index, value)?.as_symbol(self.guard) else {
             return Err(Fault::ExpectedSymbol);
         };
 
@@ -1293,7 +1300,7 @@ impl VmContext<'_, '_> {
             return Err(Fault::InvalidArity);
         };
 
-        self[Register(0)] = target.invoke(self, &name, arity)?;
+        self[Register(0)] = target.invoke(self, &name.downgrade(), arity)?;
 
         Ok(())
     }
@@ -1337,11 +1344,11 @@ impl VmContext<'_, '_> {
             self.op_load(code_index, target),
             self.op_load(code_index, value)
         );
-        let Some(target) = target.as_symbol() else {
+        let Some(target) = target.as_symbol_ref() else {
             return Err(Fault::ExpectedSymbol);
         };
 
-        self.op_store(code_index, &value, dest)?;
+        self.op_store(code_index, value, dest)?;
         self.assign(target, value)
     }
 
@@ -1433,12 +1440,14 @@ impl VmContext<'_, '_> {
             LoadedSource::Int(v) => Ok(Value::Int(v)),
             LoadedSource::UInt(v) => Ok(Value::UInt(v)),
             LoadedSource::Float(v) => Ok(Value::Float(v)),
-            LoadedSource::Symbol(v) => self.op_load_symbol(code_index, v).map(Value::Symbol),
-            LoadedSource::Register(v) => Ok(self[v].clone()),
+            LoadedSource::Symbol(v) => self
+                .op_load_symbol(code_index, v)
+                .map(|s| Value::Symbol(s.downgrade())),
+            LoadedSource::Register(v) => Ok(self[v]),
             LoadedSource::Stack(v) => self
                 .current_frame()
                 .get(v.0)
-                .cloned()
+                .copied()
                 .ok_or(Fault::InvalidOpcode),
             LoadedSource::Label(v) => self.code[code_index]
                 .code
@@ -1518,7 +1527,7 @@ enum MaybeOwnedValue<'a> {
 impl MaybeOwnedValue<'_> {
     fn into_owned(self) -> Value {
         match self {
-            MaybeOwnedValue::Ref(value) => value.clone(),
+            MaybeOwnedValue::Ref(value) => *value,
             MaybeOwnedValue::Owned(value) => value,
         }
     }
@@ -1580,7 +1589,7 @@ struct Frame {
     end: usize,
     instruction: usize,
     code: Option<CodeIndex>,
-    variables: Map<Symbol, BlockDeclaration>,
+    variables: Map<SymbolRef, BlockDeclaration>,
     module: usize,
     loading_module: Option<NonZeroUsize>,
     exception_handler: Option<NonZeroUsize>,
@@ -1679,7 +1688,7 @@ impl Fault {
             Fault::Timeout => Symbol::from("timeout").into(),
             Fault::Waiting => Symbol::from("waiting").into(),
             Fault::FrameChanged => Symbol::from("frame_changed").into(),
-            Fault::Exception(value) => return value.clone(),
+            Fault::Exception(value) => return *value,
             Fault::PatternMismatch => Symbol::from("mismatch").into(),
         };
         Value::dynamic(Exception::new(exception, vm), vm)
@@ -2059,7 +2068,7 @@ impl From<Option<usize>> for StepResult {
 #[derive(Default, Debug)]
 pub struct Module {
     parent: Option<Dynamic<Module>>,
-    declarations: Mutex<Map<Symbol, ModuleDeclaration>>,
+    declarations: Mutex<Map<SymbolRef, ModuleDeclaration>>,
 }
 
 impl Module {
@@ -2077,7 +2086,7 @@ impl Module {
             .expect("guard held")
             .declarations()
             .insert(
-                Symbol::from("core"),
+                SymbolRef::from("core"),
                 ModuleDeclaration {
                     mutable: false,
                     value: Value::dynamic(core, guard),
@@ -2092,21 +2101,21 @@ impl Module {
 
         let mut declarations = core.declarations();
         declarations.insert(
-            Symbol::from("Map"),
+            SymbolRef::from("Map"),
             ModuleDeclaration {
                 mutable: false,
                 value: Value::Dynamic(crate::map::MAP_TYPE.as_any_dynamic()),
             },
         );
         declarations.insert(
-            Symbol::from("List"),
+            SymbolRef::from("List"),
             ModuleDeclaration {
                 mutable: false,
                 value: Value::Dynamic(crate::list::LIST_TYPE.as_any_dynamic()),
             },
         );
         declarations.insert(
-            Symbol::from("String"),
+            SymbolRef::from("String"),
             ModuleDeclaration {
                 mutable: false,
                 value: Value::Dynamic(crate::string::STRING_TYPE.as_any_dynamic()),
@@ -2117,7 +2126,7 @@ impl Module {
         core
     }
 
-    fn declarations(&self) -> MutexGuard<'_, Map<Symbol, ModuleDeclaration>> {
+    fn declarations(&self) -> MutexGuard<'_, Map<SymbolRef, ModuleDeclaration>> {
         self.declarations.lock().expect("poisoned")
     }
 }
@@ -2132,7 +2141,7 @@ impl CustomType for Module {
                             table
                                 .with_fn(Symbol::set_symbol(), 2, |vm, this| {
                                     let field = vm[Register(0)].take();
-                                    let sym = field.as_symbol().ok_or(Fault::ExpectedSymbol)?;
+                                    let sym = field.as_symbol_ref().ok_or(Fault::ExpectedSymbol)?;
                                     let value = vm[Register(1)].take();
 
                                     match this.declarations().get_mut(sym) {
@@ -2145,17 +2154,17 @@ impl CustomType for Module {
                                 })
                                 .with_fn(Symbol::get_symbol(), 1, |vm, this| {
                                     let field = vm[Register(0)].take();
-                                    let sym = field.as_symbol().ok_or(Fault::ExpectedSymbol)?;
+                                    let sym = field.as_symbol_ref().ok_or(Fault::ExpectedSymbol)?;
 
                                     this.declarations()
                                         .get(sym)
-                                        .map(|decl| decl.value.clone())
+                                        .map(|decl| decl.value)
                                         .ok_or(Fault::UnknownSymbol)
                                 })
                         });
                     let declarations = this.declarations();
                     if let Some(decl) = declarations.get(name) {
-                        let possible_invoke = decl.value.clone();
+                        let possible_invoke = decl.value;
                         drop(declarations);
                         possible_invoke.call(vm, arity)
                     } else {
@@ -2401,7 +2410,7 @@ impl<const N: usize> InvokeArgs for [Value; N] {
             .map_err(|_| ExecutionError::Exception(Fault::InvalidArity.as_exception(vm)))?;
 
         for (arg, register) in self.iter().zip(0..arity.0) {
-            vm[Register(register)] = arg.clone();
+            vm[Register(register)] = *arg;
         }
 
         Ok(arity)

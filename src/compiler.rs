@@ -136,7 +136,7 @@ impl Compiler {
     pub fn expand_macros(&mut self, expr: &mut Ranged<Expression>) {
         match &mut expr.0 {
             Expression::Macro(e) => {
-                if let Some(m) = self.macros.get_mut(&e.name) {
+                if let Some(m) = self.macros.get_mut(&e.name.0) {
                     let tokens = std::mem::take(&mut e.tokens);
                     let tokens = m.0.transform(tokens);
                     *expr = self.parse_macro_expansion(tokens);
@@ -146,7 +146,7 @@ impl Compiler {
                 }
             }
             Expression::InfixMacro(e) => {
-                if let Some(m) = self.infix_macros.get_mut(&e.invocation.name) {
+                if let Some(m) = self.infix_macros.get_mut(&e.invocation.name.0) {
                     let tokens = std::mem::take(&mut e.invocation.tokens);
                     let tokens = m.0.transform(&e.subject, tokens);
                     *expr = self.parse_macro_expansion(tokens);
@@ -547,7 +547,7 @@ impl<'a> Scope<'a> {
                     if let Some(label) = after_label {
                         self.compiler.code.label(label);
                     }
-                } else if let Some(var) = self.compiler.declarations.get(&lookup.name) {
+                } else if let Some(var) = self.compiler.declarations.get(&lookup.name.0) {
                     self.compiler.code.copy(var.stack, dest);
                 } else {
                     self.compiler.code.resolve(lookup.name.0.clone(), dest);
@@ -638,7 +638,7 @@ impl<'a> Scope<'a> {
                             .code
                             .invoke(target_source, Symbol::set_symbol().clone(), 2);
                         self.compiler.code.copy(Register(0), dest);
-                    } else if let Some(var) = self.compiler.declarations.get(&target.name) {
+                    } else if let Some(var) = self.compiler.declarations.get(&target.name.0) {
                         if var.mutable {
                             let var = var.stack;
                             self.compile_expression(&assign.value, OpDestination::Stack(var));
@@ -2049,7 +2049,7 @@ impl<'a> Scope<'a> {
                 Literal::Symbol(symbol) => ValueOrSource::Symbol(symbol.clone()),
             },
             Expression::Lookup(lookup) => {
-                if let Some(decl) = self.compiler.declarations.get(&lookup.name) {
+                if let Some(decl) = self.compiler.declarations.get(&lookup.name.0) {
                     ValueOrSource::Stack(decl.stack)
                 } else {
                     ValueOrSource::Stack(self.compile_expression_into_temporary(source))

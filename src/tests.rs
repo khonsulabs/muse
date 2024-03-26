@@ -4,7 +4,7 @@ use refuse::CollectionGuard;
 
 use crate::compiler::Compiler;
 use crate::exception::Exception;
-use crate::symbol::Symbol;
+use crate::symbol::{Symbol, SymbolRef};
 use crate::syntax::token::{Paired, Token};
 use crate::syntax::{Expression, Ranged, SourceCode, SourceRange};
 use crate::value::Value;
@@ -101,14 +101,14 @@ fn invoke() {
     vm.execute(&code, &mut guard).unwrap();
 
     let Value::Int(result) = vm
-        .invoke(&Symbol::from("test"), [Value::Int(3)], &mut guard)
+        .invoke(&SymbolRef::from("test"), [Value::Int(3)], &mut guard)
         .unwrap()
     else {
         unreachable!()
     };
     assert_eq!(result, 6);
     let ExecutionError::Exception(exception) = vm
-        .invoke(&Symbol::from("private"), [Value::Int(3)], &mut guard)
+        .invoke(&SymbolRef::from("private"), [Value::Int(3)], &mut guard)
         .unwrap_err()
     else {
         unreachable!()
@@ -118,9 +118,9 @@ fn invoke() {
             .as_downcast_ref::<Exception>(&guard)
             .expect("exception")
             .value()
-            .as_symbol()
+            .as_symbol(&guard)
             .expect("symbol"),
-        &Symbol::from("undefined"),
+        Symbol::from("undefined"),
     );
 }
 

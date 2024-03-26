@@ -32,14 +32,13 @@ pub static MAP_TYPE: RustType<Map> = RustType::new("Map", |t| {
                     table
                         .with_fn(Symbol::set_symbol(), 1, |vm, this| {
                             let key = vm[Register(0)].take();
-                            let value = key.clone();
-                            this.insert(vm, key, value.clone())?;
-                            Ok(value)
+                            this.insert(vm, key, key)?;
+                            Ok(key)
                         })
                         .with_fn(Symbol::set_symbol(), 2, |vm, this| {
                             let key = vm[Register(0)].take();
                             let value = vm[Register(1)].take();
-                            this.insert(vm, key, value.clone())?;
+                            this.insert(vm, key, value)?;
                             Ok(value)
                         })
                         .with_fn(Symbol::get_symbol(), 1, |vm, this| {
@@ -100,7 +99,7 @@ impl Map {
                 Ordering::Less => continue,
                 Ordering::Equal => {
                     if key.equals(ContextOrGuard::Context(vm), &field.key.value)? {
-                        return Ok(Some(field.value.clone()));
+                        return Ok(Some(field.value));
                     }
                 }
                 Ordering::Greater => break,
@@ -117,12 +116,7 @@ impl Map {
         let contents = self.0.lock().expect("poisoned");
         contents
             .get(index)
-            .map(|field| {
-                Value::dynamic(
-                    List::from_iter([field.key.value.clone(), field.value.clone()]),
-                    guard,
-                )
-            })
+            .map(|field| Value::dynamic(List::from_iter([field.key.value, field.value]), guard))
             .ok_or(Fault::OutOfBounds)
     }
 
