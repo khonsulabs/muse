@@ -5,7 +5,7 @@ use std::hash::Hash;
 use std::num::{NonZeroUsize, TryFromIntError};
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::task::{Poll, Wake, Waker};
 use std::time::{Duration, Instant};
 use std::{array, task};
@@ -14,6 +14,7 @@ use ahash::AHashMap;
 use crossbeam_utils::sync::{Parker, Unparker};
 use kempt::map::Entry;
 use kempt::Map;
+use parking_lot::{Mutex, MutexGuard};
 use refuse::{CollectionGuard, ContainsNoRefs, NoMapping, Root, Trace};
 use serde::{Deserialize, Serialize};
 
@@ -31,7 +32,7 @@ use crate::syntax::token::RegexLiteral;
 use crate::syntax::{BitwiseKind, CompareKind, SourceRange};
 #[cfg(not(feature = "dispatched"))]
 use crate::value::ContextOrGuard;
-use crate::value::{AnyDynamic, CustomType, Dynamic, RustType, StaticRustFunctionTable, Value};
+use crate::value::{CustomType, Dynamic, Rooted, RustType, StaticRustFunctionTable, Value};
 
 pub mod bitcode;
 
@@ -73,6 +74,8 @@ impl Vm {
                     has_anonymous_frame: false,
                     max_stack: usize::MAX,
                     max_depth: usize::MAX,
+                    counter: 16,
+                    steps_per_charge: 16,
                     budget: Budget::default(),
                     execute_until: None,
                     modules: vec![Module::with_core(guard)],
@@ -127,21 +130,16 @@ impl Vm {
         self.context(guard).resume_async()
     }
 
-    pub fn increase_budget(&mut self, amount: usize) {
-        self.memory
-            .0
-            .lock()
-            .expect("poisoned")
-            .budget
-            .allocate(amount);
+    pub fn increase_budget(&self, amount: usize) {
+        self.memory.0.lock().budget.allocate(amount);
     }
 
-    pub fn resume(&mut self, guard: &mut CollectionGuard) -> Result<Value, ExecutionError> {
+    pub fn resume(&self, guard: &mut CollectionGuard) -> Result<Value, ExecutionError> {
         self.context(guard).resume()
     }
 
     pub fn invoke(
-        &mut self,
+        &self,
         name: &SymbolRef,
         params: impl InvokeArgs,
         guard: &mut CollectionGuard,
@@ -155,31 +153,32 @@ impl Vm {
     ) -> VmContext<'context, 'guard> {
         VmContext {
             guard,
-            vm: self.memory.0.lock().expect("poisoned"),
+            vm: self.memory.0.lock(),
         }
+    }
+
+    pub fn set_steps_per_charge(&self, steps: u16) {
+        self.memory.0.lock().set_steps_per_charge(steps);
     }
 
     #[must_use]
     pub fn register(&self, register: Register) -> Value {
-        self.memory.0.lock().expect("poisoned")[register]
+        self.memory.0.lock()[register]
     }
 
     #[allow(clippy::must_use_candidate)]
     pub fn set_register(&self, register: Register, value: Value) -> Value {
-        std::mem::replace(
-            &mut self.memory.0.lock().expect("poisoned")[register],
-            value,
-        )
+        std::mem::replace(&mut self.memory.0.lock()[register], value)
     }
 
     #[must_use]
     pub fn stack(&self, index: usize) -> Value {
-        self.memory.0.lock().expect("poisoned")[index]
+        self.memory.0.lock()[index]
     }
 
     #[must_use]
     pub fn set_stack(&self, index: usize, value: Value) -> Value {
-        std::mem::replace(&mut self.memory.0.lock().expect("poisoned")[index], value)
+        std::mem::replace(&mut self.memory.0.lock()[index], value)
     }
 
     pub fn declare_variable(
@@ -221,7 +220,7 @@ impl Vm {
 #[derive(Clone)]
 struct RegisteredCode {
     code: Code,
-    owner: Option<AnyDynamic>,
+    owner: Option<Rooted<Function>>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -233,7 +232,7 @@ impl refuse::Trace for VmMemory {
     const MAY_CONTAIN_REFERENCES: bool = true;
 
     fn trace(&self, tracer: &mut refuse::Tracer) {
-        let state = self.0.lock().expect("poisoned");
+        let state = self.0.lock();
         for register in state
             .registers
             .iter()
@@ -248,6 +247,10 @@ impl refuse::Trace for VmMemory {
                 key.trace(tracer);
             }
         }
+
+        for module in &state.modules {
+            tracer.mark(*module);
+        }
     }
 }
 
@@ -261,6 +264,8 @@ pub struct VmState {
     current_frame: usize,
     has_anonymous_frame: bool,
     max_depth: usize,
+    counter: u16,
+    steps_per_charge: u16,
     budget: Budget,
     execute_until: Option<Instant>,
     modules: Vec<Dynamic<Module>>,
@@ -270,16 +275,23 @@ pub struct VmState {
     code_map: Map<usize, CodeIndex>,
 }
 
+impl VmState {
+    pub fn set_steps_per_charge(&mut self, steps: u16) {
+        self.steps_per_charge = steps;
+        self.counter = self.counter.min(steps);
+    }
+}
+
 impl<'context, 'guard> VmContext<'context, 'guard> {
-    fn push_code(&mut self, code: &Code, owner: Option<AnyDynamic>) -> CodeIndex {
-        let vm = &mut *self.vm;
+    fn push_code(&mut self, code: &Code, owner: Option<&Rooted<Function>>) -> CodeIndex {
+        let vm = self.vm();
         *vm.code_map
             .entry(Arc::as_ptr(&code.data) as usize)
             .or_insert_with(|| {
                 let index = CodeIndex(vm.code.len());
                 vm.code.push(RegisteredCode {
                     code: code.clone(),
-                    owner,
+                    owner: owner.cloned(),
                 });
                 index
             })
@@ -314,7 +326,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
     }
 
     fn prepare_owned(&mut self, code: CodeIndex) -> Result<(), ExecutionError> {
-        let vm = &mut *self.vm;
+        let vm = self.vm();
         vm.frames[vm.current_frame].code = Some(code);
         vm.frames[vm.current_frame].instruction = 0;
 
@@ -405,7 +417,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
             .code
             .clone();
         loop {
-            self.budget.charge()?;
+            self.budget_and_yield()?;
             let instruction = self.frames[code_frame].instruction;
             match self.step(&code, instruction) {
                 Ok(StepResult::Complete) if code_frame >= base_frame && code_frame > 0 => {
@@ -486,12 +498,12 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
     fn execute_function(
         &mut self,
         body: &Code,
-        function: AnyDynamic,
+        function: &Rooted<Function>,
         module: usize,
     ) -> Result<Value, Fault> {
         let body_index = self.push_code(body, Some(function));
         self.enter_frame(Some(body_index))?;
-        let vm = &mut *self.vm;
+        let vm = self.vm();
         vm.frames[vm.current_frame].module = module;
 
         self.allocate(body.data.stack_requirement)?;
@@ -505,12 +517,14 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
             .expect("missing function")
             .0]
             .owner
+            .as_ref()
+            .map(Rooted::as_any_dynamic)
             .ok_or(Fault::NotAFunction)?;
         current_function.call(self, arity)
     }
 
     pub fn declare_variable(&mut self, name: SymbolRef, mutable: bool) -> Result<Stack, Fault> {
-        let vm = &mut *self.vm;
+        let vm = self.vm();
         let current_frame = &mut vm.frames[vm.current_frame];
         if current_frame.end < vm.max_stack {
             Ok(current_frame
@@ -676,7 +690,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
     }
 
     fn enter_frame(&mut self, code: Option<CodeIndex>) -> Result<(), Fault> {
-        let vm = &mut *self.vm;
+        let vm = self.vm();
         if vm.current_frame < vm.max_depth {
             let current_frame_end = vm.frames[vm.current_frame].end;
             let current_frame_module = vm.frames[vm.current_frame].module;
@@ -708,7 +722,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
     }
 
     pub fn exit_frame(&mut self) -> Result<(), Fault> {
-        let vm = &mut *self.vm;
+        let vm = self.vm();
         if vm.current_frame >= 1 {
             vm.has_anonymous_frame = false;
             let current_frame = &vm.frames[vm.current_frame];
@@ -721,7 +735,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
     }
 
     pub fn allocate(&mut self, count: usize) -> Result<Stack, Fault> {
-        let vm = &mut *self.vm;
+        let vm = self.vm();
         let current_frame = &mut vm.frames[vm.current_frame];
         let index = Stack(current_frame.end - current_frame.start);
         match current_frame.end.checked_add(count) {
@@ -749,7 +763,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
     }
 
     pub fn jump_to(&mut self, instruction: usize) {
-        let vm = &mut *self.vm;
+        let vm = self.vm();
         vm.frames[vm.current_frame].instruction = instruction;
     }
 
@@ -760,7 +774,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
 
     #[must_use]
     pub fn current_frame_mut(&mut self) -> &mut [Value] {
-        let vm = &mut *self.vm;
+        let vm = self.vm();
         &mut vm.stack[vm.frames[vm.current_frame].start..vm.frames[vm.current_frame].end]
     }
 
@@ -798,7 +812,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         while self.current_frame >= base_frame {
             if let Some(exception_target) = self.frames[self.current_frame].exception_handler {
                 self[Register(0)] = err.as_exception(self);
-                let vm = &mut *self.vm;
+                let vm = self.vm();
                 vm.frames[vm.current_frame].instruction = exception_target.get();
                 handled = true;
                 break;
@@ -856,7 +870,7 @@ impl<'a, 'guard> VmContext<'a, 'guard> {
     pub fn new(vm: &'a Vm, guard: &'a mut CollectionGuard<'guard>) -> Self {
         Self {
             guard,
-            vm: vm.memory.0.lock().expect("poisoned"),
+            vm: vm.memory.0.lock(),
         }
     }
 
@@ -868,6 +882,24 @@ impl<'a, 'guard> VmContext<'a, 'guard> {
     #[must_use]
     pub fn guard(&self) -> &CollectionGuard<'guard> {
         self.guard
+    }
+
+    pub fn vm(&mut self) -> &mut VmState {
+        &mut self.vm
+    }
+
+    fn budget_and_yield(&mut self) -> Result<(), Fault> {
+        let next_count = self.counter - 1;
+        if next_count > 0 {
+            self.counter = next_count;
+            Ok(())
+        } else {
+            self.counter = self.steps_per_charge;
+            self.budget.charge()?;
+            self.guard
+                .coordinated_yield(|yielder| MutexGuard::unlocked(&mut self.vm, || yielder.wait()));
+            self.check_timeout()
+        }
     }
 }
 
@@ -887,7 +919,7 @@ impl Deref for VmContext<'_, '_> {
 
 impl DerefMut for VmContext<'_, '_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.vm
+        self.vm()
     }
 }
 
@@ -900,7 +932,7 @@ impl VmContext<'_, '_> {
         let mut code_frame = self.current_frame;
         let mut code = self.frames[code_frame].code.expect("missing frame code");
         loop {
-            self.budget.charge()?;
+            self.budget_and_yield()?;
             let instruction = self.frames[code_frame].instruction;
             match self.step(code.0, instruction) {
                 Ok(StepResult::Complete) if code_frame >= base_frame && code_frame > 0 => {
@@ -923,7 +955,6 @@ impl VmContext<'_, '_> {
             }
 
             if code_frame != self.current_frame {
-                self.check_timeout()?;
                 code_frame = self.current_frame;
                 code = self.frames[self.current_frame]
                     .code
@@ -1411,7 +1442,7 @@ impl VmContext<'_, '_> {
             .as_usize()
             .and_then(NonZeroUsize::new);
 
-        let vm = &mut *self.vm;
+        let vm = self.vm();
         let previous_handler_address =
             std::mem::replace(&mut vm.frames[vm.current_frame].exception_handler, handler);
         self.op_store(
@@ -1606,7 +1637,7 @@ impl Frame {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Trace)]
 pub enum ExecutionError {
     NoBudget,
     Waiting,
@@ -1755,7 +1786,7 @@ impl CustomType for Function {
                             .find_map(|va| (va.key() <= &arity).then_some(&va.value))
                     }) {
                         let module = this.module.ok_or(Fault::MissingModule)?;
-                        vm.execute_function(body, this.as_any_dynamic(), module)
+                        vm.execute_function(body, &this, module)
                     } else {
                         Err(Fault::IncorrectNumberOfArguments)
                     }
@@ -2131,7 +2162,7 @@ impl Module {
     }
 
     fn declarations(&self) -> MutexGuard<'_, Map<SymbolRef, ModuleDeclaration>> {
-        self.declarations.lock().expect("poisoned")
+        self.declarations.lock()
     }
 }
 

@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
-use std::sync::Mutex;
 
+use parking_lot::Mutex;
 use refuse::{CollectionGuard, Trace};
 
 use crate::list::List;
@@ -50,7 +50,7 @@ pub static MAP_TYPE: RustType<Map> = RustType::new("Map", |t| {
                             this.nth(&index, vm.as_ref())
                         })
                         .with_fn(Symbol::len_symbol(), 0, |_vm, this| {
-                            let contents = this.0.lock().expect("poisoned");
+                            let contents = this.0.lock();
                             Value::try_from(contents.len())
                         })
                 });
@@ -63,7 +63,7 @@ impl Trace for Map {
     const MAY_CONTAIN_REFERENCES: bool = true;
 
     fn trace(&self, tracer: &mut refuse::Tracer) {
-        for field in &*self.0.lock().expect("poisoned") {
+        for field in &*self.0.lock() {
             field.key.value.trace(tracer);
             field.value.trace(tracer);
         }
@@ -93,7 +93,7 @@ impl Map {
 
     pub fn get(&self, vm: &mut VmContext<'_, '_>, key: &Value) -> Result<Option<Value>, Fault> {
         let hash = key.hash(vm);
-        let contents = self.0.lock().expect("poisoned");
+        let contents = self.0.lock();
         for field in &*contents {
             match hash.cmp(&field.key.hash) {
                 Ordering::Less => continue,
@@ -113,7 +113,7 @@ impl Map {
         let Some(index) = index.as_usize() else {
             return Err(Fault::OutOfBounds);
         };
-        let contents = self.0.lock().expect("poisoned");
+        let contents = self.0.lock();
         contents
             .get(index)
             .map(|field| Value::dynamic(List::from_iter([field.key.value, field.value]), guard))
@@ -127,7 +127,7 @@ impl Map {
         value: Value,
     ) -> Result<Option<Value>, Fault> {
         let key = MapKey::new(vm, key);
-        let mut contents = self.0.lock().expect("poisoned");
+        let mut contents = self.0.lock();
         let mut insert_at = contents.len();
         for (index, field) in contents.iter_mut().enumerate() {
             match key.hash.cmp(&field.key.hash) {
@@ -153,7 +153,7 @@ impl Map {
     }
 
     pub fn to_vec(&self) -> Vec<Field> {
-        self.0.lock().expect("poisoned").clone()
+        self.0.lock().clone()
     }
 }
 

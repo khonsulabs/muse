@@ -21,8 +21,9 @@ fn budgeting() {
         code.copy(value, Register(0));
     }
     let code = code.to_code(&guard);
-    let mut vm = Vm::new(&guard);
+    let vm = Vm::new(&guard);
     // Turn on budgeting, but don't give any budget.
+    vm.set_steps_per_charge(1);
     vm.increase_budget(0);
     assert_eq!(
         vm.execute(&code, &mut guard).unwrap_err(),
@@ -59,8 +60,9 @@ fn module_budgeting() {
         &guard,
     )
     .unwrap();
-    let mut vm = Vm::new(&guard);
+    let vm = Vm::new(&guard);
     // Turn on budgeting, but don't give any budget.
+    vm.set_steps_per_charge(1);
     vm.increase_budget(0);
     assert_eq!(
         vm.execute(&code, &mut guard).unwrap_err(),
@@ -97,7 +99,7 @@ fn invoke() {
         &guard,
     )
     .unwrap();
-    let mut vm = Vm::new(&guard);
+    let vm = Vm::new(&guard);
     vm.execute(&code, &mut guard).unwrap();
 
     let Value::Int(result) = vm

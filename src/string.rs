@@ -1,7 +1,7 @@
 use std::fmt::Display;
 use std::hash::Hash;
-use std::sync::{Mutex, MutexGuard};
 
+use parking_lot::{Mutex, MutexGuard};
 use refuse::ContainsNoRefs;
 
 use crate::list::List;
@@ -17,7 +17,7 @@ pub struct MuseString(Mutex<String>);
 
 impl MuseString {
     pub(crate) fn lock(&self) -> MutexGuard<'_, String> {
-        self.0.lock().expect("poisoned")
+        self.0.lock()
     }
 }
 
@@ -75,15 +75,15 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
     })
     .with_hash(|_| {
         |this, _vm, hasher| {
-            this.0.lock().expect("poisoned").hash(hasher);
+            this.0.lock().hash(hasher);
         }
     })
     .with_eq(|_| {
         |this, vm, rhs| {
             if let Some(rhs) = rhs.as_downcast_ref::<MuseString>(vm.as_ref()) {
-                Ok(*this.0.lock().expect("poisoned") == *rhs.0.lock().expect("poisoned"))
+                Ok(*this.0.lock() == *rhs.0.lock())
             } else if let Some(rhs) = rhs.as_symbol(vm.as_ref()) {
-                Ok(*this.0.lock().expect("poisoned") == *rhs)
+                Ok(*this.0.lock() == *rhs)
             } else {
                 Ok(false)
             }
@@ -92,11 +92,7 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
     .with_total_cmp(|_| {
         |this, vm, rhs| {
             if let Some(rhs) = rhs.as_downcast_ref::<MuseString>(vm.as_ref()) {
-                Ok(this
-                    .0
-                    .lock()
-                    .expect("poisoned")
-                    .cmp(&rhs.0.lock().expect("poisoned")))
+                Ok(this.0.lock().cmp(&rhs.0.lock()))
             } else if rhs.as_any_dynamic().is_none() {
                 // Dynamics sort after primitive values
                 Ok(std::cmp::Ordering::Greater)
@@ -114,7 +110,7 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
                             Symbol::len_symbol(),
                             0,
                             |_vm: &mut VmContext<'_, '_>, this: &Rooted<MuseString>| {
-                                Value::try_from(this.0.lock().expect("poisoned").len())
+                                Value::try_from(this.0.lock().len())
                             },
                         )
                         .with_fn(
@@ -169,7 +165,7 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
     })
     .with_add(|_| {
         |this, vm, rhs| {
-            let lhs = this.0.lock().expect("poisoned");
+            let lhs = this.0.lock();
             if let Some(rhs) = rhs.as_downcast_ref::<MuseString>(vm.as_ref()) {
                 if std::ptr::eq(&this.0, &rhs.0) {
                     let mut repeated =
@@ -178,7 +174,7 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
                     repeated.push_str(&lhs);
                     Ok(Value::dynamic(MuseString::from(repeated), vm))
                 } else {
-                    let rhs = rhs.0.lock().expect("poisoned");
+                    let rhs = rhs.0.lock();
                     let mut combined = String::with_capacity(lhs.len() + rhs.len());
                     combined.push_str(&lhs);
                     combined.push_str(&rhs);
@@ -196,7 +192,7 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
     .with_add_right(|_| {
         |this, vm, lhs| {
             let lhs = lhs.to_string(vm)?.try_upgrade(vm.guard())?;
-            let rhs = this.0.lock().expect("poisoned");
+            let rhs = this.0.lock();
             let mut combined = String::with_capacity(rhs.len() + lhs.len());
             combined.push_str(&lhs);
             combined.push_str(&rhs);
@@ -208,7 +204,7 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
             let Some(times) = rhs.as_usize() else {
                 return Err(Fault::ExpectedInteger);
             };
-            let this = this.0.lock().expect("poisoned");
+            let this = this.0.lock();
 
             Ok(Value::dynamic(MuseString::from(this.repeat(times)), vm))
         }
@@ -218,17 +214,17 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
             let Some(times) = lhs.as_usize() else {
                 return Err(Fault::ExpectedInteger);
             };
-            let this = this.0.lock().expect("poisoned");
+            let this = this.0.lock();
 
             Ok(Value::dynamic(MuseString::from(this.repeat(times)), vm))
         }
     })
-    .with_truthy(|_| |this, _vm| !this.0.lock().expect("poisoned").is_empty())
-    .with_to_string(|_| |this, _vm| Ok(SymbolRef::from(&*this.0.lock().expect("poisoned"))))
+    .with_truthy(|_| |this, _vm| !this.0.lock().is_empty())
+    .with_to_string(|_| |this, _vm| Ok(SymbolRef::from(&*this.0.lock())))
     .with_deep_clone(|_| {
         |this, guard| {
             Some(AnyDynamic::new(
-                MuseString(Mutex::new(this.0.lock().expect("poisoned").clone())),
+                MuseString(Mutex::new(this.0.lock().clone())),
                 guard,
             ))
         }
@@ -244,6 +240,6 @@ impl CustomType for MuseString {
 
 impl Display for MuseString {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.lock().expect("poisioned").fmt(f)
+        self.0.lock().fmt(f)
     }
 }

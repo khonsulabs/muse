@@ -36,7 +36,7 @@ impl SymbolRef {
 
 impl kempt::Sort<SymbolRef> for Symbol {
     fn compare(&self, other: &SymbolRef) -> std::cmp::Ordering {
-        self.0.as_any().cmp(&other.0.as_any())
+        self.0.downgrade_any().cmp(&other.0.as_any())
     }
 }
 

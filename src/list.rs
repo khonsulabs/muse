@@ -1,5 +1,4 @@
-use std::sync::Mutex;
-
+use parking_lot::Mutex;
 use refuse::Trace;
 
 use crate::symbol::Symbol;
@@ -28,7 +27,7 @@ pub static LIST_TYPE: RustType<List> = RustType::new("List", |t| {
                             Symbol::len_symbol(),
                             0,
                             |_vm: &mut VmContext<'_, '_>, this: &Rooted<List>| {
-                                Value::try_from(this.0.lock().expect("poisoned").len())
+                                Value::try_from(this.0.lock().len())
                             },
                         )
                         .with_fn(Symbol::set_symbol(), 2, |vm, this| {
@@ -64,7 +63,7 @@ impl List {
         let Some(index) = index.as_usize() else {
             return Err(Fault::OutOfBounds);
         };
-        let contents = self.0.lock().expect("poisoned");
+        let contents = self.0.lock();
 
         contents.get(index).copied().ok_or(Fault::OutOfBounds)
     }
@@ -73,13 +72,13 @@ impl List {
         let Some(index) = index.as_usize() else {
             return Err(Fault::OutOfBounds);
         };
-        let mut contents = self.0.lock().expect("poisoned");
+        let mut contents = self.0.lock();
         contents.insert(index, value);
         Ok(())
     }
 
     pub fn push(&self, value: Value) -> Result<(), Fault> {
-        let mut contents = self.0.lock().expect("poisoned");
+        let mut contents = self.0.lock();
         contents.push(value);
         Ok(())
     }
@@ -88,7 +87,7 @@ impl List {
         let Some(index) = index.as_usize() else {
             return Err(Fault::OutOfBounds);
         };
-        let mut contents = self.0.lock().expect("poisoned");
+        let mut contents = self.0.lock();
 
         if let Some(entry) = contents.get_mut(index) {
             Ok(Some(std::mem::replace(entry, value)))
@@ -98,7 +97,7 @@ impl List {
     }
 
     pub fn to_vec(&self) -> Vec<Value> {
-        self.0.lock().expect("poisoned").clone()
+        self.0.lock().clone()
     }
 }
 
@@ -124,6 +123,6 @@ impl Trace for List {
     const MAY_CONTAIN_REFERENCES: bool = true;
 
     fn trace(&self, tracer: &mut refuse::Tracer) {
-        self.0.lock().expect("poisoned").trace(tracer);
+        self.0.lock().trace(tracer);
     }
 }

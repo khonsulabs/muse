@@ -9,7 +9,7 @@ use muse::syntax::token::{Paired, Token};
 use muse::syntax::{Ranged, SourceCode};
 use muse::value::{CustomType, RustFunction, RustType, Value};
 use muse::vm::{ExecutionError, Fault, Register, Vm, VmContext};
-use refuse::{CollectionGuard, SimpleType};
+use refuse::{CollectionGuard, Trace};
 
 fn main() {
     let filter = std::env::args().nth(1).unwrap_or_default();
@@ -195,7 +195,7 @@ fn run_test_cases(path: &Path, filter: &str) {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Trace)]
 struct TestError {
     err: ExecutionError,
     name: Value,
@@ -209,8 +209,6 @@ impl CustomType for TestError {
         &TYPE
     }
 }
-
-impl SimpleType for TestError {}
 
 // fn execute_test_cases(path: &str, filter: &str, contents: &str) -> Result<(), TestError> {}
 

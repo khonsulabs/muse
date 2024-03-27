@@ -6,13 +6,14 @@ use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 
 pub type ValueHasher = ahash::AHasher;
 
 use kempt::Map;
-use refuse::{AnyRef, CollectionGuard, ContainsNoRefs, MapAs, Ref, Root, SimpleType, Trace};
+use parking_lot::Mutex;
+use refuse::{AnyRef, AnyRoot, CollectionGuard, ContainsNoRefs, MapAs, Ref, Root, Trace};
 
 use crate::string::MuseString;
 use crate::symbol::{Symbol, SymbolList, SymbolRef};
@@ -1443,7 +1444,12 @@ where
 
     #[must_use]
     pub fn as_any_dynamic(&self) -> AnyDynamic {
-        AnyDynamic(self.0.as_any())
+        AnyDynamic(self.0.downgrade_any())
+    }
+
+    #[must_use]
+    pub fn into_any_root(self) -> AnyRoot {
+        self.0.into_any_root()
     }
 }
 
@@ -1634,7 +1640,7 @@ where
     }
 }
 
-// #[derive(Debug)]
+#[derive(Trace)]
 pub struct Type {
     pub name: Symbol,
     pub vtable: TypeVtable,
@@ -2361,8 +2367,6 @@ impl Debug for Type {
             .finish_non_exhaustive()
     }
 }
-
-impl SimpleType for Type {}
 
 pub struct TypedTypeBuilder<T> {
     t: Type,
@@ -3105,6 +3109,8 @@ impl Default for TypeVtable {
     }
 }
 
+impl ContainsNoRefs for TypeVtable {}
+
 pub trait CustomType: Send + Sync + Debug + 'static {
     fn muse_type(&self) -> &TypeRef;
 }
@@ -3315,7 +3321,7 @@ impl CustomType for AsyncFunction {
                         unreachable!("missing future")
                     };
 
-                    let mut future = future.0.lock().expect("poisoned");
+                    let mut future = future.0.lock();
                     let mut cx = Context::from_waker(vm.waker());
                     match Future::poll(std::pin::pin!(&mut *future), &mut cx) {
                         Poll::Ready(Ok(result)) => {

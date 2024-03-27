@@ -38,6 +38,7 @@ serde = { version = "1.0.195", features = ["derive", "rc"] }
 unicode-ident = "1.0.12"
 refuse = { git = "https://github.com/khonsulabs/refuse" }
 refuse-pool = { git = "https://github.com/khonsulabs/refuse" }
+parking_lot = "0.12.1"
 
 [dev-dependencies]
 rsn = "0.1"
