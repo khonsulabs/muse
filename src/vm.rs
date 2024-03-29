@@ -404,9 +404,11 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
                     module_declarations = module_dynamic.declarations();
                 } else {
                     drop(module_declarations);
-                    return decl
-                        .call(self, arity)
-                        .map_err(|err| ExecutionError::new(err, self));
+                    return match decl.call(self, arity) {
+                        Ok(result) => Ok(result),
+                        Err(Fault::FrameChanged | Fault::Waiting) => self.resume(),
+                        Err(other) => Err(ExecutionError::new(other, self)),
+                    };
                 }
             }
             return Err(ExecutionError::new(Fault::UnknownSymbol, self));
@@ -923,6 +925,10 @@ impl<'a, 'guard> VmContext<'a, 'guard> {
             self.check_timeout()
         }
     }
+
+    pub fn while_unlocked<R>(&mut self, func: impl FnOnce(&mut CollectionGuard<'_>) -> R) -> R {
+        MutexGuard::unlocked(&mut self.vm, || func(self.guard))
+    }
 }
 
 impl<'guard> AsRef<CollectionGuard<'guard>> for VmContext<'_, 'guard> {
@@ -999,7 +1005,7 @@ impl VmContext<'_, '_> {
             Ordering::Equal => return Ok(StepResult::Complete),
             Ordering::Greater => return Err(Fault::InvalidInstructionAddress),
         };
-        // println!("Executing {instruction:?}");
+        println!("Executing {instruction:?}");
         let next_instruction = StepResult::from(address.checked_add(1));
         let result = match instruction {
             LoadedOp::Return => return Ok(StepResult::Complete),
@@ -1215,6 +1221,7 @@ impl VmContext<'_, '_> {
             vm.frames[vm.current_frame].module = module_index.get();
             vm.frames[executing_frame].loading_module = Some(module_index);
             let _init_result = self.resume_async_inner(self.current_frame)?;
+            self.frames[executing_frame].loading_module = None;
             module_index
         };
 
@@ -2239,7 +2246,6 @@ impl Trace for Module {
     const MAY_CONTAIN_REFERENCES: bool = true;
 
     fn trace(&self, tracer: &mut refuse::Tracer) {
-        println!("Tracing module {:?}", self as *const Self);
         if let Some(parent) = self.parent {
             tracer.mark(parent);
         }

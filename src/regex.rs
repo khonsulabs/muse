@@ -3,7 +3,7 @@ use std::hash::Hash;
 use std::ops::Deref;
 
 use kempt::Map;
-use refuse::{CollectionGuard, ContainsNoRefs};
+use refuse::{CollectionGuard, ContainsNoRefs, Trace};
 use regex::{Captures, Regex};
 
 use crate::string::MuseString;
@@ -151,7 +151,7 @@ impl Display for MuseRegex {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Trace)]
 pub struct MuseCaptures {
     matches: Vec<Value>,
     by_name: Map<Symbol, usize>,
@@ -244,9 +244,7 @@ impl CustomType for MuseCaptures {
     }
 }
 
-impl ContainsNoRefs for MuseCaptures {}
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Trace)]
 pub struct MuseMatch {
     pub content: AnyDynamic,
     pub start: usize,
@@ -283,5 +281,3 @@ impl CustomType for MuseMatch {
         &TYPE
     }
 }
-
-impl ContainsNoRefs for MuseMatch {}

@@ -130,3 +130,19 @@ sigil_root: {
     "#,
     output: Int(42),
 }
+
+mod_multi: {
+    src: r#"
+        pub mod a {
+            pub fn test() => 0;
+        };
+
+        pub mod b {
+            pub fn test() => 42;
+        };
+
+        let 0 = a.test();
+        b.test()
+    "#,
+    output: Int(42),
+}

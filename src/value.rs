@@ -78,6 +78,17 @@ impl Value {
     }
 
     #[must_use]
+    pub fn as_u16(&self) -> Option<u16> {
+        match self {
+            Value::Int(value) => u16::try_from(*value).ok(),
+            Value::UInt(value) => u16::try_from(*value).ok(),
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Value::Float(value) => Some(*value as u16),
+            _ => None,
+        }
+    }
+
+    #[must_use]
     pub fn as_usize(&self) -> Option<usize> {
         match self {
             Value::Int(value) => usize::try_from(*value).ok(),

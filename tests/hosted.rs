@@ -102,21 +102,22 @@ fn run_test_cases(path: &Path, filter: &str) {
                         .to_string(vm)?
                         .try_upgrade(vm.guard())?;
 
-                    let code =
-                        Compiler::compile(&SourceCode::anonymous(&code), vm.guard()).unwrap();
-                    let sandbox = Vm::new(vm.guard());
-                    match sandbox.execute(&code, vm.guard_mut()) {
-                        Ok(result) => Ok(result),
-                        Err(err) => Err(Fault::Exception(Value::dynamic(
-                            TestError {
-                                err,
-                                name,
-                                offset,
-                                source,
-                            },
-                            vm.guard(),
-                        ))),
-                    }
+                    vm.while_unlocked(|guard| {
+                        let code = Compiler::compile(&SourceCode::anonymous(&code), guard).unwrap();
+                        let sandbox = Vm::new(guard);
+                        match sandbox.execute(&code, guard) {
+                            Ok(result) => Ok(result),
+                            Err(err) => Err(Fault::Exception(Value::dynamic(
+                                TestError {
+                                    err,
+                                    name,
+                                    offset,
+                                    source,
+                                },
+                                guard,
+                            ))),
+                        }
+                    })
                 }),
                 context.guard(),
             ),
