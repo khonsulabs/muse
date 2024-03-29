@@ -381,14 +381,36 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
     ) -> Result<Value, ExecutionError> {
         let arity = params.load(self)?;
 
-        let module_dynamic = self.modules[0]
+        let mut module_dynamic = self.modules[0]
             .as_rooted(self.guard)
             .expect("module missing");
-        let module_declarations = module_dynamic.declarations();
-        let function = module_declarations
-            .get(name)
-            .ok_or_else(|| ExecutionError::new(Fault::UnknownSymbol, self))?
-            .value;
+        let mut module_declarations = module_dynamic.declarations();
+        let function = if let Some(decl) = module_declarations.get(name) {
+            decl.value
+        } else {
+            let name = name.try_load(self.guard)?;
+            let mut parts = name.split('.').peekable();
+            while let Some(part) = parts.next() {
+                let part = SymbolRef::from(part);
+                let Some(decl) = module_declarations.get(&part).map(|decl| decl.value) else {
+                    break;
+                };
+                if parts.peek().is_some() {
+                    let Some(contained_module) = decl.as_rooted::<Module>(self.guard) else {
+                        return Err(ExecutionError::new(Fault::UnknownSymbol, self));
+                    };
+                    drop(module_declarations);
+                    module_dynamic = contained_module;
+                    module_declarations = module_dynamic.declarations();
+                } else {
+                    drop(module_declarations);
+                    return decl
+                        .call(self, arity)
+                        .map_err(|err| ExecutionError::new(err, self));
+                }
+            }
+            return Err(ExecutionError::new(Fault::UnknownSymbol, self));
+        };
         drop(module_declarations);
 
         let Some(function) = function.as_dynamic::<Function>() else {
@@ -2217,14 +2239,14 @@ impl Trace for Module {
     const MAY_CONTAIN_REFERENCES: bool = true;
 
     fn trace(&self, tracer: &mut refuse::Tracer) {
+        println!("Tracing module {:?}", self as *const Self);
         if let Some(parent) = self.parent {
             tracer.mark(parent);
         }
 
         for decl in &*self.declarations() {
-            if let Some(dynamic) = decl.value.value.as_any_dynamic() {
-                tracer.mark(dynamic);
-            }
+            decl.key().trace(tracer);
+            decl.value.value.trace(tracer);
         }
     }
 }

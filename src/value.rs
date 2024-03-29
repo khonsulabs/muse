@@ -1121,7 +1121,7 @@ impl AnyDynamic {
         {
             (kind.vtable.call)(self, vm, arity.into())
         } else {
-            Ok(Value::Nil)
+            Err(Fault::ValueFreed)
         }
     }
 

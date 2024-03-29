@@ -1582,9 +1582,9 @@ dependencies = [
 
 [[package]]
 name = "memchr"
-version = "2.7.1"
+version = "2.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "523dc4f511e55ab87b694dc30d0f820d60906ef06413f93d4d7a1385599cc149"
+checksum = "6c8640c5d730cb13ebd907d8d04b52f55ac9a2eec55b440c8892f40d56c76c1d"
 
 [[package]]
 name = "memmap2"
@@ -2380,7 +2380,7 @@ dependencies = [
 [[package]]
 name = "refuse"
 version = "0.0.1"
-source = "git+https://github.com/khonsulabs/refuse#bc969f555fad0f7d2a1ca796475490e40d77415d"
+source = "git+https://github.com/khonsulabs/refuse#16bb0cf2a889729d54f61929d706faaf948c5cee"
 dependencies = [
  "crossbeam-utils",
  "flume",
@@ -2393,7 +2393,7 @@ dependencies = [
 [[package]]
 name = "refuse-macros"
 version = "0.1.0"
-source = "git+https://github.com/khonsulabs/refuse#bc969f555fad0f7d2a1ca796475490e40d77415d"
+source = "git+https://github.com/khonsulabs/refuse#16bb0cf2a889729d54f61929d706faaf948c5cee"
 dependencies = [
  "attribute-derive 0.9.1",
  "manyhow 0.11.1",
@@ -2405,7 +2405,7 @@ dependencies = [
 [[package]]
 name = "refuse-pool"
 version = "0.1.0"
-source = "git+https://github.com/khonsulabs/refuse#bc969f555fad0f7d2a1ca796475490e40d77415d"
+source = "git+https://github.com/khonsulabs/refuse#16bb0cf2a889729d54f61929d706faaf948c5cee"
 dependencies = [
  "ahash",
  "hashbrown",
