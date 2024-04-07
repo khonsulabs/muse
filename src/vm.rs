@@ -158,7 +158,7 @@ impl Vm {
         self.context(guard).invoke(name, params)
     }
 
-    fn context<'context, 'guard>(
+    pub fn context<'context, 'guard>(
         &'context self,
         guard: &'context mut CollectionGuard<'guard>,
     ) -> VmContext<'context, 'guard> {
