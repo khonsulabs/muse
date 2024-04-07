@@ -10,7 +10,7 @@ use muse::regex::{MuseMatch, MuseRegex};
 use muse::string::MuseString;
 use muse::symbol::Symbol;
 use muse::syntax::token::RegexLiteral;
-use muse::syntax::{Ranged, SourceCode, SourceRange};
+use muse::syntax::{Ranged, SourceRange};
 use muse::value::Value;
 use muse::vm::{Code, ExecutionError, StackFrame, Vm};
 use refuse::CollectionGuard;
@@ -104,7 +104,7 @@ struct Case {
 impl Case {
     fn run(&self) -> (Option<Code>, TestOutput) {
         let mut guard = CollectionGuard::acquire();
-        match Compiler::compile(&SourceCode::anonymous(&self.src), &guard) {
+        match Compiler::compile(&self.src, &guard) {
             Ok(code) => match Vm::new(&guard).execute(&code, &mut guard) {
                 Ok(value) => (Some(code), TestOutput::from(value)),
                 Err(fault) => (Some(code), TestOutput::Fault(VmFault::from(fault))),

@@ -32,6 +32,18 @@ impl<'a> SourceCode<'a> {
     }
 }
 
+impl<'a> From<&'a str> for SourceCode<'a> {
+    fn from(value: &'a str) -> Self {
+        Self::anonymous(value)
+    }
+}
+
+impl<'a> From<&'a String> for SourceCode<'a> {
+    fn from(value: &'a String) -> Self {
+        Self::from(value.as_str())
+    }
+}
+
 #[derive(Default)]
 pub struct Sources(Vec<String>);
 
@@ -1105,7 +1117,7 @@ pub fn parse_tokens(source: VecDeque<Ranged<Token>>) -> Result<Ranged<Expression
     parse_from_reader(TokenReader::from(source))
 }
 
-pub fn parse(source: &SourceCode<'_>) -> Result<Ranged<Expression>, Ranged<Error>> {
+pub fn parse<'a>(source: impl Into<SourceCode<'a>>) -> Result<Ranged<Expression>, Ranged<Error>> {
     parse_from_reader(TokenReader::new(source))
 }
 
@@ -1183,10 +1195,10 @@ struct TokenReader<'a> {
 }
 
 impl<'a> TokenReader<'a> {
-    pub fn new(source: &SourceCode<'a>) -> Self {
+    pub fn new(source: impl Into<SourceCode<'a>>) -> Self {
         Self {
             tokens: TokenStream::Tokens(
-                Tokens::new(source)
+                Tokens::new(source.into())
                     .excluding_comments()
                     .excluding_whitespace(),
             ),
@@ -1290,7 +1302,7 @@ pub enum Error {
     InvalidMapKeyPattern,
 }
 
-impl crate::Error for Error {
+impl crate::ErrorKind for Error {
     fn kind(&self) -> &'static str {
         match self {
             Error::UnexpectedEof => "unexpected eof",

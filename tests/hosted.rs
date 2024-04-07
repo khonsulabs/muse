@@ -6,7 +6,7 @@ use muse::compiler::Compiler;
 use muse::exception::Exception;
 use muse::symbol::Symbol;
 use muse::syntax::token::{Paired, Token};
-use muse::syntax::{Ranged, SourceCode};
+use muse::syntax::Ranged;
 use muse::value::{CustomType, RustFunction, RustType, Value};
 use muse::vm::{ExecutionError, Fault, Register, Vm, VmContext};
 use refuse::{CollectionGuard, Trace};
@@ -73,7 +73,7 @@ fn run_test_cases(path: &Path, filter: &str) {
                 tokens
             }
         })
-        .with(&SourceCode::anonymous(&contents))
+        .with(&contents)
         .build(&guard)
         .unwrap();
 
@@ -103,7 +103,7 @@ fn run_test_cases(path: &Path, filter: &str) {
                         .try_upgrade(vm.guard())?;
 
                     vm.while_unlocked(|guard| {
-                        let code = Compiler::compile(&SourceCode::anonymous(&code), guard).unwrap();
+                        let code = Compiler::compile(&*code, guard).unwrap();
                         let sandbox = Vm::new(guard);
                         match sandbox.execute(&code, guard) {
                             Ok(result) => Ok(result),

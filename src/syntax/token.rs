@@ -345,7 +345,8 @@ impl Iterator for Tokens<'_> {
 
 impl<'a> Tokens<'a> {
     #[must_use]
-    pub fn new(source: &SourceCode<'a>) -> Self {
+    pub fn new(source: impl Into<SourceCode<'a>>) -> Self {
+        let source = source.into();
         Self {
             chars: Chars::new(source.code, source.id),
             scratch: String::new(),
@@ -970,7 +971,7 @@ pub enum Error {
     InvalidEscapeSequence,
 }
 
-impl crate::Error for Error {
+impl crate::ErrorKind for Error {
     fn kind(&self) -> &'static str {
         match self {
             Error::UnexpectedChar(_) => "unexpected char",
@@ -1033,7 +1034,7 @@ pub struct FormatStringPart {
 #[test]
 fn basics() {
     use std::num::NonZeroUsize;
-    let tokens = Tokens::new(&SourceCode::anonymous("a_09_ + 1 - .2"))
+    let tokens = Tokens::new("a_09_ + 1 - .2")
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(
@@ -1054,7 +1055,7 @@ fn basics() {
         ]
     );
     let id = SourceId::new(NonZeroUsize::MIN);
-    let tokens = Tokens::new(&SourceCode::new("a_09_ + 1 - .2", id))
+    let tokens = Tokens::new(SourceCode::new("a_09_ + 1 - .2", id))
         .excluding_whitespace()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();

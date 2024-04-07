@@ -23,7 +23,26 @@ pub mod regex;
 mod tests;
 
 pub use refuse;
+use syntax::Ranged;
 
-pub trait Error: std::error::Error {
+pub trait ErrorKind: std::error::Error {
     fn kind(&self) -> &'static str;
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Error {
+    Compilation(Vec<Ranged<compiler::Error>>),
+    Execution(vm::ExecutionError),
+}
+
+impl From<Vec<Ranged<compiler::Error>>> for Error {
+    fn from(value: Vec<Ranged<compiler::Error>>) -> Self {
+        Self::Compilation(value)
+    }
+}
+
+impl From<vm::ExecutionError> for Error {
+    fn from(value: vm::ExecutionError) -> Self {
+        Self::Execution(value)
+    }
 }

@@ -35,7 +35,7 @@ pub struct Compiler {
 }
 
 impl Compiler {
-    pub fn push(&mut self, source: &SourceCode<'_>) {
+    pub fn push<'a>(&mut self, source: impl Into<SourceCode<'a>>) {
         let mut parsed = syntax::parse(source);
         if let Ok(parsed) = &mut parsed {
             self.expand_macros(parsed);
@@ -44,8 +44,8 @@ impl Compiler {
     }
 
     #[must_use]
-    pub fn with(mut self, source: &SourceCode<'_>) -> Self {
-        self.push(source);
+    pub fn with<'a>(mut self, source: impl Into<SourceCode<'a>>) -> Self {
+        self.push(source.into());
         self
     }
 
@@ -82,8 +82,8 @@ impl Compiler {
         self
     }
 
-    pub fn compile(
-        source: &SourceCode<'_>,
+    pub fn compile<'a>(
+        source: impl Into<SourceCode<'a>>,
         guard: &CollectionGuard,
     ) -> Result<Code, Vec<Ranged<Error>>> {
         Self::default().with(source).build(guard)
@@ -2274,7 +2274,7 @@ pub enum Error {
     SigilSyntax(syntax::Error),
 }
 
-impl crate::Error for Error {
+impl crate::ErrorKind for Error {
     fn kind(&self) -> &'static str {
         match self {
             Error::VariableNotMutable => "variable not mutable",

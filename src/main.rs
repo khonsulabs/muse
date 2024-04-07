@@ -7,7 +7,7 @@ use muse::compiler::Compiler;
 use muse::exception::Exception;
 use muse::syntax::{parse, Ranged, SourceId, SourceRange, Sources};
 use muse::vm::{ExecutionError, StackFrame, Vm, VmContext};
-use muse::Error;
+use muse::ErrorKind;
 use refuse::CollectionGuard;
 use rustyline::completion::Completer;
 use rustyline::config::Configurer;
@@ -39,7 +39,7 @@ fn main() {
             Ok(line) => {
                 let _err = editor.append_history(&history_path);
                 let source = sources.push(line);
-                compiler.push(&source);
+                compiler.push(source);
                 match compiler.build(&guard) {
                     Ok(code) => match vm.execute(&code, &mut guard) {
                         Ok(value) => {
@@ -181,7 +181,7 @@ impl Validator for Muse {
     fn validate(&self, ctx: &mut ValidationContext) -> rustyline::Result<ValidationResult> {
         let mut sources = Sources::default();
         let source = sources.push(ctx.input().to_string());
-        match parse(&source) {
+        match parse(source) {
             Ok(_) => Ok(ValidationResult::Valid(None)),
             Err(Ranged(
                 muse::syntax::Error::UnexpectedEof | muse::syntax::Error::MissingEnd(_),

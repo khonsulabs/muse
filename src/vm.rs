@@ -23,13 +23,13 @@ use self::bitcode::trusted_loaded_source_to_value;
 use self::bitcode::{
     BinaryKind, BitcodeFunction, FaultKind, Label, Op, OpDestination, ValueOrSource,
 };
-use crate::compiler::{BitcodeModule, BlockDeclaration, SourceMap, UnaryKind};
+use crate::compiler::{BitcodeModule, BlockDeclaration, Compiler, SourceMap, UnaryKind};
 use crate::exception::Exception;
 use crate::regex::MuseRegex;
 use crate::string::MuseString;
 use crate::symbol::{IntoOptionSymbol, Symbol, SymbolRef};
 use crate::syntax::token::RegexLiteral;
-use crate::syntax::{BitwiseKind, CompareKind, SourceRange};
+use crate::syntax::{BitwiseKind, CompareKind, SourceCode, SourceRange};
 #[cfg(not(feature = "dispatched"))]
 use crate::value::ContextOrGuard;
 use crate::value::{CustomType, Dynamic, Rooted, RustType, StaticRustFunctionTable, Value};
@@ -89,6 +89,17 @@ impl Vm {
         }
     }
 
+    pub fn compile_and_execute<'a>(
+        &self,
+        source: impl Into<SourceCode<'a>>,
+        guard: &mut CollectionGuard,
+    ) -> Result<Value, crate::Error> {
+        let mut compiler = Compiler::default();
+        compiler.push(source);
+        let code = compiler.build(guard)?;
+        Ok(self.execute(&code, guard)?)
+    }
+
     pub fn execute(
         &self,
         code: &Code,
@@ -140,7 +151,7 @@ impl Vm {
 
     pub fn invoke(
         &self,
-        name: &SymbolRef,
+        name: impl Into<SymbolRef>,
         params: impl InvokeArgs,
         guard: &mut CollectionGuard,
     ) -> Result<Value, ExecutionError> {
@@ -375,6 +386,14 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
     }
 
     pub fn invoke(
+        &mut self,
+        name: impl Into<SymbolRef>,
+        params: impl InvokeArgs,
+    ) -> Result<Value, ExecutionError> {
+        self.invoke_inner(&name.into(), params)
+    }
+
+    fn invoke_inner(
         &mut self,
         name: &SymbolRef,
         params: impl InvokeArgs,
@@ -2477,13 +2496,16 @@ pub trait InvokeArgs {
     fn load(self, vm: &mut VmContext<'_, '_>) -> Result<Arity, ExecutionError>;
 }
 
-impl<const N: usize> InvokeArgs for [Value; N] {
+impl<T, const N: usize> InvokeArgs for [T; N]
+where
+    T: Into<Value>,
+{
     fn load(self, vm: &mut VmContext<'_, '_>) -> Result<Arity, ExecutionError> {
         let arity = Arity::try_from(N)
             .map_err(|_| ExecutionError::Exception(Fault::InvalidArity.as_exception(vm)))?;
 
-        for (arg, register) in self.iter().zip(0..arity.0) {
-            vm[Register(register)] = *arg;
+        for (arg, register) in self.into_iter().zip(0..arity.0) {
+            vm[Register(register)] = arg.into();
         }
 
         Ok(arity)

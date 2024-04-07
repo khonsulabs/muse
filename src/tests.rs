@@ -4,9 +4,9 @@ use refuse::CollectionGuard;
 
 use crate::compiler::Compiler;
 use crate::exception::Exception;
-use crate::symbol::{Symbol, SymbolRef};
+use crate::symbol::Symbol;
 use crate::syntax::token::{Paired, Token};
-use crate::syntax::{Expression, Ranged, SourceCode, SourceRange};
+use crate::syntax::{Expression, Ranged, SourceRange};
 use crate::value::Value;
 use crate::vm::bitcode::BitcodeBlock;
 use crate::vm::{ExecutionError, Register, Vm};
@@ -44,8 +44,7 @@ fn module_budgeting() {
     const MAX_OPS: usize = 24;
     let mut guard = CollectionGuard::acquire();
     let code = Compiler::compile(
-        &SourceCode::anonymous(
-            r"
+        r"
             mod foo {
                 pub var a = 1;
                 a = a + 1;
@@ -56,7 +55,6 @@ fn module_budgeting() {
 
             foo.a
         ",
-        ),
         &guard,
     )
     .unwrap();
@@ -90,27 +88,22 @@ fn module_budgeting() {
 fn invoke() {
     let mut guard = CollectionGuard::acquire();
     let code = Compiler::compile(
-        &SourceCode::anonymous(
-            r"
-                pub fn test(n) => n * 2;
-                fn private(n) => n * 2;
-            ",
-        ),
+        r"
+            pub fn test(n) => n * 2;
+            fn private(n) => n * 2;
+        ",
         &guard,
     )
     .unwrap();
     let vm = Vm::new(&guard);
     vm.execute(&code, &mut guard).unwrap();
 
-    let Value::Int(result) = vm
-        .invoke(&SymbolRef::from("test"), [Value::Int(3)], &mut guard)
-        .unwrap()
-    else {
+    let Value::Int(result) = vm.invoke("test", [Value::Int(3)], &mut guard).unwrap() else {
         unreachable!()
     };
     assert_eq!(result, 6);
     let ExecutionError::Exception(exception) = vm
-        .invoke(&SymbolRef::from("private"), [Value::Int(3)], &mut guard)
+        .invoke("private", [Value::Int(3)], &mut guard)
         .unwrap_err()
     else {
         unreachable!()
@@ -136,13 +129,13 @@ fn macros() {
             assert_eq!(tokens[4].0, Token::Close(Paired::Paren));
             dbg!(tokens)
         })
-        .with(&SourceCode::anonymous(
+        .with(
             r"
                 let hello = 5;
                 let world = 3;
                 $test(hello world)
             ",
-        ))
+        )
         .build(&guard)
         .unwrap();
     let vm = Vm::new(&guard);
@@ -167,13 +160,13 @@ fn recursive_macros() {
             );
             tokens
         })
-        .with(&SourceCode::anonymous(
+        .with(
             r"
                 let hello = 5;
                 let world = 3;
                 $test(hello world)
             ",
-        ))
+        )
         .build(&guard)
         .unwrap();
     let vm = Vm::new(&guard);
@@ -203,11 +196,11 @@ fn infix_macros() {
                 dbg!(tokens)
             },
         )
-        .with(&SourceCode::anonymous(
+        .with(
             r"
                 (5)$test()
             ",
-        ))
+        )
         .build(&guard)
         .unwrap();
     let vm = Vm::new(&guard);

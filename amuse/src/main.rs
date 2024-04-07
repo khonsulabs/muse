@@ -9,7 +9,7 @@ use cushy::widgets::Label;
 use cushy::{Open, PendingApp};
 use muse::compiler::Compiler;
 use muse::refuse::CollectionGuard;
-use muse::syntax::{SourceCode, SourceId, Sources};
+use muse::syntax::{SourceId, Sources};
 use muse::value::Value as MuseValue;
 use muse::vm::{ExecutionError, Vm, VmContext};
 use muse_ui::VmUi;
@@ -33,9 +33,8 @@ fn main() {
     });
 
     let input = Dynamic::<String>::default();
-    let parsed = input.map_each(|source| {
-        muse::syntax::parse(&SourceCode::anonymous(source)).map_err(|err| format!("{err:?}"))
-    });
+    let parsed =
+        input.map_each(|source| muse::syntax::parse(source).map_err(|err| format!("{err:?}")));
     let expression = parsed.map_each(|parsed| {
         parsed
             .as_ref()
@@ -136,11 +135,12 @@ fn execute_input(
     let mut runtime = runtime.lock();
     let runtime = &mut *runtime;
     let source = runtime.sources.push(source);
-    runtime.compiler.push(&source);
+    let source_id = source.id;
+    runtime.compiler.push(source);
     match runtime.compiler.build(guard) {
         Ok(code) => {
             let entry = History {
-                source: source.id,
+                source: source_id,
                 result: runtime.vm.execute(&code, guard),
             };
             history.lock().push(entry);

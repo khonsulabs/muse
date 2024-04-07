@@ -1,13 +1,12 @@
 use muse::compiler::Compiler;
 use muse::symbol::Symbol;
-use muse::syntax::SourceCode;
 use muse::value::{RustFunction, Value};
 use muse::vm::{Fault, Register, Vm, VmContext};
 use refuse::CollectionGuard;
 
 fn main() {
     let mut guard = CollectionGuard::acquire();
-    let code = Compiler::compile(&SourceCode::anonymous("is_even(42)"), &guard).unwrap();
+    let code = Compiler::compile("is_even(42)", &guard).unwrap();
 
     let vm = Vm::new(&guard);
     let mut context = VmContext::new(&vm, &mut guard);

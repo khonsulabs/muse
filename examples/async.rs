@@ -1,6 +1,5 @@
 use muse::compiler::Compiler;
 use muse::symbol::Symbol;
-use muse::syntax::SourceCode;
 use muse::value::{AsyncFunction, Value};
 use muse::vm::{Arity, Fault, Register, Vm, VmContext};
 use refuse::CollectionGuard;
@@ -25,15 +24,13 @@ fn main() {
     });
 
     let code = Compiler::compile(
-        &SourceCode::anonymous(
-            r"
+        r"
             var a = increment_async(0);
             a = increment_async(a);
             a = increment_async(a);
             a = increment_async(a);
             increment_async(a)
         ",
-        ),
         &guard,
     )
     .unwrap();
