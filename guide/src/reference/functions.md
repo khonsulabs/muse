@@ -23,7 +23,7 @@ Anonymous functions do not have a name specified at the time of creation. They
 can only be called by calling the function returned from the function
 expression:
 
-```muse
+```muselang
 let square = fn(n) => n ** 2;
 let 4 = square(2);
 
@@ -49,7 +49,7 @@ using the identifier as its name. These examples are identical to the anonymous
 function examples, except they utilize named functions instead of `let`
 expressions to declare the function.
 
-```muse
+```muselang
 fn square(n) => n ** 2;
 let 4 = square(2);
 
@@ -75,7 +75,7 @@ an open curly brace (`{`) is found after the `fn` keyword or after the
 function's name, the contents of the braces are interpretted as a set of match
 patterns:
 
-```muse
+```muselang
 fn area {
     [width] => width * width,
     [width, height] => width * height,
@@ -100,7 +100,7 @@ When a function executes, the result of the final expression evaluated will be
 returned. The `return` expression can be used to exit a function without
 executing any additional code.
 
-```muse
+```muselang
 fn my_function() {
     return;
     this_expression_wont_be_evaluated
@@ -111,7 +111,7 @@ my_function()
 The `return` expression can also be provided an expression to return as the
 result of the function. If no value is provided, `nil` is returned.
 
-```muse
+```muselang
 fn checked_op(numerator, denominator) {
     if denominator == 0 {
         return numerator // denominator;

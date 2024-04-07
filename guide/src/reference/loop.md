@@ -26,7 +26,7 @@ execution can be affected by these operations:
 
 # Infinite Loop
 
-```muse
+```muselang
 var n = 0;
 let nil = loop {
     if n % 2 == 0 {
@@ -48,7 +48,7 @@ point the loop exits.
 A while loop checks that a condition is truthy before executing the loop body,
 and continues repeating until the condition is not truthy.
 
-```muse
+```muselang
 var n = 0;
 while n < 10 {
     n = n + 1;
@@ -63,7 +63,7 @@ truthy. This is different from a While loop in that the condition is only
 checked after the first iteration of the loop. The `continue` expression will
 continue iteration just prior to the condition evaluation.
 
-```muse
+```muselang
 var n = 1;
 loop {
     n = n * 3;
@@ -82,7 +82,7 @@ If the iterator returns an item that does not match the pattern, the next
 element will be requested and the loop body will not be executed for that
 element.
 
-```muse
+```muselang
 var sum = 0;
 for n in [1, 2, 3] {
     sum = sum + n

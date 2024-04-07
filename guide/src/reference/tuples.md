@@ -7,7 +7,7 @@ Brackets: '[' <ExpressionList> ']';
 A sequence of values stored sequentially is a List in Muse. In other languages,
 these structures may also be referred to as arrays or tuples.
 
-```muse
+```muselang
 let list = [1, 2, 3];
 $assert(list[0] == 1);
 $assert(list[1] == 2);

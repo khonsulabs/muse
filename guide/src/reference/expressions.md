@@ -18,7 +18,7 @@ function](./functions.md#arrow-functions), or an [inline if](./if.md#inline-if).
 The precedence of these operators matches the order they are listed in. For
 example, these two ways of assigning to `my_function` are identical:
 
-```muse
+```muselang
 var my_function = nil;
 
 my_function = n => n * 2 if n > 0;

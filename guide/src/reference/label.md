@@ -21,7 +21,7 @@ A label is the `@` character followed by an identifier, e.g., `@label`. Labels
 can be applied to blocks or loops to allow controlled execution flow in nested
 code.
 
-```muse
+```muselang
 var total = 0;
 @outer: for x in [1, 2, 3] {
     for y in [1, 2, 3] {

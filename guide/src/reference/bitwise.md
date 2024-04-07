@@ -30,7 +30,7 @@ functionality.
 The bitwise or expression produces a new value by performing a logical or
 operation on each corresponding bit in the two operands.
 
-```muse
+```muselang
 let 0b101 = 0b100 | 0b001
 ```
 
@@ -39,7 +39,7 @@ let 0b101 = 0b100 | 0b001
 The bitwise excusive or (xor) expression produces a new value by performing a logical xor
 operation on each corresponding bit in the two operands.
 
-```muse
+```muselang
 let 0b101 = 0b110 ^ 0b011
 ```
 
@@ -48,7 +48,7 @@ let 0b101 = 0b110 ^ 0b011
 The bitwise and expression produces a new value by performing a logical and
 operation on each corresponding bit in the two operands.
 
-```muse
+```muselang
 let 0b100 = 0b110 & 0b101
 ```
 
@@ -57,14 +57,14 @@ let 0b100 = 0b110 & 0b101
 The bitwise shift expressions produce a new value by moving bits left or right
 by a number of bits, filling in any empty bits with 0.
 
-```muse
+```muselang
 let 0b100 = 0b010 << 1;
 let 0b001 = 0b010 >> 1;
 ```
 
 The shift-right expression is sign-preserving when operating on signed integers:
 
-```muse
+```muselang
 let -2 = -4 >> 1;
 ```
 
@@ -73,7 +73,7 @@ let -2 = -4 >> 1;
 The bitwise not expression produces a new value by performing a logical not
 operation on each bit in the operand.
 
-```muse
+```muselang
 let -1 = !0;
 let 0uxffff_ffff_ffff_ffff = !0u;
 ```

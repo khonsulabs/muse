@@ -9,7 +9,7 @@ Pub: 'pub' <Mod | Fn | Let | Var>;
 Modules provide a way to encapsulate code behind a namespace. Consider this
 example:
 
-```muse
+```muselang
 mod math {
     pub fn square(n) => n * n;
 };

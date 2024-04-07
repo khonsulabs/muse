@@ -16,7 +16,7 @@ the `if` expression: standalone and inline.
 The standalone `if` expression enables executing an expression when a condition
 is true:
 
-```muse
+```muselang
 let 42 = if true {
     42
 };
@@ -30,7 +30,7 @@ let nil = if false then 42;
 If the `else` keyword is the next token after the "when true" expression, an
 expression can be evaluated when the condition is false.
 
-```muse
+```muselang
 let 42 = if false {
     0
 } else {
@@ -42,7 +42,7 @@ let 42 = if false then 0 else 42;
 Because `if` is an expression, the expressions can be chained to create more
 complex if/else-if expressions:
 
-```muse
+```muselang
 fn clamp_to_ten(n) {
     if n < 0 {
         0
@@ -62,7 +62,7 @@ let 10 = clamp_to_ten(11);
 An inline if expression returns the *guarded expression* if the condition is
 true, or `nil` when the condition is false:
 
-```muse
+```muselang
 let 42 = 42 if true;
 let nil = 42 if false;
 ```
@@ -70,13 +70,13 @@ let nil = 42 if false;
 Similar to the standalone `if` expression, `else` can be used to execute a
 different expression when the condition is false:
 
-```muse
+```muselang
 let 42 = 0 if false else 42;
 ```
 
 Inline if statements can also be chained:
 
-```muse
+```muselang
 fn clamp_to_ten(n) {
     0 if n < 0
         else 10 if n > 10

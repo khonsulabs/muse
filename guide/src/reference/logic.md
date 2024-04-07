@@ -32,7 +32,7 @@ conditions:
 The logical or expression is a short-circuiting operator that returns true if
 either of its operands are truthy.
 
-```muse
+```muselang
 let true = true or true;
 let true = true or false;
 let true = false or true;
@@ -42,7 +42,7 @@ let false = false or false;
 The short-circuiting behavior ensures that once the expression is known to
 return `true`, no remaining chained expressions will be evaluated:
 
-```muse
+```muselang
 # "error" is not evaluated
 let true = true or error;
 ```
@@ -52,7 +52,7 @@ let true = true or error;
 The logical exclusive or (xor) expression is an operator that returns true if
 one of its operands is truthy, but not both.
 
-```muse
+```muselang
 let true = true xor false;
 let true = false xor true;
 let false = true xor true;
@@ -66,7 +66,7 @@ This operator can not short-circuit, so both expressions are always evaluated.
 The logical and expression is a short-circuiting operator that returns true both
 of its operands are truthy.
 
-```muse
+```muselang
 let true = true or true;
 let true = true or false;
 let true = false or true;
@@ -76,7 +76,7 @@ let false = false or false;
 The short-circuiting behavior ensures that once the expression is known to
 return `false`, no remaining chained expressions will be evaluated:
 
-```muse
+```muselang
 # "error" is not evaluated
 let false = false and error;
 ```

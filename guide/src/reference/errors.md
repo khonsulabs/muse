@@ -25,7 +25,7 @@ application. In Rust, the result will be `Err(_)`.
 Any value can be used as an exception, and handling specific functions is done
 using pattern matching. Consider this example:
 
-```muse
+```muselang
 fn first(n) {
     try {
         second(n)
@@ -62,7 +62,7 @@ Catching any error can be done in one of two ways: using an identifier binding
 or using an arrow catch block. In the next example, both functions are
 identical:
 
-```muse
+```muselang
 fn identifier_binding() {
     try {
         1 / 0
@@ -86,7 +86,7 @@ fn arrow_catch() {
 To catch multiple errors raised by inside of a try block, a match block can be
 used:
 
-```muse
+```muselang
 fn checked_area(width,height) {
     if width == 0 {
         throw :invalid_width
@@ -111,7 +111,7 @@ A `try` block without a `catch` block will return `nil` if an exception is
 raised. Similarly, the try operator (`?`) can be used to convert any exception
 raised to `nil`. These examples produce identical code:
 
-```muse
+```muselang
 
 try {
     1 / 0

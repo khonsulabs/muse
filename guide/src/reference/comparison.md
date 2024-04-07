@@ -26,7 +26,7 @@ When Muse checks if two values are equal or not equal, Muse will try to
 approximately compare similar data types. For example, all of these comparisons
 are true:
 
-```muse
+```muselang
 let true = 1 == 1.0;
 let true = 1 == true;
 let true = 1.0 == true;
@@ -35,7 +35,7 @@ let true = 1.0 == true;
 `nil` is only considered equal to `nil` and will be not equal to every other
 value.
 
-```muse
+```muselang
 let true = nil == nil;
 let false = nil == false;
 ```
@@ -58,7 +58,7 @@ Muse interprets `0 < a < 5` as `0 < a && a < 5`. This form of chaining
 comparisons can mix and match all comparison operators. Consider a longer
 example:
 
-```muse
+```muselang
 let a = 1;
 let b = 2;
 

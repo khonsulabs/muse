@@ -28,7 +28,7 @@ This is a recursive Fibonacci function. This algorithm should never be used in
 production, as iterative approaches are exponentially faster, but it provides a
 few opportunities to demonstrate Muse's features.
 
-```muse
+```muselang
 fn fib(n) {
   if n <= 2 {
     1
@@ -48,7 +48,7 @@ is an important design goal.
 Muse also supports *pattern matching*. Here is the same example written using
 pattern matching instead of if/else:
 
-```muse
+```muselang
 fn fib(n) {
   match n {
     n if n <= 2 => 1,
@@ -60,7 +60,7 @@ fn fib(n) {
 Muse also supports *function overloading* using the same pattern match syntax.
 Here's the same function using function overloading:
 
-```muse
+```muselang
 fn fib {
   n if n <= 2 => 1,
   n => fib(n - 1) + fib(n - 2),

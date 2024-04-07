@@ -16,7 +16,7 @@ When a `let` expression is evaluated, all bound identifiers will not be able to
 be reassigned to. In Muse, these are simply called *values*. While values cannot
 be reassigned to, they can be shadowed by another declaration.
 
-```muse
+```muselang
 # Basic value declaration
 let a = 42;
 # Values declared using destructuring
@@ -37,7 +37,7 @@ done using the `break`, `continue`, `return`, or `throw` expressions.
 When the `var` keyword is used, all bound identifiers become *variables*. Unlike
 values, variables can be assigned new values.
 
-```muse
+```muselang
 # Basic declaration
 var a = 42;
 # `var`s can have their values updated through assignment.

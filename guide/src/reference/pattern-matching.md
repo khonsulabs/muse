@@ -50,7 +50,7 @@ Multiple matching patterns can be used by chaining patterns together with the
 vertical bar (`|`). This example uses a match function to try to demonstrate a
 lot of the flexibility this feature provides:
 
-```muse
+```muselang
 fn test_match {
     [a, b] if b != 1 => a - b,
     [a, b] => a + b,

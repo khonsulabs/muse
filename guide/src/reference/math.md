@@ -24,7 +24,7 @@ Arithmetic expressions in Muse honor the traditional [order of operations][ooo].
 For example, consider these identical pairs of expressions written without and
 with parentheses:
 
-```muse
+```muselang
 2 * 4 + 2 * 3;
 (2 * 4) + (2 * 3);
 
