@@ -8,7 +8,7 @@ use crate::list::List;
 use crate::regex::MuseRegex;
 use crate::symbol::{Symbol, SymbolRef};
 use crate::value::{
-    AnyDynamic, CustomType, Dynamic, Rooted, RustType, StaticRustFunctionTable, TypeRef, Value,
+    AnyDynamic, CustomType, Dynamic, Rooted, RustFunctionTable, RustType, TypeRef, Value,
 };
 use crate::vm::{Fault, Register, VmContext};
 
@@ -100,68 +100,55 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
             }
         }
     })
-    .with_invoke(|_| {
-        |this, vm, name, arity| {
-            static FUNCTIONS: StaticRustFunctionTable<MuseString> =
-                StaticRustFunctionTable::new(|table| {
-                    table
-                        .with_fn(
-                            Symbol::len_symbol(),
-                            0,
-                            |_vm: &mut VmContext<'_, '_>, this: &Rooted<MuseString>| {
-                                Value::try_from(this.0.lock().len())
-                            },
-                        )
-                        .with_fn(
-                            "split",
-                            1,
-                            |vm: &mut VmContext<'_, '_>, this: &Rooted<MuseString>| {
-                                let needle = vm[Register(0)].take();
-                                if let Some(needle) = needle.as_rooted::<MuseString>(vm.as_ref()) {
-                                    if std::ptr::eq(&this.0, &needle.0) {
-                                        Ok(Value::dynamic(
-                                            List::from(vec![Value::dynamic(
-                                                MuseString::from(String::default()),
-                                                &vm,
-                                            )]),
-                                            vm,
-                                        ))
-                                    } else {
-                                        let haystack = this.lock();
-                                        let needle = needle.lock();
-                                        Ok(Value::dynamic(
-                                            haystack
-                                                .split(&*needle)
-                                                .map(|segment| {
-                                                    Value::dynamic(MuseString::from(segment), &vm)
-                                                })
-                                                .collect::<List>(),
-                                            vm,
-                                        ))
-                                    }
-                                } else if let Some(needle) =
-                                    needle.as_downcast_ref::<MuseRegex>(vm.as_ref())
-                                {
-                                    let haystack = this.lock();
-                                    Ok(Value::dynamic(
-                                        needle
-                                            .split(&haystack)
-                                            .map(|segment| {
-                                                Value::dynamic(MuseString::from(segment), &vm)
-                                            })
-                                            .collect::<List>(),
-                                        vm,
-                                    ))
-                                } else {
-                                    Err(Fault::ExpectedString)
-                                }
-                            },
-                        )
-                });
-
-            FUNCTIONS.invoke(vm, name, arity, &this)
-        }
-    })
+    .with_function_table(
+        RustFunctionTable::new()
+            .with_fn(
+                Symbol::len_symbol(),
+                0,
+                |_vm: &mut VmContext<'_, '_>, this: &Rooted<MuseString>| {
+                    Value::try_from(this.0.lock().len())
+                },
+            )
+            .with_fn(
+                "split",
+                1,
+                |vm: &mut VmContext<'_, '_>, this: &Rooted<MuseString>| {
+                    let needle = vm[Register(0)].take();
+                    if let Some(needle) = needle.as_rooted::<MuseString>(vm.as_ref()) {
+                        if std::ptr::eq(&this.0, &needle.0) {
+                            Ok(Value::dynamic(
+                                List::from(vec![Value::dynamic(
+                                    MuseString::from(String::default()),
+                                    &vm,
+                                )]),
+                                vm,
+                            ))
+                        } else {
+                            let haystack = this.lock();
+                            let needle = needle.lock();
+                            Ok(Value::dynamic(
+                                haystack
+                                    .split(&*needle)
+                                    .map(|segment| Value::dynamic(MuseString::from(segment), &vm))
+                                    .collect::<List>(),
+                                vm,
+                            ))
+                        }
+                    } else if let Some(needle) = needle.as_downcast_ref::<MuseRegex>(vm.as_ref()) {
+                        let haystack = this.lock();
+                        Ok(Value::dynamic(
+                            needle
+                                .split(&haystack)
+                                .map(|segment| Value::dynamic(MuseString::from(segment), &vm))
+                                .collect::<List>(),
+                            vm,
+                        ))
+                    } else {
+                        Err(Fault::ExpectedString)
+                    }
+                },
+            ),
+    )
     .with_add(|_| {
         |this, vm, rhs| {
             let lhs = this.0.lock();

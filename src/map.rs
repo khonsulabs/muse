@@ -6,7 +6,7 @@ use refuse::{CollectionGuard, Trace};
 use crate::list::List;
 use crate::symbol::Symbol;
 use crate::value::{
-    ContextOrGuard, CustomType, Dynamic, RustType, StaticRustFunctionTable, TypeRef, Value,
+    ContextOrGuard, CustomType, Dynamic, RustFunctionTable, RustType, TypeRef, Value,
 };
 use crate::vm::{Fault, Register, VmContext};
 
@@ -25,38 +25,32 @@ pub static MAP_TYPE: RustType<Map> = RustType::new("Map", |t| {
             Ok(Dynamic::new(map, vm))
         }
     })
-    .with_invoke(|_| {
-        |this, vm, name, arity| {
-            static FUNCTIONS: StaticRustFunctionTable<Map> =
-                StaticRustFunctionTable::new(|table| {
-                    table
-                        .with_fn(Symbol::set_symbol(), 1, |vm, this| {
-                            let key = vm[Register(0)].take();
-                            this.insert(vm, key, key)?;
-                            Ok(key)
-                        })
-                        .with_fn(Symbol::set_symbol(), 2, |vm, this| {
-                            let key = vm[Register(0)].take();
-                            let value = vm[Register(1)].take();
-                            this.insert(vm, key, value)?;
-                            Ok(value)
-                        })
-                        .with_fn(Symbol::get_symbol(), 1, |vm, this| {
-                            let key = vm[Register(0)].take();
-                            this.get(vm, &key)?.ok_or(Fault::OutOfBounds)
-                        })
-                        .with_fn(Symbol::nth_symbol(), 1, |vm, this| {
-                            let index = vm[Register(0)].take();
-                            this.nth(&index, vm.as_ref())
-                        })
-                        .with_fn(Symbol::len_symbol(), 0, |_vm, this| {
-                            let contents = this.0.lock();
-                            Value::try_from(contents.len())
-                        })
-                });
-            FUNCTIONS.invoke(vm, name, arity, &this)
-        }
-    })
+    .with_function_table(
+        RustFunctionTable::<Map>::new()
+            .with_fn(Symbol::set_symbol(), 1, |vm, this| {
+                let key = vm[Register(0)].take();
+                this.insert(vm, key, key)?;
+                Ok(key)
+            })
+            .with_fn(Symbol::set_symbol(), 2, |vm, this| {
+                let key = vm[Register(0)].take();
+                let value = vm[Register(1)].take();
+                this.insert(vm, key, value)?;
+                Ok(value)
+            })
+            .with_fn(Symbol::get_symbol(), 1, |vm, this| {
+                let key = vm[Register(0)].take();
+                this.get(vm, &key)?.ok_or(Fault::OutOfBounds)
+            })
+            .with_fn(Symbol::nth_symbol(), 1, |vm, this| {
+                let index = vm[Register(0)].take();
+                this.nth(&index, vm.as_ref())
+            })
+            .with_fn(Symbol::len_symbol(), 0, |_vm, this| {
+                let contents = this.0.lock();
+                Value::try_from(contents.len())
+            }),
+    )
 });
 
 impl Trace for Map {

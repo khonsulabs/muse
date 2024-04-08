@@ -2438,6 +2438,15 @@ where
     }
 
     #[must_use]
+    pub fn with_function_table(self, invoked: RustFunctionTable<T>) -> Self {
+        self.with_invoke(Box::new(move |_| {
+            move |this, vm: &mut VmContext<'_, '_>, name: &SymbolRef, arity| {
+                invoked.invoke(vm, name, arity, &this)
+            }
+        }))
+    }
+
+    #[must_use]
     pub fn with_invoke<Func>(mut self, func: impl FnOnce(InvokeFn) -> Func) -> Self
     where
         Func: Fn(Rooted<T>, &mut VmContext<'_, '_>, &SymbolRef, Arity) -> Result<Value, Fault>

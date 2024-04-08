@@ -2,9 +2,7 @@ use parking_lot::Mutex;
 use refuse::Trace;
 
 use crate::symbol::Symbol;
-use crate::value::{
-    CustomType, Dynamic, Rooted, RustType, StaticRustFunctionTable, TypeRef, Value,
-};
+use crate::value::{CustomType, Dynamic, Rooted, RustFunctionTable, RustType, TypeRef, Value};
 use crate::vm::{Fault, Register, VmContext};
 
 pub static LIST_TYPE: RustType<List> = RustType::new("List", |t| {
@@ -18,36 +16,30 @@ pub static LIST_TYPE: RustType<List> = RustType::new("List", |t| {
             Ok(Dynamic::new(list, vm))
         }
     })
-    .with_invoke(|_| {
-        |this, vm, name, arity| {
-            static FUNCTIONS: StaticRustFunctionTable<List> =
-                StaticRustFunctionTable::new(|table| {
-                    table
-                        .with_fn(
-                            Symbol::len_symbol(),
-                            0,
-                            |_vm: &mut VmContext<'_, '_>, this: &Rooted<List>| {
-                                Value::try_from(this.0.lock().len())
-                            },
-                        )
-                        .with_fn(Symbol::set_symbol(), 2, |vm, this| {
-                            let index = vm[Register(0)].take();
-                            let value = vm[Register(1)].take();
-                            this.set(&index, value)?;
-                            Ok(value)
-                        })
-                        .with_fn(
-                            [Symbol::nth_symbol(), Symbol::get_symbol()],
-                            1,
-                            |vm, this| {
-                                let key = vm[Register(0)].take();
-                                this.get(&key)
-                            },
-                        )
-                });
-            FUNCTIONS.invoke(vm, name, arity, &this)
-        }
-    })
+    .with_function_table(
+        RustFunctionTable::new()
+            .with_fn(
+                Symbol::len_symbol(),
+                0,
+                |_vm: &mut VmContext<'_, '_>, this: &Rooted<List>| {
+                    Value::try_from(this.0.lock().len())
+                },
+            )
+            .with_fn(Symbol::set_symbol(), 2, |vm, this| {
+                let index = vm[Register(0)].take();
+                let value = vm[Register(1)].take();
+                this.set(&index, value)?;
+                Ok(value)
+            })
+            .with_fn(
+                [Symbol::nth_symbol(), Symbol::get_symbol()],
+                1,
+                |vm, this| {
+                    let key = vm[Register(0)].take();
+                    this.get(&key)
+                },
+            ),
+    )
 });
 
 #[derive(Debug)]

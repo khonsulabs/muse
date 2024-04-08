@@ -9,9 +9,7 @@ use regex::{Captures, Regex};
 use crate::string::MuseString;
 use crate::symbol::{Symbol, SymbolRef};
 use crate::syntax::token::RegexLiteral;
-use crate::value::{
-    AnyDynamic, CustomType, Rooted, RustType, StaticRustFunctionTable, TypeRef, Value,
-};
+use crate::value::{AnyDynamic, CustomType, Rooted, RustFunctionTable, RustType, TypeRef, Value};
 use crate::vm::{Fault, Register, VmContext};
 
 #[derive(Debug, Clone)]
@@ -61,45 +59,39 @@ impl Deref for MuseRegex {
 impl CustomType for MuseRegex {
     fn muse_type(&self) -> &TypeRef {
         static TYPE: RustType<MuseRegex> = RustType::new("Regex", |t| {
-            t.with_invoke(|_| {
-                |this, vm, name, arity| {
-                    static FUNCTIONS: StaticRustFunctionTable<MuseRegex> =
-                        StaticRustFunctionTable::new(|table| {
-                            table
-                                .with_fn(
-                                    "total_captures",
-                                    0,
-                                    |_vm: &mut VmContext<'_, '_>, this: &Rooted<MuseRegex>| {
-                                        Value::try_from(this.captures_len())
-                                    },
-                                )
-                                .with_fn(
-                                    "total_static_captures",
-                                    0,
-                                    |_vm: &mut VmContext<'_, '_>, this: &Rooted<MuseRegex>| {
-                                        Ok(this
-                                            .static_captures_len()
-                                            .map(Value::try_from)
-                                            .transpose()?
-                                            .unwrap_or_default())
-                                    },
-                                )
-                                .with_fn(
-                                    Symbol::captures_symbol(),
-                                    1,
-                                    |vm: &mut VmContext<'_, '_>, this: &Rooted<MuseRegex>| {
-                                        let haystack = vm[Register(0)].take();
-                                        haystack.map_str(vm, |vm, haystack| {
-                                            this.captures(haystack, vm.as_ref())
-                                                .map(|value| Value::dynamic(value, vm))
-                                                .unwrap_or_default()
-                                        })
-                                    },
-                                )
-                        });
-                    FUNCTIONS.invoke(vm, name, arity, &this)
-                }
-            })
+            t.with_function_table(
+                RustFunctionTable::new()
+                    .with_fn(
+                        "total_captures",
+                        0,
+                        |_vm: &mut VmContext<'_, '_>, this: &Rooted<MuseRegex>| {
+                            Value::try_from(this.captures_len())
+                        },
+                    )
+                    .with_fn(
+                        "total_static_captures",
+                        0,
+                        |_vm: &mut VmContext<'_, '_>, this: &Rooted<MuseRegex>| {
+                            Ok(this
+                                .static_captures_len()
+                                .map(Value::try_from)
+                                .transpose()?
+                                .unwrap_or_default())
+                        },
+                    )
+                    .with_fn(
+                        Symbol::captures_symbol(),
+                        1,
+                        |vm: &mut VmContext<'_, '_>, this: &Rooted<MuseRegex>| {
+                            let haystack = vm[Register(0)].take();
+                            haystack.map_str(vm, |vm, haystack| {
+                                this.captures(haystack, vm.as_ref())
+                                    .map(|value| Value::dynamic(value, vm))
+                                    .unwrap_or_default()
+                            })
+                        },
+                    ),
+            )
             .with_hash(|_| {
                 |this, _vm, hasher| {
                     this.expr.as_str().hash(hasher);
@@ -202,43 +194,34 @@ impl MuseCaptures {
 impl CustomType for MuseCaptures {
     fn muse_type(&self) -> &TypeRef {
         static TYPE: RustType<MuseCaptures> = RustType::new("RegexCaptures", |t| {
-            t.with_invoke(|_| {
-                |this, vm, name, arity| {
-                    static FUNCTIONS: StaticRustFunctionTable<MuseCaptures> =
-                        StaticRustFunctionTable::new(|table| {
-                            table
-                                .with_fn(
-                                    Symbol::get_symbol(),
-                                    1,
-                                    |vm: &mut VmContext<'_, '_>, this: &Rooted<MuseCaptures>| {
-                                        let index = vm[Register(0)].take();
-                                        let index = if let Some(index) = index.as_usize() {
-                                            index
-                                        } else {
-                                            let name =
-                                                index.to_string(vm)?.try_upgrade(vm.guard())?;
-                                            let Some(index) = this.by_name.get(&name).copied()
-                                            else {
-                                                return Ok(Value::Nil);
-                                            };
-                                            index
-                                        };
-                                        this.matches.get(index).copied().ok_or(Fault::OutOfBounds)
-                                    },
-                                )
-                                .with_fn(
-                                    Symbol::nth_symbol(),
-                                    1,
-                                    |vm: &mut VmContext<'_, '_>, this: &Rooted<MuseCaptures>| {
-                                        let index =
-                                            vm[Register(0)].as_usize().ok_or(Fault::OutOfBounds)?;
-                                        this.matches.get(index).copied().ok_or(Fault::OutOfBounds)
-                                    },
-                                )
-                        });
-                    FUNCTIONS.invoke(vm, name, arity, &this)
-                }
-            })
+            t.with_function_table(
+                RustFunctionTable::new()
+                    .with_fn(
+                        Symbol::get_symbol(),
+                        1,
+                        |vm: &mut VmContext<'_, '_>, this: &Rooted<MuseCaptures>| {
+                            let index = vm[Register(0)].take();
+                            let index = if let Some(index) = index.as_usize() {
+                                index
+                            } else {
+                                let name = index.to_string(vm)?.try_upgrade(vm.guard())?;
+                                let Some(index) = this.by_name.get(&name).copied() else {
+                                    return Ok(Value::Nil);
+                                };
+                                index
+                            };
+                            this.matches.get(index).copied().ok_or(Fault::OutOfBounds)
+                        },
+                    )
+                    .with_fn(
+                        Symbol::nth_symbol(),
+                        1,
+                        |vm: &mut VmContext<'_, '_>, this: &Rooted<MuseCaptures>| {
+                            let index = vm[Register(0)].as_usize().ok_or(Fault::OutOfBounds)?;
+                            this.matches.get(index).copied().ok_or(Fault::OutOfBounds)
+                        },
+                    ),
+            )
         });
         &TYPE
     }
@@ -253,29 +236,23 @@ pub struct MuseMatch {
 impl CustomType for MuseMatch {
     fn muse_type(&self) -> &TypeRef {
         static TYPE: RustType<MuseMatch> = RustType::new("RegexMatch", |t| {
-            t.with_invoke(|_| {
-                |this, vm, name, arity| {
-                    static FUNCTIONS: StaticRustFunctionTable<MuseMatch> =
-                        StaticRustFunctionTable::new(|table| {
-                            table
-                                .with_fn(
-                                    "content",
-                                    0,
-                                    |_vm: &mut VmContext<'_, '_>, this: &Rooted<MuseMatch>| {
-                                        Ok(Value::Dynamic(this.content))
-                                    },
-                                )
-                                .with_fn(
-                                    "start",
-                                    0,
-                                    |_vm: &mut VmContext<'_, '_>, this: &Rooted<MuseMatch>| {
-                                        Value::try_from(this.start)
-                                    },
-                                )
-                        });
-                    FUNCTIONS.invoke(vm, name, arity, &this)
-                }
-            })
+            t.with_function_table(
+                RustFunctionTable::new()
+                    .with_fn(
+                        "content",
+                        0,
+                        |_vm: &mut VmContext<'_, '_>, this: &Rooted<MuseMatch>| {
+                            Ok(Value::Dynamic(this.content))
+                        },
+                    )
+                    .with_fn(
+                        "start",
+                        0,
+                        |_vm: &mut VmContext<'_, '_>, this: &Rooted<MuseMatch>| {
+                            Value::try_from(this.start)
+                        },
+                    ),
+            )
             .with_to_string(|_| |this, vm| this.content.to_string(vm))
         });
         &TYPE
