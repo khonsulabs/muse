@@ -56,7 +56,7 @@ impl TrackedSource {
     #[must_use]
     pub fn offset_to_line(&self, mut offset: usize) -> (usize, usize) {
         let mut line_no = 1;
-        for line in self.source.lines() {
+        for line in self.source.split_inclusive('\n') {
             if offset < line.len() {
                 break;
             }
