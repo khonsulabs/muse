@@ -1213,7 +1213,7 @@ fn parse_from_reader(mut tokens: TokenReader<'_>) -> Result<Ranged<Expression>, 
     loop {
         if tokens.peek().is_none() {
             // Peeking an error returns None
-            match tokens.next() {
+            match tokens.next_or_eof() {
                 Ok(_) | Err(Ranged(Error::UnexpectedEof, _)) => {
                     results.push(tokens.ranged(
                         tokens.last_index..tokens.last_index,
@@ -1226,7 +1226,7 @@ fn parse_from_reader(mut tokens: TokenReader<'_>) -> Result<Ranged<Expression>, 
         }
 
         results.push(config.parse(&mut tokens)?);
-        match tokens.next() {
+        match tokens.next_or_eof() {
             Ok(token) if token.0 == Token::Char(';') => {
                 semicolons.push(token);
             }
@@ -1308,13 +1308,17 @@ impl<'a> TokenReader<'a> {
         self.peek_n(0).map(|t| t.0)
     }
 
-    fn next(&mut self) -> Result<Ranged<Token>, Ranged<Error>> {
+    fn next_or_eof(&mut self) -> Result<Ranged<Token>, Ranged<Error>> {
+        self.next(Error::UnexpectedEof)
+    }
+
+    fn next(&mut self, err: Error) -> Result<Ranged<Token>, Ranged<Error>> {
         let token = if let Some(peeked) = self.peeked.pop_front() {
             peeked?
         } else {
-            self.tokens.next().ok_or_else(|| {
-                self.ranged(self.last_index..self.last_index, Error::UnexpectedEof)
-            })??
+            self.tokens
+                .next()
+                .ok_or_else(|| self.ranged(self.last_index..self.last_index, err))??
         };
         // TODO this should only track if the source matches, which only will
         // differ when macros are involved
@@ -1420,8 +1424,8 @@ impl Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::UnexpectedEof => f.write_str("unexpected end-of-file"),
-            Error::ExpectedEof => f.write_str("expected the end of input"),
-            Error::MissingEnd(kind) => write!(f, "missing closing {}", kind.as_close()),
+            Error::ExpectedEof => f.write_str("expected the end of input or \";\""),
+            Error::MissingEnd(kind) => write!(f, "missing closing \"{}\"", kind.as_close()),
             Error::Token(err) => Display::fmt(err, f),
             Error::UnexpectedToken => f.write_str("unexpected token"),
             Error::ExpectedDeclaration => f.write_str("expected a declaration"),
@@ -1483,7 +1487,7 @@ impl<'a> ParserConfig<'a> {
             'infix: while let Some(possible_operator) = tokens.peek() {
                 for level in &self.parselets.infix.0[start_index..] {
                     if let Some(parselet) = level.find_parselet(&possible_operator, tokens) {
-                        tokens.next()?;
+                        tokens.next_or_eof()?;
                         lhs = parselet.parse(
                             lhs,
                             possible_operator,
@@ -1506,7 +1510,7 @@ impl<'a> ParserConfig<'a> {
         &self,
         tokens: &mut TokenReader<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
-        let token = tokens.next()?;
+        let token = tokens.next_or_eof()?;
         for level in self
             .parselets
             .prefix
@@ -1570,7 +1574,7 @@ impl PrefixParselet for Break {
             .peek_token()
             .map_or(false, |token| matches!(token, Token::Label(_)))
         {
-            let label_token = tokens.next()?;
+            let label_token = tokens.next_or_eof()?;
             let Token::Label(label) = label_token.0 else {
                 unreachable!("just matched")
             };
@@ -1617,7 +1621,7 @@ impl PrefixParselet for Continue {
             .peek_token()
             .map_or(false, |token| matches!(token, Token::Label(_)))
         {
-            let label_token = tokens.next()?;
+            let label_token = tokens.next_or_eof()?;
             let Token::Label(label) = label_token.0 else {
                 unreachable!("just matched")
             };
@@ -1870,7 +1874,7 @@ impl PrefixParselet for Term {
                         let expression = config.parse_expression(&mut reader)?;
 
                         // Ensure the expression was fully consumed
-                        match reader.next() {
+                        match reader.next_or_eof() {
                             Ok(token) => {
                                 return Err(token.map(|_| Error::ExpectedEof));
                             }
@@ -1940,10 +1944,10 @@ fn gather_macro_tokens(tokens: &mut TokenReader<'_>) -> Result<Vec<Ranged<Token>
     };
 
     let mut stack = vec![paired];
-    let mut contents = vec![tokens.next()?];
+    let mut contents = vec![tokens.next_or_eof()?];
 
     while let Some(last_open) = stack.last().copied() {
-        let token = tokens.next()?;
+        let token = tokens.next(Error::MissingEnd(last_open))?;
         match &token.0 {
             Token::Open(next) => stack.push(*next),
             Token::Close(kind) => {
@@ -2044,10 +2048,10 @@ fn parse_block(
     tokens: &mut TokenReader<'_>,
     config: &ParserConfig<'_>,
 ) -> Result<Ranged<Block>, Ranged<Error>> {
-    let open_brace = tokens.next()?;
+    let open_brace = tokens.next(Error::ExpectedBlock)?;
     if matches!(open_brace.0, Token::Open(Paired::Brace)) {
         if tokens.peek_token() == Some(Token::Close(Paired::Brace)) {
-            let close_brace = tokens.next()?;
+            let close_brace = tokens.next(Error::MissingEnd(Paired::Brace))?;
             return Ok(tokens.ranged(
                 open_brace.range().start..,
                 Block {
@@ -2070,11 +2074,11 @@ fn parse_block(
 
         match tokens.peek() {
             Some(Ranged(Token::Char(';'), _)) => {
-                let semicolon = tokens.next()?;
+                let semicolon = tokens.next_or_eof()?;
                 Braces::parse_block(open_brace, expr, semicolon, tokens, config)
             }
             Some(Ranged(Token::Close(Paired::Brace), _)) => {
-                let close = tokens.next()?;
+                let close = tokens.next_or_eof()?;
                 Ok(tokens.ranged(
                     open_brace.range().start..,
                     Block {
@@ -2125,7 +2129,7 @@ impl Braces {
             );
 
             if tokens.peek_token() == Some(Token::Char(';')) {
-                semicolon = tokens.next()?;
+                semicolon = tokens.next_or_eof()?;
                 ended_in_semicolon = true;
             } else {
                 ended_in_semicolon = false;
@@ -2149,7 +2153,7 @@ impl Braces {
             );
         }
 
-        match tokens.next() {
+        match tokens.next_or_eof() {
             Ok(token @ Ranged(Token::Close(Paired::Brace), _)) => Ok(tokens.ranged(
                 open.range().start..,
                 Block {
@@ -2183,13 +2187,13 @@ impl Braces {
 
         match tokens.peek_token() {
             Some(Token::Char(',')) => {
-                values.set_delimiter(tokens.next()?);
+                values.set_delimiter(tokens.next_or_eof()?);
                 while tokens
                     .peek()
                     .map_or(false, |token| token.0 != Token::Close(Paired::Brace))
                 {
                     let key = config.parse_expression(tokens)?;
-                    let colon = match tokens.next()? {
+                    let colon = match tokens.next(Error::ExpectedColon)? {
                         colon @ Ranged(Token::Char(':'), _) => colon,
                         other => return Err(other.map(|_| Error::ExpectedColon)),
                     };
@@ -2201,17 +2205,21 @@ impl Braces {
                     });
 
                     if tokens.peek_token() == Some(Token::Char(',')) {
-                        values.set_delimiter(tokens.next()?);
+                        values.set_delimiter(tokens.next_or_eof()?);
                     } else {
                         break;
                     }
                 }
             }
             Some(Token::Close(Paired::Brace)) => {}
-            _ => return Err(tokens.next()?.map(|_| Error::ExpectedCommaOrBrace)),
+            _ => {
+                return Err(tokens
+                    .next(Error::ExpectedCommaOrBrace)?
+                    .map(|_| Error::ExpectedCommaOrBrace))
+            }
         }
 
-        match tokens.next() {
+        match tokens.next_or_eof() {
             Ok(close @ Ranged(Token::Close(Paired::Brace), _)) => Ok(tokens.ranged(
                 open.range().start..,
                 Expression::Map(Box::new(MapExpression {
@@ -2252,13 +2260,13 @@ impl Braces {
             });
 
             if tokens.peek_token() == Some(Token::Char(',')) {
-                values.set_delimiter(tokens.next()?);
+                values.set_delimiter(tokens.next_or_eof()?);
             } else {
                 break;
             }
         }
 
-        match tokens.next() {
+        match tokens.next_or_eof() {
             Ok(close @ Ranged(Token::Close(Paired::Brace), _)) => Ok(tokens.ranged(
                 open.range().start..,
                 Expression::Map(Box::new(MapExpression {
@@ -2289,13 +2297,13 @@ impl PrefixParselet for Braces {
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
         match tokens.peek_token() {
             Some(Token::Close(Paired::Brace)) => {
-                tokens.next()?;
+                tokens.next_or_eof()?;
                 return Ok(tokens.ranged(open.range().start.., Expression::Literal(Literal::Nil)));
             }
             Some(Token::Char(',')) => {
-                tokens.next()?;
+                tokens.next_or_eof()?;
                 if tokens.peek_token() == Some(Token::Close(Paired::Brace)) {
-                    let close = tokens.next()?;
+                    let close = tokens.next_or_eof()?;
                     return Ok(tokens.ranged(
                         open.range().start..,
                         Expression::Map(Box::new(MapExpression {
@@ -2312,20 +2320,20 @@ impl PrefixParselet for Braces {
 
         match tokens.peek() {
             Some(Ranged(Token::Char(':'), _)) => {
-                let colon = tokens.next()?;
+                let colon = tokens.next_or_eof()?;
                 Self::parse_map(open, expr, colon, tokens, config)
             }
             Some(Ranged(Token::Char(','), _)) => {
-                let comma = tokens.next()?;
+                let comma = tokens.next_or_eof()?;
                 Self::parse_set(open, expr, comma, tokens, config)
             }
             Some(Ranged(Token::Char(';'), _)) => {
-                let semicolon = tokens.next()?;
+                let semicolon = tokens.next_or_eof()?;
                 Self::parse_block(open, expr, semicolon, tokens, config)
                     .map(|ranged| ranged.map(|block| Expression::Block(Box::new(block))))
             }
             Some(Ranged(Token::Close(Paired::Brace), _)) => {
-                let close = tokens.next()?;
+                let close = tokens.next_or_eof()?;
                 Ok(tokens.ranged(
                     open.range().start..,
                     Expression::Block(Box::new(Block {
@@ -2356,7 +2364,7 @@ fn parse_paired(
 ) -> Result<SeparatorAndEnd, Ranged<Error>> {
     let mut ending_separator = None;
     if tokens.peek().map_or(false, |token| &token.0 == separator) {
-        ending_separator = Some(tokens.next()?);
+        ending_separator = Some(tokens.next_or_eof()?);
     } else {
         while tokens
             .peek()
@@ -2365,7 +2373,7 @@ fn parse_paired(
             inner(ending_separator, tokens)?;
 
             if tokens.peek_token().as_ref() == Some(separator) {
-                ending_separator = Some(tokens.next()?);
+                ending_separator = Some(tokens.next_or_eof()?);
             } else {
                 ending_separator = None;
                 break;
@@ -2373,7 +2381,7 @@ fn parse_paired(
         }
     }
 
-    let close = tokens.next();
+    let close = tokens.next(Error::MissingEnd(end));
     match &close {
         Ok(Ranged(Token::Close(token), _)) if token == &end => {
             Ok((ending_separator, close.expect("just matched")))
@@ -2401,7 +2409,7 @@ impl PrefixParselet for Parentheses {
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
         let expression = config.parse_expression(tokens)?;
 
-        let end_paren = tokens.next()?;
+        let end_paren = tokens.next(Error::MissingEnd(Paired::Paren))?;
         if end_paren.0 == Token::Close(Paired::Paren) {
             Ok(tokens.ranged(
                 open.range().start..,
@@ -2618,7 +2626,7 @@ impl PrefixParselet for If {
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
         let condition = config.parse_expression(tokens)?;
-        let brace_or_then = tokens.next()?;
+        let brace_or_then = tokens.next(Error::ExpectedThenOrBrace)?;
         let (then, when_true) = match &brace_or_then.0 {
             Token::Open(Paired::Brace) => {
                 (None, Braces.parse_prefix(brace_or_then, tokens, config)?)
@@ -2630,14 +2638,14 @@ impl PrefixParselet for If {
         };
         let when_false =
             if tokens.peek_token() == Some(Token::Identifier(Symbol::else_symbol().clone())) {
-                let r#else = tokens.next()?;
+                let r#else = tokens.next_or_eof()?;
                 Some(Else {
                     expression: match tokens.peek_token() {
                         Some(Token::Identifier(ident)) if ident == *Symbol::if_symbol() => {
-                            Self.parse_prefix(tokens.next()?, tokens, config)?
+                            Self.parse_prefix(tokens.next_or_eof()?, tokens, config)?
                         }
                         Some(Token::Open(Paired::Brace)) => {
-                            Braces.parse_prefix(tokens.next()?, tokens, config)?
+                            Braces.parse_prefix(tokens.next_or_eof()?, tokens, config)?
                         }
                         _ => config.parse_expression(tokens)?,
                     },
@@ -2672,7 +2680,7 @@ impl InfixParselet for If {
         let else_expr = if tokens.peek_token().map_or(false, |token| {
             token == Token::Identifier(Symbol::else_symbol().clone())
         }) {
-            let r#else = tokens.next()?;
+            let r#else = tokens.next_or_eof()?;
             Some(Else {
                 expression: config.parse_expression(tokens)?,
                 r#else,
@@ -2723,7 +2731,10 @@ impl PrefixParselet for Labeled {
             token
         });
 
-        let colon = tokens.next()?;
+        let colon = tokens.next(Error::ExpectedColon)?;
+        if colon.0 != Token::Char(':') {
+            return Err(colon.map(|_| Error::ExpectedColon));
+        }
         let label = Label { name: label, colon };
         let mut subject = config.parse_expression(tokens)?;
         match &mut subject.0 {
@@ -2765,7 +2776,7 @@ impl PrefixParselet for Loop {
             false,
             |token| matches!(token, Token::Identifier(ident) if &ident == Symbol::while_symbol()),
         ) {
-            let r#while = tokens.next()?;
+            let r#while = tokens.next_or_eof()?;
             LoopKind::TailWhile {
                 r#while,
                 expression: config.parse_expression(tokens)?,
@@ -2807,7 +2818,7 @@ impl PrefixParselet for For {
             return Err(tokens.ranged(tokens.last_index.., Error::ExpectedPattern));
         };
 
-        let r#in = tokens.next()?;
+        let r#in = tokens.next(Error::ExpectedIn)?;
         if !matches!(&r#in.0, Token::Identifier(ident) if ident == Symbol::in_symbol()) {
             return Err(r#in.map(|_| Error::ExpectedIn));
         }
@@ -2880,16 +2891,16 @@ impl PrefixParselet for Try {
         let catch = if tokens.peek_token()
             == Some(Token::Identifier(Symbol::catch_symbol().clone()))
         {
-            let catch_token = tokens.next()?;
+            let catch_token = tokens.next_or_eof()?;
             let matches = match tokens.peek_token() {
                 Some(Token::Open(Paired::Brace)) => {
                     // Match catch
-                    let open_brace = tokens.next()?;
+                    let open_brace = tokens.next_or_eof()?;
 
                     parse_match_block_body(open_brace, tokens, config)?
                 }
                 Some(Token::FatArrow) => {
-                    let arrow = tokens.next()?;
+                    let arrow = tokens.next_or_eof()?;
                     let pattern = Ranged::new(
                         catch_token.range(),
                         Pattern {
@@ -3015,7 +3026,7 @@ impl PrefixParselet for Match {
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
         let condition = config.parse_expression(tokens)?;
 
-        let brace = tokens.next()?;
+        let brace = tokens.next(Error::ExpectedMatchBody)?;
         let matches = if brace.0 == Token::Open(Paired::Brace) {
             parse_match_block_body(brace, tokens, config)?
         } else {
@@ -3066,12 +3077,12 @@ impl Mod {
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
-        let name_token = tokens.next()?;
+        let name_token = tokens.next(Error::ExpectedName)?;
         let Token::Identifier(name) = name_token.0 else {
             return Err(name_token.map(|_| Error::ExpectedName));
         };
 
-        let brace = tokens.next()?;
+        let brace = tokens.next(Error::ExpectedModuleBody)?;
         let contents = if brace.0 == Token::Open(Paired::Brace) {
             Braces.parse_prefix(brace, tokens, config)?
         } else {
@@ -3105,7 +3116,7 @@ impl PrefixParselet for Pub {
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
-        let keyword_token = tokens.next()?;
+        let keyword_token = tokens.next(Error::ExpectedDeclaration)?;
         let Token::Identifier(keyword) = &keyword_token.0 else {
             return Err(keyword_token.map(|_| Error::ExpectedDeclaration));
         };
@@ -3146,20 +3157,20 @@ impl Fn {
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
         let name = if let Some(Token::Identifier(name)) = tokens.peek_token() {
-            Some(tokens.next()?.map(|_| name))
+            Some(tokens.next_or_eof()?.map(|_| name))
         } else {
             None
         };
 
         let pattern: Ranged<Pattern> = match tokens.peek_token() {
             Some(Token::Open(Paired::Paren)) => {
-                let start = tokens.next()?;
+                let start = tokens.next_or_eof()?;
 
                 parse_tuple_destructure_pattern(start, Paired::Paren, tokens)?.into()
             }
             Some(Token::Open(Paired::Brace)) => {
                 // Pattern/overloaded function.
-                let brace = tokens.next()?;
+                let brace = tokens.next_or_eof()?;
                 let body = parse_match_block_body(brace, tokens, config)?;
 
                 return Ok(tokens.ranged(
@@ -3184,7 +3195,7 @@ impl Fn {
                 .into(),
         };
 
-        let body_indicator = tokens.next()?;
+        let body_indicator = tokens.next(Error::ExpectedFunctionBody)?;
         let (arrow, body) = match &body_indicator.0 {
             Token::Open(Paired::Brace) => {
                 let arrow = tokens.ranged(
@@ -3437,7 +3448,7 @@ fn parse_pattern(
         false,
         |token| matches!(&token, Token::Identifier(ident) if ident == Symbol::if_symbol()),
     ) {
-        tokens.next()?;
+        tokens.next_or_eof()?;
         Some(config.parse_conditional(tokens)?)
     } else {
         None
@@ -3457,62 +3468,62 @@ fn parse_pattern_kind(
     };
     let mut pattern = match &indicator.0 {
         Token::Char('_') => {
-            tokens.next()?;
+            tokens.next_or_eof()?;
             indicator.map(|_| PatternKind::Any(None))
         }
         Token::Ellipses => {
-            tokens.next()?;
+            tokens.next_or_eof()?;
             indicator.map(|_| PatternKind::AnyRemaining)
         }
         Token::Identifier(name) if name == Symbol::true_symbol() => {
-            tokens.next()?;
+            tokens.next_or_eof()?;
             Ranged::new(indicator.range(), PatternKind::Literal(Literal::Bool(true)))
         }
         Token::Identifier(name) if name == Symbol::false_symbol() => {
-            tokens.next()?;
+            tokens.next_or_eof()?;
             Ranged::new(
                 indicator.range(),
                 PatternKind::Literal(Literal::Bool(false)),
             )
         }
         Token::Identifier(name) if name == Symbol::nil_symbol() => {
-            tokens.next()?;
+            tokens.next_or_eof()?;
             Ranged::new(indicator.range(), PatternKind::Literal(Literal::Nil))
         }
         Token::Identifier(name) => {
-            tokens.next()?;
+            tokens.next_or_eof()?;
             Ranged::new(indicator.range(), PatternKind::Any(Some(name.clone())))
         }
         Token::Symbol(name) => {
-            tokens.next()?;
+            tokens.next_or_eof()?;
             Ranged::new(
                 indicator.range(),
                 PatternKind::Literal(Literal::Symbol(name.clone())),
             )
         }
         Token::Int(value) => {
-            tokens.next()?;
+            tokens.next_or_eof()?;
             Ranged::new(
                 indicator.range(),
                 PatternKind::Literal(Literal::Int(*value)),
             )
         }
         Token::UInt(value) => {
-            tokens.next()?;
+            tokens.next_or_eof()?;
             Ranged::new(
                 indicator.range(),
                 PatternKind::Literal(Literal::UInt(*value)),
             )
         }
         Token::Float(value) => {
-            tokens.next()?;
+            tokens.next_or_eof()?;
             Ranged::new(
                 indicator.range(),
                 PatternKind::Literal(Literal::Float(*value)),
             )
         }
         Token::Regex(_) => {
-            let Ok(Ranged(Token::Regex(regex), _)) = tokens.next() else {
+            let Ok(Ranged(Token::Regex(regex), _)) = tokens.next_or_eof() else {
                 unreachable!("just peeked")
             };
             Ranged::new(
@@ -3521,7 +3532,7 @@ fn parse_pattern_kind(
             )
         }
         Token::String(_) => {
-            let Ok(Ranged(Token::String(string), _)) = tokens.next() else {
+            let Ok(Ranged(Token::String(string), _)) = tokens.next_or_eof() else {
                 unreachable!("just peeked")
             };
             Ranged::new(
@@ -3530,11 +3541,11 @@ fn parse_pattern_kind(
             )
         }
         Token::Open(Paired::Bracket) => {
-            tokens.next()?;
+            tokens.next_or_eof()?;
             parse_tuple_destructure_pattern(indicator, Paired::Bracket, tokens)?
         }
         Token::Open(Paired::Brace) => {
-            tokens.next()?;
+            tokens.next_or_eof()?;
 
             parse_map_destructure_pattern(indicator, tokens)?
         }
@@ -3542,7 +3553,7 @@ fn parse_pattern_kind(
     };
 
     while tokens.peek_token() == Some(Token::Char('|')) {
-        let or = tokens.next()?;
+        let or = tokens.next_or_eof()?;
         let Some(rhs) = parse_pattern_kind(tokens)? else {
             return Err(tokens.ranged(tokens.last_index.., Error::ExpectedPattern));
         };
@@ -3565,7 +3576,7 @@ fn parse_tuple_destructure_pattern(
         patterns.push(pattern);
 
         if tokens.peek_token() == Some(Token::Char(',')) {
-            patterns.set_delimiter(tokens.next()?);
+            patterns.set_delimiter(tokens.next_or_eof()?);
         } else {
             break;
         }
@@ -3575,10 +3586,10 @@ fn parse_tuple_destructure_pattern(
     // If there were no patterns, still allow a comma for consistency with other
     // empty collection literals.
     if patterns.is_empty() && tokens.peek_token() == Some(Token::Char(',')) {
-        tokens.next()?;
+        tokens.next_or_eof()?;
     }
 
-    let closing_brace = tokens.next()?;
+    let closing_brace = tokens.next(Error::ExpectedPatternOr(kind))?;
     if matches!(closing_brace.0, Token::Close(paired) if paired == kind) {
         Ok(tokens.ranged(
             open.range().start..,
@@ -3601,13 +3612,13 @@ fn parse_map_destructure_pattern(
 
     if tokens.peek_token() == Some(Token::Char(',')) {
         // Empty map
-        tokens.next()?;
+        tokens.next_or_eof()?;
     } else {
         while tokens
             .peek_token()
             .map_or(false, |token| token != Token::Close(Paired::Brace))
         {
-            let token = tokens.next()?;
+            let token = tokens.next_or_eof()?;
             let key = match token.0 {
                 Token::Int(value) => Ranged::new(token.1, EntryKeyPattern::Int(value)),
                 Token::UInt(value) => Ranged::new(token.1, EntryKeyPattern::UInt(value)),
@@ -3619,7 +3630,7 @@ fn parse_map_destructure_pattern(
                 _ => return Err(Ranged::new(token.1, Error::InvalidMapKeyPattern)),
             };
 
-            let colon = tokens.next()?;
+            let colon = tokens.next(Error::ExpectedColon)?;
             if colon.0 != Token::Char(':') {
                 return Err(colon.map(|_| Error::ExpectedColon));
             }
@@ -3630,14 +3641,14 @@ fn parse_map_destructure_pattern(
             entries.push(tokens.ranged(key.range().start.., EntryPattern { key, colon, value }));
 
             if tokens.peek_token() == Some(Token::Char(',')) {
-                entries.set_delimiter(tokens.next()?);
+                entries.set_delimiter(tokens.next_or_eof()?);
             } else {
                 break;
             }
         }
     }
 
-    let end_brace = tokens.next()?;
+    let end_brace = tokens.next(Error::MissingEnd(Paired::Brace))?;
     if end_brace.0 != Token::Close(Paired::Brace) {
         return Err(end_brace.map(|_| Error::MissingEnd(Paired::Brace)));
     }
@@ -3659,7 +3670,7 @@ fn parse_match_block_body(
 ) -> Result<Ranged<Matches>, Ranged<Error>> {
     let mut patterns = Delimited::<_, Ranged<Token>>::build_empty();
     while let Some(pattern) = parse_pattern(tokens, config)? {
-        let arrow_or_brace = tokens.next()?;
+        let arrow_or_brace = tokens.next(Error::ExpectedPatternOr(Paired::Brace))?;
         let (arrow, body) = match &arrow_or_brace.0 {
             Token::FatArrow => (arrow_or_brace, config.parse_expression(tokens)?),
             Token::Open(Paired::Brace) => {
@@ -3670,7 +3681,7 @@ fn parse_match_block_body(
                     parse_block(tokens, config)?.map(|block| Expression::Block(Box::new(block))),
                 )
             }
-            _ => return Err(arrow_or_brace.map(|_| Error::ExpectedFatArrow)),
+            _ => return Err(arrow_or_brace.map(|_| Error::ExpectedPatternOr(Paired::Brace))),
         };
 
         patterns.push(tokens.ranged(
@@ -3683,13 +3694,13 @@ fn parse_match_block_body(
         ));
 
         if tokens.peek_token() == Some(Token::Char(',')) {
-            patterns.set_delimiter(tokens.next()?);
+            patterns.set_delimiter(tokens.next_or_eof()?);
         } else {
             break;
         }
     }
 
-    let closing_brace = tokens.next()?;
+    let closing_brace = tokens.next(Error::ExpectedPatternOr(Paired::Brace))?;
     if closing_brace.0 == Token::Close(Paired::Brace) {
         Ok(tokens.ranged(
             open.range().start..,
@@ -3715,7 +3726,7 @@ fn parse_variable(
     };
 
     let (eq, value) = if tokens.peek_token() == Some(Token::Char('=')) {
-        let eq = tokens.next()?;
+        let eq = tokens.next_or_eof()?;
         (Some(eq), config.parse_expression(tokens)?)
     } else {
         (
@@ -3725,7 +3736,7 @@ fn parse_variable(
     };
 
     let r#else = if tokens.peek_token() == Some(Token::Identifier(Symbol::else_symbol().clone())) {
-        let r#else = tokens.next()?;
+        let r#else = tokens.next_or_eof()?;
         Some(Else {
             expression: config.parse_expression(tokens)?,
             r#else,
@@ -3799,7 +3810,7 @@ impl InfixParselet for Dot {
         tokens: &mut TokenReader<'_>,
         _config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<Error>> {
-        let name_token = tokens.next()?;
+        let name_token = tokens.next(Error::ExpectedName)?;
         let Token::Identifier(name) = name_token.0 else {
             return Err(Ranged::new(name_token.1, Error::ExpectedName));
         };
