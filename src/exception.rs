@@ -1,7 +1,10 @@
+use std::fmt::{self, Debug};
+
 use refuse::Trace;
 
+use crate::syntax::Sources;
 use crate::value::{AnyDynamic, CustomType, RustType, TypeRef, Value};
-use crate::vm::{StackFrame, VmContext};
+use crate::vm::{Code, StackFrame, VmContext};
 
 #[derive(Debug)]
 pub struct Exception {
@@ -23,6 +26,30 @@ impl Exception {
     #[must_use]
     pub fn backtrace(&self) -> &[StackFrame] {
         &self.stack_trace
+    }
+
+    pub fn format(
+        &self,
+        sources: &Sources,
+        context: &mut VmContext<'_, '_>,
+        mut f: impl fmt::Write,
+    ) -> fmt::Result {
+        f.write_str("uncaught exception: ")?;
+        self.value.format(context, &mut f)?;
+        if !self.stack_trace.is_empty() {
+            for entry in &self.stack_trace {
+                f.write_char('\n')?;
+                if let Some(range) = entry.source_range() {
+                    if let Some(source) = sources.get(range.source_id) {
+                        let (line_no, start) = source.offset_to_line(range.start);
+                        write!(f, "in {}:{line_no}:{start}", source.name)?;
+                        continue;
+                    }
+                }
+                write!(f, "in {:?}", entry.code() as *const Code)?;
+            }
+        }
+        Ok(())
     }
 }
 

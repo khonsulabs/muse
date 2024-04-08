@@ -94,7 +94,8 @@ impl History {
                 .sources
                 .get(self.source)
                 .expect("missing source")
-                .to_string(),
+                .source
+                .clone(),
         )
         .with(&FontFamily, FamilyOwned::Monospace)
         .align_left()
@@ -134,7 +135,8 @@ fn execute_input(
 ) {
     let mut runtime = runtime.lock();
     let runtime = &mut *runtime;
-    let source = runtime.sources.push(source);
+    let line_num = runtime.sources.len();
+    let source = runtime.sources.push(line_num.to_string(), source);
     let source_id = source.id;
     runtime.compiler.push(source);
     match runtime.compiler.build(guard) {

@@ -46,16 +46,15 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
                     Ok(Dynamic::new(MuseString::from(value), vm))
                 }
             } else if let Ok(length) = (0..arity.0).try_fold(0_usize, |accum, r| {
-                vm[Register(r)]
-                    .as_symbol(vm.guard())
-                    .map_or(Err(()), |sym| Ok(accum + sym.len()))
+                let value = vm[Register(r)];
+                value.map_str(vm, |_vm, s| accum + s.len())
             }) {
                 let mut joined = String::with_capacity(length);
                 for r in 0..arity.0 {
-                    let Some(sym) = vm[Register(r)].as_symbol(vm.guard()) else {
-                        unreachable!()
-                    };
-                    joined.push_str(&sym);
+                    let value = vm[Register(r)];
+                    value
+                        .map_str(vm, |_vm, s| joined.push_str(s))
+                        .expect("just tested");
                 }
 
                 Ok(Dynamic::new(MuseString::from(joined), vm))

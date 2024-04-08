@@ -1,6 +1,6 @@
 use core::slice;
 use std::collections::VecDeque;
-use std::fmt::{Debug, Display};
+use std::fmt::{self, Debug, Display};
 use std::num::NonZeroUsize;
 use std::ops::{Bound, Deref, DerefMut, Range, RangeBounds, RangeInclusive};
 use std::{option, vec};
@@ -9,7 +9,9 @@ use ahash::AHashMap;
 use serde::{Deserialize, Serialize};
 
 use self::token::{FormatString, FormatStringPart, Paired, RegexLiteral, Token, Tokens};
+use crate::exception::Exception;
 use crate::symbol::Symbol;
+use crate::vm::{ExecutionError, VmContext};
 pub mod token;
 
 pub struct SourceCode<'a> {
@@ -44,18 +46,42 @@ impl<'a> From<&'a String> for SourceCode<'a> {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TrackedSource {
+    pub name: String,
+    pub source: String,
+}
+
+impl TrackedSource {
+    #[must_use]
+    pub fn offset_to_line(&self, mut offset: usize) -> (usize, usize) {
+        let mut line_no = 1;
+        for line in self.source.lines() {
+            if offset < line.len() {
+                break;
+            }
+            offset -= line.len();
+            line_no += 1;
+        }
+        (line_no, offset + 1)
+    }
+}
+
 #[derive(Default)]
-pub struct Sources(Vec<String>);
+pub struct Sources(Vec<TrackedSource>);
 
 impl Sources {
-    pub fn push(&mut self, source: impl Into<String>) -> SourceCode<'_> {
+    pub fn push(&mut self, name: impl Into<String>, source: impl Into<String>) -> SourceCode<'_> {
         let id = self.next_id();
-        self.0.push(source.into());
-        SourceCode::new(self.0.last().expect("just pushed"), id)
+        self.0.push(TrackedSource {
+            name: name.into(),
+            source: source.into(),
+        });
+        SourceCode::new(&self.0.last().expect("just pushed").source, id)
     }
 
     #[must_use]
-    pub fn get(&self, id: SourceId) -> Option<&String> {
+    pub fn get(&self, id: SourceId) -> Option<&TrackedSource> {
         let index = id.0?.get() - 1;
         self.0.get(index)
     }
@@ -63,6 +89,61 @@ impl Sources {
     #[must_use]
     pub fn next_id(&self) -> SourceId {
         SourceId::new(NonZeroUsize::new(self.0.len() + 1).expect("always > 0"))
+    }
+
+    pub fn format_error(
+        &self,
+        err: impl Into<crate::Error>,
+        context: &mut VmContext<'_, '_>,
+        fmt: impl fmt::Write,
+    ) -> fmt::Result {
+        self.format_error_inner(err.into(), context, fmt)
+    }
+
+    fn format_error_inner(
+        &self,
+        err: crate::Error,
+        context: &mut VmContext<'_, '_>,
+        mut f: impl fmt::Write,
+    ) -> fmt::Result {
+        match err {
+            crate::Error::Compilation(errors) => {
+                for error in errors {
+                    if let Some(source) = self.get(error.range().source_id) {
+                        let (line_no, start) = source.offset_to_line(error.range().start);
+                        write!(
+                            f,
+                            "compilation error in {}:{line_no}:{start}: ",
+                            source.name
+                        )?;
+                    } else {
+                        write!(f, "compilation error: ")?;
+                    }
+                    write!(f, "{}", error.0)?;
+                }
+                Ok(())
+            }
+            crate::Error::Execution(execution) => match execution {
+                ExecutionError::NoBudget => f.write_str("execution budget exhausted"),
+                ExecutionError::Waiting => f.write_str("blocked waiting for an external task"),
+                ExecutionError::Timeout => f.write_str("execution timeout"),
+                ExecutionError::Exception(value) => {
+                    if let Some(exception) = value.as_rooted::<Exception>(context.guard()) {
+                        exception.format(self, context, f)
+                    } else {
+                        value.format(context, f)
+                    }
+                }
+            },
+        }
+    }
+}
+
+impl Deref for Sources {
+    type Target = [TrackedSource];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -1336,7 +1417,7 @@ impl crate::ErrorKind for Error {
 impl std::error::Error for Error {}
 
 impl Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::UnexpectedEof => f.write_str("unexpected end-of-file"),
             Error::ExpectedEof => f.write_str("expected the end of input"),

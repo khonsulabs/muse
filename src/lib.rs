@@ -29,7 +29,7 @@ pub trait ErrorKind: std::error::Error {
     fn kind(&self) -> &'static str;
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Error {
     Compilation(Vec<Ranged<compiler::Error>>),
     Execution(vm::ExecutionError),

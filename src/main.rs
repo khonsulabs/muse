@@ -32,13 +32,11 @@ fn main() {
     let mut sources = Sources::default();
     let mut compiler = Compiler::default();
     loop {
-        match editor.readline(&format!(
-            "{}> ",
-            sources.next_id().get().map_or(0, NonZeroUsize::get)
-        )) {
+        let line_num = sources.next_id().get().map_or(0, NonZeroUsize::get);
+        match editor.readline(&format!("{line_num}> ")) {
             Ok(line) => {
                 let _err = editor.append_history(&history_path);
-                let source = sources.push(line);
+                let source = sources.push(line_num.to_string(), line);
                 compiler.push(source);
                 match compiler.build(&guard) {
                     Ok(code) => match vm.execute(&code, &mut guard) {
@@ -164,7 +162,7 @@ impl Cache<SourceId> for SourceCache<'_> {
         id: &SourceId,
     ) -> Result<&ariadne::Source<Self::Storage>, Box<dyn std::fmt::Debug + '_>> {
         Ok(self.1.entry(*id).or_insert_with(|| {
-            ariadne::Source::from(self.0.get(*id).expect("missing source").clone())
+            ariadne::Source::from(self.0.get(*id).expect("missing source").source.clone())
         }))
     }
 
@@ -180,7 +178,7 @@ impl Helper for Muse {}
 impl Validator for Muse {
     fn validate(&self, ctx: &mut ValidationContext) -> rustyline::Result<ValidationResult> {
         let mut sources = Sources::default();
-        let source = sources.push(ctx.input().to_string());
+        let source = sources.push("", ctx.input().to_string());
         match parse(source) {
             Ok(_) => Ok(ValidationResult::Valid(None)),
             Err(Ranged(

@@ -1,6 +1,6 @@
 use std::any::Any;
 use std::cmp::Ordering;
-use std::fmt::Debug;
+use std::fmt::{self, Debug};
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
@@ -998,6 +998,18 @@ impl Value {
             Value::Float(value) => Some(Value::Float(*value)),
             Value::Symbol(value) => Some(Value::Symbol(*value)),
             Value::Dynamic(value) => value.deep_clone(guard).map(Value::Dynamic),
+        }
+    }
+
+    pub fn format(&self, context: &mut VmContext<'_, '_>, mut f: impl fmt::Write) -> fmt::Result {
+        if let Some(s) = self
+            .to_string(context)
+            .ok()
+            .and_then(|s| s.load(context.guard()))
+        {
+            f.write_str(s)
+        } else {
+            todo!("display unformattable value")
         }
     }
 }
