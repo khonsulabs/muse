@@ -1,6 +1,8 @@
+//! An example showing how to use Muse in async.
+
 use muse::compiler::Compiler;
-use muse::symbol::Symbol;
-use muse::value::{AsyncFunction, Value};
+use muse::runtime::symbol::Symbol;
+use muse::runtime::value::{AsyncFunction, Value};
 use muse::vm::{Arity, Fault, Register, Vm, VmContext};
 use refuse::CollectionGuard;
 

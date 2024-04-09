@@ -53,6 +53,7 @@ missing_panics_doc = "allow"
 
 [lints.rust]
 unsafe_code = "forbid"
+missing_docs = "warn"
 
 
 [[test]]

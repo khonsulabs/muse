@@ -1,3 +1,6 @@
+//! Types for "symbols", an optimized string-like type that ensures only one
+//! underlying copy of each unique string exists.
+
 use std::fmt::{Debug, Display};
 use std::ops::{Add, Deref};
 use std::sync::OnceLock;
@@ -8,16 +11,28 @@ use refuse_pool::{RefString, RootString};
 use serde::de::Visitor;
 use serde::{Deserialize, Serialize};
 
-use crate::value::ValueFreed;
+use crate::runtime::value::ValueFreed;
 
+/// A garbage-collected weak reference to a [`Symbol`].
 #[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Hash, Trace)]
 pub struct SymbolRef(RefString);
+
 impl SymbolRef {
+    /// Loads the underlying string value of this symbol.
+    ///
+    /// Returns `None` if the underlying symbol has been freed by the garbage
+    /// collector.
     #[must_use]
     pub fn load<'guard>(&self, guard: &'guard CollectionGuard<'_>) -> Option<&'guard str> {
         self.0.load(guard)
     }
 
+    /// Tries to loads the underlying string value of this symbol.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValueFreed`] if the underlying symbol has been freed by the
+    /// garbage collector.
     pub fn try_load<'guard>(
         &self,
         guard: &'guard CollectionGuard<'_>,
@@ -25,10 +40,22 @@ impl SymbolRef {
         self.load(guard).ok_or(ValueFreed)
     }
 
+    /// Upgrades this weak reference to a reference-counted [`Symbol`].
+    ///
+    ///
+    /// Returns `None` if the underlying symbol has been freed by the garbage
+    /// collector.
+    #[must_use]
     pub fn upgrade(&self, guard: &CollectionGuard<'_>) -> Option<Symbol> {
         self.0.as_root(guard).map(Symbol)
     }
 
+    /// Tries to upgrade this weak reference to a reference-counted [`Symbol`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValueFreed`] if the underlying symbol has been freed by the
+    /// garbage collector.
     pub fn try_upgrade(&self, guard: &CollectionGuard<'_>) -> Result<Symbol, ValueFreed> {
         self.upgrade(guard).ok_or(ValueFreed)
     }
@@ -40,10 +67,16 @@ impl kempt::Sort<SymbolRef> for Symbol {
     }
 }
 
+/// A reference-counted, cheap-to-compare String type.
+///
+/// Symbols are optimized to be able to cheaply compare and hash without needing
+/// to analyze the underlying string contents. This is done by ensuring that all
+/// instances of the same underlying string data point to the same [`Symbol`].
 #[derive(Clone, Trace)]
 pub struct Symbol(RootString);
 
 impl Symbol {
+    /// Returns a weak reference to this symbol.
     #[must_use]
     pub const fn downgrade(&self) -> SymbolRef {
         SymbolRef(self.0.downgrade())
@@ -79,7 +112,9 @@ impl std::hash::Hash for Symbol {
 macro_rules! static_symbols {
     ($($name:ident => $string:literal),+ $(,)?) => {
         impl Symbol {
-            $(pub fn $name() -> &'static Self {
+            $(
+                #[doc = concat!("Returns the symbol for \"", $string, "\".")]
+                pub fn $name() -> &'static Self {
                 static S: OnceLock<Symbol> = OnceLock::new();
                 S.get_or_init(|| Symbol::from($string))
             })+
@@ -169,7 +204,9 @@ impl From<Symbol> for SymbolRef {
     }
 }
 
+/// A type that can be optionally be converted to a [`Symbol`].
 pub trait IntoOptionSymbol {
+    /// Returns this type as an optional symbol.
     fn into_symbol(self) -> Option<Symbol>;
 }
 
@@ -332,9 +369,15 @@ impl<'de> Visitor<'de> for SymbolVisitor {
     }
 }
 
+/// A [`Symbol`] that is initialized once and retains a reference to the
+/// [`Symbol`].
+///
+/// This type is designed to be used as a `static`, allowing usages of common
+/// symbols to never be garbage collected.
 pub struct StaticSymbol(OnceLock<Symbol>, &'static str);
 
 impl StaticSymbol {
+    /// Returns a new static symbol from a static string.
     #[must_use]
     pub const fn new(symbol: &'static str) -> Self {
         Self(OnceLock::new(), symbol)
@@ -361,24 +404,31 @@ impl Deref for StaticSymbol {
     }
 }
 
+/// A type that contains a list of symbols.
 pub trait SymbolList {
+    /// The iterator used for [`into_symbols`](Self::into_symbols).
     type Iterator: Iterator<Item = Symbol>;
+
+    /// Returns `self` as an iterator over its contained symbols.
     fn into_symbols(self) -> Self::Iterator;
 }
 
-impl<const N: usize> SymbolList for [Symbol; N] {
-    type Iterator = array::IntoIter<Symbol, N>;
+/// An iterator over an array of types that implement [`Into<Symbol>`].
+pub struct ArraySymbolsIntoIter<T: Into<Symbol>, const N: usize>(array::IntoIter<T, N>);
 
-    fn into_symbols(self) -> Self::Iterator {
-        self.into_iter()
+impl<T: Into<Symbol>, const N: usize> Iterator for ArraySymbolsIntoIter<T, N> {
+    type Item = Symbol;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(T::into)
     }
 }
 
-impl<'a, const N: usize> SymbolList for [&'a Symbol; N] {
-    type Iterator = iter::Cloned<array::IntoIter<&'a Symbol, N>>;
+impl<T: Into<Symbol>, const N: usize> SymbolList for [T; N] {
+    type Iterator = ArraySymbolsIntoIter<T, N>;
 
     fn into_symbols(self) -> Self::Iterator {
-        self.into_iter().cloned()
+        ArraySymbolsIntoIter(self.into_iter())
     }
 }
 

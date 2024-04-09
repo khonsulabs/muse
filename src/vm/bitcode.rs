@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use std::ops::{Deref, DerefMut};
 use std::str;
 
@@ -8,10 +10,10 @@ use serde::{Deserialize, Serialize};
 #[cfg(not(feature = "dispatched"))]
 use super::LoadedOp;
 use super::{Arity, Code, CodeData, Function, LoadedSource, Register};
+use crate::compiler::syntax::token::RegexLiteral;
+use crate::compiler::syntax::{BitwiseKind, CompareKind, Literal, SourceRange};
 use crate::compiler::{BitcodeModule, SourceMap, UnaryKind};
-use crate::symbol::Symbol;
-use crate::syntax::token::RegexLiteral;
-use crate::syntax::{BitwiseKind, CompareKind, Literal, SourceRange};
+use crate::runtime::symbol::Symbol;
 use crate::vm::Stack;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -1,3 +1,5 @@
+//! A Safe, familiar, embeddable programming language.
+
 macro_rules! impl_from {
     ($on:ty, $from:ty, $variant:ident) => {
         impl From<$from> for $on {
@@ -9,29 +11,28 @@ macro_rules! impl_from {
 }
 
 pub mod compiler;
-pub mod map;
-pub mod string;
-pub mod symbol;
-pub mod syntax;
-pub mod value;
 pub mod vm;
 
-pub mod exception;
-pub mod list;
-pub mod regex;
+pub mod runtime;
+
 #[cfg(test)]
 mod tests;
 
+use compiler::syntax::Ranged;
 pub use refuse;
-use syntax::Ranged;
 
-pub trait ErrorKind: std::error::Error {
+/// Summarizes an error's kind.
+pub trait ErrorKind {
+    /// Returns the summary of the error being raised.
     fn kind(&self) -> &'static str;
 }
 
+/// One or more errors raised during compilation or execution.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
+    /// A list of compilation errors.
     Compilation(Vec<Ranged<compiler::Error>>),
+    /// An execution error.
     Execution(vm::ExecutionError),
 }
 

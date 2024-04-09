@@ -2,12 +2,12 @@ use std::collections::VecDeque;
 
 use refuse::CollectionGuard;
 
+use crate::compiler::syntax::token::{Paired, Token};
+use crate::compiler::syntax::{Expression, Ranged, SourceRange};
 use crate::compiler::Compiler;
-use crate::exception::Exception;
-use crate::symbol::Symbol;
-use crate::syntax::token::{Paired, Token};
-use crate::syntax::{Expression, Ranged, SourceRange};
-use crate::value::Value;
+use crate::runtime::exception::Exception;
+use crate::runtime::symbol::Symbol;
+use crate::runtime::value::Value;
 use crate::vm::bitcode::BitcodeBlock;
 use crate::vm::{ExecutionError, Register, Vm};
 

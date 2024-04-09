@@ -1,3 +1,5 @@
+//! Types used for regular expressions.
+
 use std::fmt::Display;
 use std::hash::Hash;
 use std::ops::Deref;
@@ -6,12 +8,15 @@ use kempt::Map;
 use refuse::{CollectionGuard, ContainsNoRefs, Trace};
 use regex::{Captures, Regex};
 
-use crate::string::MuseString;
-use crate::symbol::{Symbol, SymbolRef};
-use crate::syntax::token::RegexLiteral;
-use crate::value::{AnyDynamic, CustomType, Rooted, RustFunctionTable, RustType, TypeRef, Value};
+use crate::compiler::syntax::token::RegexLiteral;
+use crate::runtime::string::MuseString;
+use crate::runtime::symbol::{Symbol, SymbolRef};
+use crate::runtime::value::{
+    AnyDynamic, CustomType, Rooted, RustFunctionTable, RustType, TypeRef, Value,
+};
 use crate::vm::{Fault, Register, VmContext};
 
+/// A compiled [`RegexLiteral`].
 #[derive(Debug, Clone)]
 pub struct MuseRegex {
     expr: Regex,
@@ -19,6 +24,12 @@ pub struct MuseRegex {
 }
 
 impl MuseRegex {
+    /// Returns a compiled regular expression.
+    ///
+    /// # Errors
+    ///
+    /// All errors returned from this function are directly from the [`regex`]
+    /// crate.
     pub fn new(literal: &RegexLiteral) -> Result<Self, regex::Error> {
         let expr = regex::RegexBuilder::new(&literal.pattern)
             .ignore_whitespace(literal.expanded)
@@ -35,11 +46,13 @@ impl MuseRegex {
         })
     }
 
+    /// Returns the literal used to compile this regular expression.
     #[must_use]
     pub const fn literal(&self) -> &RegexLiteral {
         &self.literal
     }
 
+    /// Returns the captures when searching in `haystack`.
     #[must_use]
     pub fn captures(&self, haystack: &str, guard: &CollectionGuard) -> Option<MuseCaptures> {
         self.expr
@@ -143,6 +156,7 @@ impl Display for MuseRegex {
     }
 }
 
+/// A set of captures from a regular expression search.
 #[derive(Debug, Clone, Trace)]
 pub struct MuseCaptures {
     matches: Vec<Value>,
@@ -227,9 +241,12 @@ impl CustomType for MuseCaptures {
     }
 }
 
+/// A regular expression match.
 #[derive(Clone, Debug, Trace)]
 pub struct MuseMatch {
+    /// The content of the match.
     pub content: AnyDynamic,
+    /// The offset within the haystack that this match occurred.
     pub start: usize,
 }
 

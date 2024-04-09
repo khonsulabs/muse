@@ -1,17 +1,20 @@
+//! Types used for strings/text.
+
 use std::fmt::Display;
 use std::hash::Hash;
 
 use parking_lot::{Mutex, MutexGuard};
 use refuse::ContainsNoRefs;
 
-use crate::list::List;
-use crate::regex::MuseRegex;
-use crate::symbol::{Symbol, SymbolRef};
-use crate::value::{
+use crate::runtime::list::List;
+use crate::runtime::regex::MuseRegex;
+use crate::runtime::symbol::{Symbol, SymbolRef};
+use crate::runtime::value::{
     AnyDynamic, CustomType, Dynamic, Rooted, RustFunctionTable, RustType, TypeRef, Value,
 };
 use crate::vm::{Fault, Register, VmContext};
 
+/// The [`String`] type for Muse.
 #[derive(Debug)]
 pub struct MuseString(Mutex<String>);
 
@@ -35,6 +38,10 @@ impl From<&'_ str> for MuseString {
 
 impl ContainsNoRefs for MuseString {}
 
+/// The type definition that the [`MuseString`] type uses.
+///
+/// In general, developers will not need this. However, if you are building your
+/// own `core` module, this type can be used to populate `$.core.String`.
 pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
     t.with_construct(|_| {
         |vm, arity| {

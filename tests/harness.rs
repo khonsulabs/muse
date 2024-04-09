@@ -1,17 +1,19 @@
+//! A test harness that executes `.rsn` tests in the `cases` directory.
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::exit;
 
+use muse::compiler::syntax::token::RegexLiteral;
+use muse::compiler::syntax::{Ranged, SourceRange};
 use muse::compiler::{Compiler, Error};
-use muse::exception::Exception;
-use muse::list::List;
-use muse::map::Map;
-use muse::regex::{MuseMatch, MuseRegex};
-use muse::string::MuseString;
-use muse::symbol::Symbol;
-use muse::syntax::token::RegexLiteral;
-use muse::syntax::{Ranged, SourceRange};
-use muse::value::Value;
+use muse::runtime::exception::Exception;
+use muse::runtime::list::List;
+use muse::runtime::map::Map;
+use muse::runtime::regex::{MuseMatch, MuseRegex};
+use muse::runtime::string::MuseString;
+use muse::runtime::symbol::Symbol;
+use muse::runtime::value::Value;
 use muse::vm::{Code, ExecutionError, StackFrame, Vm};
 use refuse::CollectionGuard;
 use serde::de::Visitor;
@@ -152,7 +154,7 @@ impl From<Value> for TestOutput {
                     }
                 } else if let Some(m) = v.downcast_ref::<Exception>(&guard) {
                     TestOutput::Exception {
-                        value: Box::new(Self::from(*m.value())),
+                        value: Box::new(Self::from(m.value())),
                         backtrace: m
                             .backtrace()
                             .iter()

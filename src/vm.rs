@@ -1,3 +1,5 @@
+//! Virtual Machine types for executing Muse code.
+
 use std::cmp::Ordering;
 use std::fmt::{Debug, Write};
 use std::future::Future;
@@ -23,16 +25,18 @@ use self::bitcode::trusted_loaded_source_to_value;
 use self::bitcode::{
     BinaryKind, BitcodeFunction, FaultKind, Label, Op, OpDestination, ValueOrSource,
 };
+use crate::compiler::syntax::token::RegexLiteral;
+use crate::compiler::syntax::{BitwiseKind, CompareKind, SourceCode, SourceRange};
 use crate::compiler::{BitcodeModule, BlockDeclaration, Compiler, SourceMap, UnaryKind};
-use crate::exception::Exception;
-use crate::regex::MuseRegex;
-use crate::string::MuseString;
-use crate::symbol::{IntoOptionSymbol, Symbol, SymbolRef};
-use crate::syntax::token::RegexLiteral;
-use crate::syntax::{BitwiseKind, CompareKind, SourceCode, SourceRange};
+use crate::runtime::exception::Exception;
+use crate::runtime::regex::MuseRegex;
+use crate::runtime::string::MuseString;
+use crate::runtime::symbol::{IntoOptionSymbol, Symbol, SymbolRef};
 #[cfg(not(feature = "dispatched"))]
-use crate::value::ContextOrGuard;
-use crate::value::{CustomType, Dynamic, Rooted, RustType, StaticRustFunctionTable, Value};
+use crate::runtime::value::ContextOrGuard;
+use crate::runtime::value::{
+    CustomType, Dynamic, Rooted, RustType, StaticRustFunctionTable, Value,
+};
 
 pub mod bitcode;
 
@@ -54,12 +58,18 @@ macro_rules! try_all {
 #[cfg(feature = "dispatched")]
 mod dispatched;
 
+/// A virtual machine that executes compiled Muse [`Code`].
 #[derive(Clone)]
 pub struct Vm {
     memory: Root<VmMemory>,
 }
 
 impl Vm {
+    /// Returns a new virtual machine.
+    ///
+    /// Virtual machines are allocated within the [`refuse`] garbage collector.
+    /// Each virtual machine acts as a "root" reference to all of the values
+    /// contained within its stack and registers.
     #[must_use]
     pub fn new(guard: &CollectionGuard) -> Self {
         let parker = Parker::new();
@@ -89,6 +99,11 @@ impl Vm {
         }
     }
 
+    /// Compiles `source`, executes it, and returns the result.
+    ///
+    /// When building an interactive environment like a REPL, reusing a
+    /// [`Compiler`] and calling [`execute`](Self::execute) enables the compiler
+    /// to remember declarations from previous compilations.
     pub fn compile_and_execute<'a>(
         &self,
         source: impl Into<SourceCode<'a>>,
@@ -100,6 +115,7 @@ impl Vm {
         Ok(self.execute(&code, guard)?)
     }
 
+    /// Executes `code` and returns the result.
     pub fn execute(
         &self,
         code: &Code,
@@ -108,6 +124,7 @@ impl Vm {
         self.context(guard).execute(code)
     }
 
+    /// Executes `code` for at most `duration` before returning a timout.
     pub fn execute_for(
         &self,
         code: &Code,
@@ -117,6 +134,7 @@ impl Vm {
         self.context(guard).execute_for(code, duration)
     }
 
+    /// Executes `code` for until `instant` before returning a timout.
     pub fn execute_until(
         &self,
         code: &Code,
@@ -126,6 +144,16 @@ impl Vm {
         self.context(guard).execute_until(code, instant)
     }
 
+    /// Resumes executing the current code.
+    ///
+    /// This should only be called if an [`ExecutionError::Waiting`],
+    /// [`ExecutionError::NoBudget`], or [`ExecutionError::Timeout`] was
+    /// returned when executing code.
+    pub fn resume(&self, guard: &mut CollectionGuard) -> Result<Value, ExecutionError> {
+        self.context(guard).resume()
+    }
+
+    /// Returns a future that executes `code` asynchronously.
     pub fn execute_async<'context, 'guard>(
         &'context self,
         code: &Code,
@@ -134,6 +162,11 @@ impl Vm {
         self.context(guard).execute_async(code)
     }
 
+    /// Resumes executing the current code asynchronously.
+    ///
+    /// This should only be called if an [`ExecutionError::Waiting`],
+    /// [`ExecutionError::NoBudget`], or [`ExecutionError::Timeout`] was
+    /// returned when executing code.
     pub fn resume_async<'context, 'guard>(
         &'context self,
         guard: &'context mut CollectionGuard<'guard>,
@@ -141,14 +174,15 @@ impl Vm {
         self.context(guard).resume_async()
     }
 
+    /// Increases the current budget by `amount`.
+    ///
+    /// If the virtual machine currently is unbudgeted, calling this function
+    /// enables budgeting.
     pub fn increase_budget(&self, amount: usize) {
         self.memory.0.lock().budget.allocate(amount);
     }
 
-    pub fn resume(&self, guard: &mut CollectionGuard) -> Result<Value, ExecutionError> {
-        self.context(guard).resume()
-    }
-
+    /// Invokes a public function at path `name` with the given parameters.
     pub fn invoke(
         &self,
         name: impl Into<SymbolRef>,
@@ -158,6 +192,8 @@ impl Vm {
         self.context(guard).invoke(name, params)
     }
 
+    /// Returns an execution context that synchronizes with the garbage
+    /// collector.
     pub fn context<'context, 'guard>(
         &'context self,
         guard: &'context mut CollectionGuard<'guard>,
@@ -168,30 +204,51 @@ impl Vm {
         }
     }
 
+    /// Sets the number of virtual machine steps to take per budget being
+    /// charged.
+    ///
+    /// This also affects how often the virtual machine checks if it should
+    /// yield to the garbage collector.
     pub fn set_steps_per_charge(&self, steps: u16) {
         self.memory.0.lock().set_steps_per_charge(steps);
     }
 
+    /// Returns the value contained in `register`.
     #[must_use]
     pub fn register(&self, register: Register) -> Value {
         self.memory.0.lock()[register]
     }
 
+    /// Replaces the current value in `register` with `value`.
     #[allow(clippy::must_use_candidate)]
     pub fn set_register(&self, register: Register, value: Value) -> Value {
         std::mem::replace(&mut self.memory.0.lock()[register], value)
     }
 
+    /// Returns the value contained at `index` on the stack.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if `index` is out of bounds of the stack.
     #[must_use]
-    pub fn stack(&self, index: usize) -> Value {
-        self.memory.0.lock()[index]
+    pub fn stack(&self, index: Stack) -> Value {
+        self.memory.0.lock()[index.0]
     }
 
+    /// Replaces the current value at `index` on the stack with `value`.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if `index` is out of bounds of the stack.
     #[must_use]
-    pub fn set_stack(&self, index: usize, value: Value) -> Value {
-        std::mem::replace(&mut self.memory.0.lock()[index], value)
+    pub fn set_stack(&self, index: Stack, value: Value) -> Value {
+        std::mem::replace(&mut self.memory.0.lock()[index.0], value)
     }
 
+    /// Allocates a variable declaration.
+    ///
+    /// Returns a stack index that has been allocated. The Muse virtual machine
+    /// ensures the stack is Nil-initialized.
     pub fn declare_variable(
         &self,
         name: SymbolRef,
@@ -201,6 +258,7 @@ impl Vm {
         VmContext::new(self, guard).declare_variable(name, mutable)
     }
 
+    /// Declares an immutable variable with `name` containing `value`.
     pub fn declare(
         &self,
         name: impl Into<SymbolRef>,
@@ -210,15 +268,20 @@ impl Vm {
         VmContext::new(self, guard).declare_inner(name, value, false)
     }
 
+    /// Declares an mutable variable with `name` containing `value`.
     pub fn declare_mut(
         &self,
         name: impl Into<SymbolRef>,
         value: Value,
         guard: &mut CollectionGuard<'_>,
     ) -> Result<Option<Value>, Fault> {
-        VmContext::new(self, guard).declare_inner(name, value, true)
+        VmContext::new(self, guard).declare_mut(name, value)
     }
 
+    /// Declares a compiled function.
+    ///
+    /// Returns a reference to the function, or `None` if the function could not
+    /// be declared because it has no name.
     pub fn declare_function(
         &self,
         function: Function,
@@ -267,6 +330,11 @@ impl refuse::Trace for VmMemory {
 
 impl NoMapping for VmMemory {}
 
+/// The state of a [`Vm`].
+///
+/// Virtual machines are garbage collected types, which requires interior
+/// mutability so that the garbage collector can trace what every allocated
+/// virtual machine is currently referencing.
 pub struct VmState {
     registers: [Value; 256],
     stack: Vec<Value>,
@@ -287,13 +355,103 @@ pub struct VmState {
 }
 
 impl VmState {
+    /// Sets the number of virtual machine steps to take per budget being
+    /// charged.
+    ///
+    /// This also affects how often the virtual machine checks if it should
+    /// yield to the garbage collector.
     pub fn set_steps_per_charge(&mut self, steps: u16) {
         self.steps_per_charge = steps;
         self.counter = self.counter.min(steps);
     }
 }
 
+impl Index<Register> for VmState {
+    type Output = Value;
+
+    fn index(&self, index: Register) -> &Self::Output {
+        &self.registers[usize::from(index)]
+    }
+}
+
+impl IndexMut<Register> for VmState {
+    fn index_mut(&mut self, index: Register) -> &mut Self::Output {
+        &mut self.registers[usize::from(index)]
+    }
+}
+
+impl Index<usize> for VmState {
+    type Output = Value;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.stack[index]
+    }
+}
+
+impl IndexMut<usize> for VmState {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.stack[index]
+    }
+}
+
+/// A virtual machine execution context.
+///
+/// While a [`VmContext`] is held and not executing code, the garbage collector
+/// cannot run and the virtual machine is exclusivly accessible by the current
+/// thread.
+pub struct VmContext<'a, 'guard> {
+    guard: &'a mut CollectionGuard<'guard>,
+    vm: MutexGuard<'a, VmState>,
+}
+
 impl<'context, 'guard> VmContext<'context, 'guard> {
+    /// Returns a new execution context for `vm` using `guard`.
+    pub fn new(vm: &'context Vm, guard: &'context mut CollectionGuard<'guard>) -> Self {
+        Self {
+            guard,
+            vm: vm.memory.0.lock(),
+        }
+    }
+
+    /// Returns an exclusive reference to the collection guard.
+    #[must_use]
+    pub fn guard_mut(&mut self) -> &mut CollectionGuard<'guard> {
+        self.guard
+    }
+
+    /// Returns a reference to the collection guard.
+    #[must_use]
+    pub fn guard(&self) -> &CollectionGuard<'guard> {
+        self.guard
+    }
+
+    /// Returns a reference to the virtual machine.
+    pub fn vm(&mut self) -> &mut VmState {
+        &mut self.vm
+    }
+
+    fn budget_and_yield(&mut self) -> Result<(), Fault> {
+        let next_count = self.counter - 1;
+        if next_count > 0 {
+            self.counter = next_count;
+            Ok(())
+        } else {
+            self.counter = self.steps_per_charge;
+            self.budget.charge()?;
+            self.guard
+                .coordinated_yield(|yielder| MutexGuard::unlocked(&mut self.vm, || yielder.wait()));
+            self.check_timeout()
+        }
+    }
+
+    /// Executes `func` while the virtual machine is unlocked.
+    ///
+    /// This can be used in combination with [`CollectionGuard::while_unlocked`]
+    /// to perform code while the garbage collector is free to execute.
+    pub fn while_unlocked<R>(&mut self, func: impl FnOnce(&mut CollectionGuard<'_>) -> R) -> R {
+        MutexGuard::unlocked(&mut self.vm, || func(self.guard))
+    }
+
     fn push_code(&mut self, code: &Code, owner: Option<&Rooted<Function>>) -> CodeIndex {
         let vm = self.vm();
         *vm.code_map
@@ -308,11 +466,13 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
             })
     }
 
+    /// Executes `code` and returns the result.
     pub fn execute(&mut self, code: &Code) -> Result<Value, ExecutionError> {
         let code = self.push_code(code, None);
         self.execute_owned(code)
     }
 
+    /// Executes `code` for at most `duration` before returning a timout.
     pub fn execute_for(
         &mut self,
         code: &Code,
@@ -326,6 +486,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         )
     }
 
+    /// Executes `code` for until `instant` before returning a timout.
     pub fn execute_until(
         &mut self,
         code: &Code,
@@ -334,6 +495,26 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         let code = self.push_code(code, None);
         self.execute_until = Some(instant);
         self.execute_owned(code)
+    }
+
+    /// Resumes executing the current code.
+    ///
+    /// This should only be called if an [`ExecutionError::Waiting`],
+    /// [`ExecutionError::NoBudget`], or [`ExecutionError::Timeout`] was
+    /// returned when executing code.
+    pub fn resume(&mut self) -> Result<Value, ExecutionError> {
+        loop {
+            match self.resume_async_inner(0) {
+                Err(Fault::Waiting) => {
+                    self.check_timeout()
+                        .map_err(|err| ExecutionError::new(err, self))?;
+
+                    self.parker.park();
+                }
+                Err(other) => return Err(ExecutionError::new(other, self)),
+                Ok(value) => return Ok(value),
+            }
+        }
     }
 
     fn prepare_owned(&mut self, code: CodeIndex) -> Result<(), ExecutionError> {
@@ -352,6 +533,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         self.resume()
     }
 
+    /// Returns a future that executes `code` asynchronously.
     pub fn execute_async(
         mut self,
         code: &Code,
@@ -362,29 +544,24 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         Ok(ExecuteAsync(self))
     }
 
+    /// Resumes executing the current code asynchronously.
+    ///
+    /// This should only be called if an [`ExecutionError::Waiting`],
+    /// [`ExecutionError::NoBudget`], or [`ExecutionError::Timeout`] was
+    /// returned when executing code.
     pub fn resume_async(self) -> Result<ExecuteAsync<'context, 'guard>, ExecutionError> {
         Ok(ExecuteAsync(self))
     }
 
+    /// Increases the current budget by `amount`.
+    ///
+    /// If the virtual machine currently is unbudgeted, calling this function
+    /// enables budgeting.
     pub fn increase_budget(&mut self, amount: usize) {
         self.budget.allocate(amount);
     }
 
-    pub fn resume(&mut self) -> Result<Value, ExecutionError> {
-        loop {
-            match self.resume_async_inner(0) {
-                Err(Fault::Waiting) => {
-                    self.check_timeout()
-                        .map_err(|err| ExecutionError::new(err, self))?;
-
-                    self.parker.park();
-                }
-                Err(other) => return Err(ExecutionError::new(other, self)),
-                Ok(value) => return Ok(value),
-            }
-        }
-    }
-
+    /// Invokes a public function at path `name` with the given parameters.
     pub fn invoke(
         &mut self,
         name: impl Into<SymbolRef>,
@@ -446,7 +623,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
     }
 
     #[must_use]
-    pub fn waker(&self) -> &Waker {
+    pub(crate) fn waker(&self) -> &Waker {
         &self.waker
     }
 
@@ -528,7 +705,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         }
     }
 
-    pub fn enter_anonymous_frame(&mut self) -> Result<(), Fault> {
+    pub(crate) fn enter_anonymous_frame(&mut self) -> Result<(), Fault> {
         if self.has_anonymous_frame {
             self.current_frame += 1;
             Ok(())
@@ -554,7 +731,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         Err(Fault::FrameChanged)
     }
 
-    pub fn recurse_current_function(&mut self, arity: Arity) -> Result<Value, Fault> {
+    pub(crate) fn recurse_current_function(&mut self, arity: Arity) -> Result<Value, Fault> {
         let current_function = self.code[self.frames[self.current_frame]
             .code
             .expect("missing function")
@@ -566,6 +743,10 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         current_function.call(self, arity)
     }
 
+    /// Allocates a variable declaration.
+    ///
+    /// Returns a stack index that has been allocated. The Muse virtual machine
+    /// ensures the stack is Nil-initialized.
     pub fn declare_variable(&mut self, name: SymbolRef, mutable: bool) -> Result<Stack, Fault> {
         let vm = self.vm();
         let current_frame = &mut vm.frames[vm.current_frame];
@@ -587,6 +768,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         }
     }
 
+    /// Declares an immutable variable with `name` containing `value`.
     pub fn declare(
         &mut self,
         name: impl Into<SymbolRef>,
@@ -595,6 +777,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         self.declare_inner(name, value, false)
     }
 
+    /// Declares an mutable variable with `name` containing `value`.
     pub fn declare_mut(
         &mut self,
         name: impl Into<SymbolRef>,
@@ -626,6 +809,10 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         }
     }
 
+    /// Declares a compiled function.
+    ///
+    /// Returns a reference to the function, or `None` if the function could not
+    /// be declared because it has no name.
     pub fn declare_function(&mut self, mut function: Function) -> Result<Option<Value>, Fault> {
         let Some(name) = function.name().clone() else {
             return Ok(None);
@@ -635,6 +822,9 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         self.declare_inner(name, Value::dynamic(function, &self), true)
     }
 
+    /// Resolves the value at `path`.
+    // TODO write better documentation, but I'm not sure this function is "done"
+    // with it's implementation yet.
     pub fn resolve(&mut self, name: &Symbol) -> Result<Value, Fault> {
         if let Some(path) = name.strip_prefix('$') {
             let mut module_dynamic = self.modules[0];
@@ -656,7 +846,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
                             .ok_or(Fault::UnknownSymbol)?
                             .value;
                         let Some(inner) = value.as_dynamic::<Module>() else {
-                            return Err(Fault::MissingModule);
+                            return Err(Fault::NotAModule);
                         };
                         drop(declarations);
                         module_dynamic = inner;
@@ -703,7 +893,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         }
     }
 
-    pub fn assign(&mut self, name: &SymbolRef, value: Value) -> Result<(), Fault> {
+    pub(crate) fn assign(&mut self, name: &SymbolRef, value: Value) -> Result<(), Fault> {
         let vm = &mut *self.vm;
         let current_frame = &mut vm.frames[vm.current_frame];
         if let Some(decl) = current_frame.variables.get_mut(name) {
@@ -764,7 +954,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         }
     }
 
-    pub fn exit_frame(&mut self) -> Result<(), Fault> {
+    pub(crate) fn exit_frame(&mut self) -> Result<(), Fault> {
         let vm = self.vm();
         if vm.current_frame >= 1 {
             vm.has_anonymous_frame = false;
@@ -777,6 +967,8 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         }
     }
 
+    /// Allocates `count` entries on the stack. Returns the first allocated
+    /// index.
     pub fn allocate(&mut self, count: usize) -> Result<Stack, Fault> {
         let vm = self.vm();
         let current_frame = &mut vm.frames[vm.current_frame];
@@ -793,6 +985,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         }
     }
 
+    /// Returns a reference to the currently executing code.
     #[must_use]
     pub fn current_code(&self) -> Option<&Code> {
         self.frames[self.current_frame]
@@ -800,32 +993,42 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
             .map(|index| &self.code[index.0].code)
     }
 
+    /// Returns the instruction offset in the current frame.
     #[must_use]
     pub fn current_instruction(&self) -> usize {
         self.frames[self.current_frame].instruction
     }
 
-    pub fn jump_to(&mut self, instruction: usize) {
+    /// Jumps execution to `instruction`.
+    pub(crate) fn jump_to(&mut self, instruction: usize) {
         let vm = self.vm();
         vm.frames[vm.current_frame].instruction = instruction;
     }
 
+    /// Returns a slice of the current stack frame.
     #[must_use]
     pub fn current_frame(&self) -> &[Value] {
         &self.stack[self.frames[self.current_frame].start..self.frames[self.current_frame].end]
     }
 
+    /// Returns an exclusive reference to the slice of the current stack frame.
     #[must_use]
     pub fn current_frame_mut(&mut self) -> &mut [Value] {
         let vm = self.vm();
         &mut vm.stack[vm.frames[vm.current_frame].start..vm.frames[vm.current_frame].end]
     }
 
+    /// Returns the size of the current stack frame.
     #[must_use]
     pub fn current_frame_size(&self) -> usize {
         self.frames[self.current_frame].end - self.frames[self.current_frame].start
     }
 
+    /// Resets the stack and registers to their initial state and clears any
+    /// executing code.
+    ///
+    /// All declarations and modules will still be loaded in the virtual
+    /// machine.
     pub fn reset(&mut self) {
         self.current_frame = 0;
         for frame in &mut self.frames {
@@ -835,8 +1038,9 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         self.stack.fill_with(|| Value::Nil);
     }
 
+    /// Generates a backtrace for the current virtual machine state.
     #[must_use]
-    pub fn stack_trace(&self) -> Vec<StackFrame> {
+    pub fn backtrace(&self) -> Vec<StackFrame> {
         self.frames[..=self.current_frame]
             .iter()
             .filter_map(|f| {
@@ -873,80 +1077,6 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         } else {
             Err(Fault::Exception(exception))
         }
-    }
-}
-
-impl Index<Register> for VmState {
-    type Output = Value;
-
-    fn index(&self, index: Register) -> &Self::Output {
-        &self.registers[usize::from(index)]
-    }
-}
-
-impl IndexMut<Register> for VmState {
-    fn index_mut(&mut self, index: Register) -> &mut Self::Output {
-        &mut self.registers[usize::from(index)]
-    }
-}
-
-impl Index<usize> for VmState {
-    type Output = Value;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.stack[index]
-    }
-}
-
-impl IndexMut<usize> for VmState {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        &mut self.stack[index]
-    }
-}
-
-pub struct VmContext<'a, 'guard> {
-    guard: &'a mut CollectionGuard<'guard>,
-    vm: MutexGuard<'a, VmState>,
-}
-
-impl<'a, 'guard> VmContext<'a, 'guard> {
-    pub fn new(vm: &'a Vm, guard: &'a mut CollectionGuard<'guard>) -> Self {
-        Self {
-            guard,
-            vm: vm.memory.0.lock(),
-        }
-    }
-
-    #[must_use]
-    pub fn guard_mut(&mut self) -> &mut CollectionGuard<'guard> {
-        self.guard
-    }
-
-    #[must_use]
-    pub fn guard(&self) -> &CollectionGuard<'guard> {
-        self.guard
-    }
-
-    pub fn vm(&mut self) -> &mut VmState {
-        &mut self.vm
-    }
-
-    fn budget_and_yield(&mut self) -> Result<(), Fault> {
-        let next_count = self.counter - 1;
-        if next_count > 0 {
-            self.counter = next_count;
-            Ok(())
-        } else {
-            self.counter = self.steps_per_charge;
-            self.budget.charge()?;
-            self.guard
-                .coordinated_yield(|yielder| MutexGuard::unlocked(&mut self.vm, || yielder.wait()));
-            self.check_timeout()
-        }
-    }
-
-    pub fn while_unlocked<R>(&mut self, func: impl FnOnce(&mut CollectionGuard<'_>) -> R) -> R {
-        MutexGuard::unlocked(&mut self.vm, || func(self.guard))
     }
 }
 
@@ -1635,8 +1765,8 @@ impl From<Value> for MaybeOwnedValue<'_> {
     }
 }
 
+/// A virtual machine register index.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
-
 pub struct Register(pub u8);
 
 impl From<u8> for Register {
@@ -1659,6 +1789,7 @@ impl From<Register> for usize {
     }
 }
 
+/// A value was given that is not a valid register.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct InvalidRegister;
 
@@ -1685,11 +1816,16 @@ impl Frame {
     }
 }
 
+/// An error that arises from executing Muse code.
 #[derive(Debug, PartialEq, Clone, Trace)]
 pub enum ExecutionError {
+    /// The budget for the virtual machine has been exhausted.
     NoBudget,
+    /// The virtual machine is waiting for an async task.
     Waiting,
+    /// Execution did not complete before a timeout occurred.
     Timeout,
+    /// A thrown exception was not handled.
     Exception(Value),
 }
 
@@ -1705,34 +1841,68 @@ impl ExecutionError {
     }
 }
 
+/// A virtual machine error.
 #[derive(Debug, PartialEq, Clone)]
+#[non_exhaustive]
 pub enum Fault {
-    UnknownSymbol,
-    IncorrectNumberOfArguments,
-    PatternMismatch,
-    OperationOnNil,
-    ValueFreed,
-    MissingModule,
-    NotAFunction,
-    StackOverflow,
-    StackUnderflow,
-    UnsupportedOperation,
-    OutOfMemory,
-    OutOfBounds,
-    NotMutable,
-    DivideByZero,
-    InvalidInstructionAddress,
-    ExpectedSymbol,
-    ExpectedInteger,
-    ExpectedString,
-    InvalidArity,
-    InvalidLabel,
-    InvalidOpcode,
+    /// The budget for the virtual machine has been exhausted.
     NoBudget,
+    /// Execution did not complete before a timeout occurred.
     Timeout,
+    /// The virtual machine is waiting for an async task.
     Waiting,
-    FrameChanged,
+    /// A thrown exception was not handled.
     Exception(Value),
+    /// The execution frame has changed.
+    FrameChanged,
+    /// A symbol could not be resolved to a declaration or function.
+    UnknownSymbol,
+    /// A function was invoked with an unsupported number of arguments.
+    IncorrectNumberOfArguments,
+    /// A pattern could not be matched.
+    PatternMismatch,
+    /// An unsupported operation was performed on [`Value::Nil`].
+    OperationOnNil,
+    /// A value was freed.
+    ///
+    /// This, in general, should not happen, but it can happen through
+    /// intentional usage or if a type does not implement [`Trace`] correctly.
+    ValueFreed,
+    /// A value was expected to be a module, but was not.
+    NotAModule,
+    /// A value was invoked but is not invokable.
+    NotAFunction,
+    /// An allocation failed because the stack is full.
+    StackOverflow,
+    /// An attempt to return from the execution root.
+    StackUnderflow,
+    /// A general error indicating an unsupported operation.
+    UnsupportedOperation,
+    /// An allocation could not be performed due to memory constraints.
+    OutOfMemory,
+    /// An operation attempted to access something outside of its bounds.
+    OutOfBounds,
+    /// An assignment was attempted to an immutable declaration.
+    NotMutable,
+    /// A value was divided by zero.
+    DivideByZero,
+    /// Execution jumped to an invalid instruction address.
+    InvalidInstructionAddress,
+    /// An operation expected a symbol.
+    ExpectedSymbol,
+    /// An operation expected an integer.
+    ExpectedInteger,
+    /// An operation expected a string.
+    ExpectedString,
+    /// An invalid value was provided for the [`Arity`] of a function.
+    InvalidArity,
+    /// An invalid label was encountered.
+    InvalidLabel,
+    /// An instruction referenced an invalid index.
+    ///
+    /// This is differen than a [`Fault::OutOfBounds`] because this fault
+    /// indicates invalid code rather than a logic error.
+    InvalidOpcode,
 }
 
 impl Fault {
@@ -1740,6 +1910,7 @@ impl Fault {
         matches!(self, Fault::NoBudget | Fault::Waiting | Fault::Timeout)
     }
 
+    /// Converts this fault into an exception.
     #[must_use]
     pub fn as_exception(&self, vm: &mut VmContext<'_, '_>) -> Value {
         let exception = match self {
@@ -1748,7 +1919,7 @@ impl Fault {
             Fault::OperationOnNil => Symbol::from("nil").into(),
             Fault::ValueFreed => Symbol::from("out-of-scope").into(),
             Fault::NotAFunction => Symbol::from("not_invokable").into(),
-            Fault::MissingModule => Symbol::from("internal").into(),
+            Fault::NotAModule => Symbol::from("not_a_module").into(),
             Fault::StackOverflow => Symbol::from("overflow").into(),
             Fault::StackUnderflow => Symbol::from("underflow").into(),
             Fault::UnsupportedOperation => Symbol::from("unsupported").into(),
@@ -1782,6 +1953,7 @@ impl Fault {
     }
 }
 
+/// A Muse function ready for execution.
 #[derive(Debug, Clone)]
 pub struct Function {
     module: Option<usize>,
@@ -1791,6 +1963,7 @@ pub struct Function {
 }
 
 impl Function {
+    /// Returns a function with the given name and no bodies.
     #[must_use]
     pub fn new(name: impl IntoOptionSymbol) -> Self {
         Self {
@@ -1806,16 +1979,21 @@ impl Function {
         self
     }
 
+    /// Inserts `body` to be executed when this function is invoked with `arity`
+    /// number of arguments.
     pub fn insert_arity(&mut self, arity: impl Into<Arity>, body: Code) {
         self.bodies.insert(arity.into(), body);
     }
 
+    /// Adds `body` to be executed when this function is invoked with `arity`
+    /// number of arguments, and returns the updated function.
     #[must_use]
     pub fn when(mut self, arity: impl Into<Arity>, body: Code) -> Self {
         self.insert_arity(arity, body);
         self
     }
 
+    /// Returns the name of this function.
     #[must_use]
     pub const fn name(&self) -> &Option<Symbol> {
         &self.name
@@ -1823,7 +2001,7 @@ impl Function {
 }
 
 impl CustomType for Function {
-    fn muse_type(&self) -> &crate::value::TypeRef {
+    fn muse_type(&self) -> &crate::runtime::value::TypeRef {
         static TYPE: RustType<Function> = RustType::new("Function", |t| {
             t.with_call(|_| {
                 |this, vm, arity| {
@@ -1833,7 +2011,7 @@ impl CustomType for Function {
                             .rev()
                             .find_map(|va| (va.key() <= &arity).then_some(&va.value))
                     }) {
-                        let module = this.module.ok_or(Fault::MissingModule)?;
+                        let module = this.module.ok_or(Fault::NotAModule)?;
                         vm.execute_function(body, &this, module)
                     } else {
                         Err(Fault::IncorrectNumberOfArguments)
@@ -1848,6 +2026,7 @@ impl CustomType for Function {
 
 impl ContainsNoRefs for Function {}
 
+/// The number of arguments provided to a function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub struct Arity(pub u8);
 
@@ -1877,12 +2056,14 @@ impl TryFrom<usize> for Arity {
     }
 }
 
+/// A series of instructions that are ready to execute.
 #[derive(Debug, Clone)]
 pub struct Code {
     data: Arc<CodeData>,
 }
 
 impl Code {
+    /// Pushes another operation to this code block.
     pub fn push(&mut self, op: &Op, range: SourceRange, guard: &CollectionGuard) {
         Arc::make_mut(&mut self.data).push(op, range, guard);
     }
@@ -2148,6 +2329,9 @@ impl From<Option<usize>> for StepResult {
     }
 }
 
+/// A Muse module.
+///
+/// A module enables encapsulating and namespacing code and declarations.
 #[derive(Default, Debug)]
 pub struct Module {
     parent: Option<Dynamic<Module>>,
@@ -2155,6 +2339,7 @@ pub struct Module {
 }
 
 impl Module {
+    /// Returns a new module with the built-in `core` module loaded.
     #[must_use]
     pub fn with_core(guard: &CollectionGuard) -> Dynamic<Self> {
         let module = Dynamic::new(Self::default(), guard);
@@ -2179,6 +2364,7 @@ impl Module {
         module
     }
 
+    /// Returns the default `core` module.
     pub fn core() -> Self {
         let core = Self::default();
 
@@ -2187,21 +2373,21 @@ impl Module {
             SymbolRef::from("Map"),
             ModuleDeclaration {
                 mutable: false,
-                value: Value::Dynamic(crate::map::MAP_TYPE.as_any_dynamic()),
+                value: Value::Dynamic(crate::runtime::map::MAP_TYPE.as_any_dynamic()),
             },
         );
         declarations.insert(
             SymbolRef::from("List"),
             ModuleDeclaration {
                 mutable: false,
-                value: Value::Dynamic(crate::list::LIST_TYPE.as_any_dynamic()),
+                value: Value::Dynamic(crate::runtime::list::LIST_TYPE.as_any_dynamic()),
             },
         );
         declarations.insert(
             SymbolRef::from("String"),
             ModuleDeclaration {
                 mutable: false,
-                value: Value::Dynamic(crate::string::STRING_TYPE.as_any_dynamic()),
+                value: Value::Dynamic(crate::runtime::string::STRING_TYPE.as_any_dynamic()),
             },
         );
         drop(declarations);
@@ -2215,7 +2401,7 @@ impl Module {
 }
 
 impl CustomType for Module {
-    fn muse_type(&self) -> &crate::value::TypeRef {
+    fn muse_type(&self) -> &crate::runtime::value::TypeRef {
         static TYPE: RustType<Module> = RustType::new("Module", |t| {
             t.with_invoke(|_| {
                 |this, vm, name, arity| {
@@ -2301,6 +2487,8 @@ impl Budget {
     }
 }
 
+/// An asynchronous code execution.
+#[must_use = "futures must be awaited to be exected"]
 pub struct ExecuteAsync<'context, 'guard>(VmContext<'context, 'guard>);
 
 impl Future for ExecuteAsync<'_, '_> {
@@ -2451,10 +2639,12 @@ fn precompiled_regex(regex: &RegexLiteral, guard: &CollectionGuard) -> Precompil
     }
 }
 
+/// An offset into a virtual machine stack.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Stack(pub usize);
 
+/// Information about an executing stack frame.
 #[derive(PartialEq, Clone)]
 pub struct StackFrame {
     code: Code,
@@ -2463,20 +2653,23 @@ pub struct StackFrame {
 
 impl StackFrame {
     #[must_use]
-    pub fn new(code: Code, instruction: usize) -> Self {
+    fn new(code: Code, instruction: usize) -> Self {
         Self { code, instruction }
     }
 
+    /// Returns the code executing in this frame.
     #[must_use]
     pub const fn code(&self) -> &Code {
         &self.code
     }
 
+    /// Returns the instruction offset of the frame.
     #[must_use]
     pub const fn instruction(&self) -> usize {
         self.instruction
     }
 
+    /// Returns the source range for this instruction, if available.
     #[must_use]
     pub fn source_range(&self) -> Option<SourceRange> {
         self.code.data.map.get(self.instruction)
@@ -2492,7 +2685,10 @@ impl Debug for StackFrame {
     }
 }
 
+/// A set of arguments that can be loaded into a virtual machine when invoking a
+/// function.
 pub trait InvokeArgs {
+    /// Loads the arguments into `vm`.
     fn load(self, vm: &mut VmContext<'_, '_>) -> Result<Arity, ExecutionError>;
 }
 

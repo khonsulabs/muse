@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use std::any::Any;
 use std::cmp::Ordering;
 use std::fmt::{self, Debug};
@@ -15,8 +17,8 @@ use kempt::Map;
 use parking_lot::Mutex;
 use refuse::{AnyRef, AnyRoot, CollectionGuard, ContainsNoRefs, MapAs, Ref, Root, Trace};
 
-use crate::string::MuseString;
-use crate::symbol::{Symbol, SymbolList, SymbolRef};
+use crate::runtime::string::MuseString;
+use crate::runtime::symbol::{Symbol, SymbolList, SymbolRef};
 use crate::vm::{Arity, ExecutionError, Fault, VmContext};
 
 #[derive(Default, Clone, Copy, Debug)]

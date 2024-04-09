@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use std::collections::VecDeque;
 use std::fmt::{Debug, Display};
 use std::ops::{BitOr, BitOrAssign, Range};
@@ -9,14 +10,17 @@ use refuse::CollectionGuard;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::symbol::Symbol;
-use crate::syntax::token::Token;
-use crate::syntax::{
-    self, AssignTarget, BinaryExpression, BreakExpression, CompareKind, ContinueExpression,
-    Delimited, DelimitedIter, EntryKeyPattern, Expression, FunctionCall, FunctionDefinition, Index,
-    Literal, LogicalKind, Lookup, LoopExpression, LoopKind, MatchExpression, MatchPattern, Matches,
+pub mod syntax;
+
+use syntax::token::Token;
+use syntax::{
+    AssignTarget, BinaryExpression, BreakExpression, CompareKind, ContinueExpression, Delimited,
+    DelimitedIter, EntryKeyPattern, Expression, FunctionCall, FunctionDefinition, Index, Literal,
+    LogicalKind, Lookup, LoopExpression, LoopKind, MatchExpression, MatchPattern, Matches,
     PatternKind, Ranged, SourceCode, SourceRange, TryExpression, UnaryExpression, Variable,
 };
+
+use crate::runtime::symbol::Symbol;
 use crate::vm::bitcode::{
     BinaryKind, BitcodeBlock, BitcodeFunction, FaultKind, Label, Op, OpDestination, ValueOrSource,
 };

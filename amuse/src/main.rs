@@ -7,10 +7,10 @@ use cushy::widgets::input::InputValue;
 use cushy::widgets::list::ListStyle;
 use cushy::widgets::Label;
 use cushy::{Open, PendingApp};
+use muse::compiler::syntax::{SourceId, Sources};
 use muse::compiler::Compiler;
 use muse::refuse::CollectionGuard;
-use muse::syntax::{SourceId, Sources};
-use muse::value::Value as MuseValue;
+use muse::runtime::value::Value as MuseValue;
 use muse::vm::{ExecutionError, Vm, VmContext};
 use muse_ui::VmUi;
 
@@ -33,8 +33,8 @@ fn main() {
     });
 
     let input = Dynamic::<String>::default();
-    let parsed =
-        input.map_each(|source| muse::syntax::parse(source).map_err(|err| format!("{err:?}")));
+    let parsed = input
+        .map_each(|source| muse::compiler::syntax::parse(source).map_err(|err| format!("{err:?}")));
     let expression = parsed.map_each(|parsed| {
         parsed
             .as_ref()

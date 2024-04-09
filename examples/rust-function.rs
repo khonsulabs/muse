@@ -1,6 +1,7 @@
+//! An example demonstrating how to call a Rust-written function from Muse.
 use muse::compiler::Compiler;
-use muse::symbol::Symbol;
-use muse::value::{RustFunction, Value};
+use muse::runtime::symbol::Symbol;
+use muse::runtime::value::{RustFunction, Value};
 use muse::vm::{Fault, Register, Vm, VmContext};
 use refuse::CollectionGuard;
 

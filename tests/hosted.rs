@@ -1,13 +1,15 @@
+//! A test harness for Muse-defined tests in the `cases` directory.
+
 use std::collections::VecDeque;
 use std::path::Path;
 use std::process::exit;
 
+use muse::compiler::syntax::token::{Paired, Token};
+use muse::compiler::syntax::Ranged;
 use muse::compiler::Compiler;
-use muse::exception::Exception;
-use muse::symbol::Symbol;
-use muse::syntax::token::{Paired, Token};
-use muse::syntax::Ranged;
-use muse::value::{CustomType, RustFunction, RustType, Value};
+use muse::runtime::exception::Exception;
+use muse::runtime::symbol::Symbol;
+use muse::runtime::value::{CustomType, RustFunction, RustType, Value};
 use muse::vm::{ExecutionError, Fault, Register, Vm, VmContext};
 use refuse::{CollectionGuard, Trace};
 
@@ -205,7 +207,7 @@ struct TestError {
 }
 
 impl CustomType for TestError {
-    fn muse_type(&self) -> &muse::value::TypeRef {
+    fn muse_type(&self) -> &muse::runtime::value::TypeRef {
         static TYPE: RustType<TestError> = RustType::new("TestError", |t| t);
         &TYPE
     }

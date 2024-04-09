@@ -1,10 +1,18 @@
+//! Types used for lists/tuples.
+
 use parking_lot::Mutex;
 use refuse::Trace;
 
-use crate::symbol::Symbol;
-use crate::value::{CustomType, Dynamic, Rooted, RustFunctionTable, RustType, TypeRef, Value};
+use crate::runtime::symbol::Symbol;
+use crate::runtime::value::{
+    CustomType, Dynamic, Rooted, RustFunctionTable, RustType, TypeRef, Value,
+};
 use crate::vm::{Fault, Register, VmContext};
 
+/// The type definition that the [`List`] type uses.
+///
+/// In general, developers will not need this. However, if you are building your
+/// own `core` module, this type can be used to populate `$.core.List`.
 pub static LIST_TYPE: RustType<List> = RustType::new("List", |t| {
     t.with_construct(|_| {
         |vm, arity| {
@@ -42,15 +50,23 @@ pub static LIST_TYPE: RustType<List> = RustType::new("List", |t| {
     )
 });
 
+/// A list of [`Value`]s.
 #[derive(Debug)]
 pub struct List(Mutex<Vec<Value>>);
 
 impl List {
+    /// Returns an empty list.
     #[must_use]
     pub const fn new() -> Self {
         Self(Mutex::new(Vec::new()))
     }
 
+    /// Returns the value at `index`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Fault::OutOfBounds`] if `index` cannot be converted to a
+    /// `usize` or is out of bounds of this list.
     pub fn get(&self, index: &Value) -> Result<Value, Fault> {
         let Some(index) = index.as_usize() else {
             return Err(Fault::OutOfBounds);
@@ -60,36 +76,61 @@ impl List {
         contents.get(index).copied().ok_or(Fault::OutOfBounds)
     }
 
+    /// Inserts `value` at `index`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Fault::OutOfBounds`] if `index` cannot be converted to a
+    /// `usize` or is greater than the length of this list.
     pub fn insert(&self, index: &Value, value: Value) -> Result<(), Fault> {
-        let Some(index) = index.as_usize() else {
-            return Err(Fault::OutOfBounds);
-        };
         let mut contents = self.0.lock();
-        contents.insert(index, value);
-        Ok(())
+        contents.try_reserve(1).map_err(|_| Fault::OutOfMemory)?;
+        match index.as_usize() {
+            Some(index) if index <= contents.len() => {
+                contents.insert(index, value);
+
+                Ok(())
+            }
+            _ => Err(Fault::OutOfBounds),
+        }
     }
 
+    /// Pushes `value` to the end of the list.
     pub fn push(&self, value: Value) -> Result<(), Fault> {
         let mut contents = self.0.lock();
+        contents.try_reserve(1).map_err(|_| Fault::OutOfMemory)?;
         contents.push(value);
         Ok(())
     }
 
-    pub fn set(&self, index: &Value, value: Value) -> Result<Option<Value>, Fault> {
+    /// Replaces the value at `index` with `value`. Returns the previous value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Fault::OutOfBounds`] if `index` cannot be converted to a
+    /// `usize` or is out of bounds of this list.
+    pub fn set(&self, index: &Value, value: Value) -> Result<Value, Fault> {
         let Some(index) = index.as_usize() else {
             return Err(Fault::OutOfBounds);
         };
         let mut contents = self.0.lock();
 
         if let Some(entry) = contents.get_mut(index) {
-            Ok(Some(std::mem::replace(entry, value)))
+            Ok(std::mem::replace(entry, value))
         } else {
             Err(Fault::OutOfBounds)
         }
     }
 
+    /// Converts this list into a Vec.
     pub fn to_vec(&self) -> Vec<Value> {
         self.0.lock().clone()
+    }
+}
+
+impl Default for List {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

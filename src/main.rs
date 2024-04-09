@@ -1,11 +1,13 @@
+//! The interactive Muse REPL (Read-Eval-Print-Loop).
+
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use ariadne::{Cache, Label, Span};
+use muse::compiler::syntax::{parse, Ranged, SourceId, SourceRange, Sources};
 use muse::compiler::Compiler;
-use muse::exception::Exception;
-use muse::syntax::{parse, Ranged, SourceId, SourceRange, Sources};
+use muse::runtime::exception::Exception;
 use muse::vm::{ExecutionError, StackFrame, Vm, VmContext};
 use muse::ErrorKind;
 use refuse::CollectionGuard;
@@ -182,7 +184,8 @@ impl Validator for Muse {
         match parse(source) {
             Ok(_) => Ok(ValidationResult::Valid(None)),
             Err(Ranged(
-                muse::syntax::Error::UnexpectedEof | muse::syntax::Error::MissingEnd(_),
+                muse::compiler::syntax::Error::UnexpectedEof
+                | muse::compiler::syntax::Error::MissingEnd(_),
                 _,
             )) => Ok(ValidationResult::Incomplete),
             Err(err) => {

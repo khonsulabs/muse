@@ -8,8 +8,8 @@ use cushy::widgets::{Expand, Slider};
 use cushy::window::WindowHandle;
 use cushy::{App, Application, Open, PendingApp};
 use muse::refuse::{self, CollectionGuard, SimpleType, Trace};
-use muse::symbol::Symbol;
-use muse::value::{ContextOrGuard, CustomType, RustFunction, RustType, TypeRef, Value};
+use muse::runtime::symbol::Symbol;
+use muse::runtime::value::{ContextOrGuard, CustomType, RustFunction, RustType, TypeRef, Value};
 use muse::vm::{Fault, Register, Vm, VmContext};
 
 pub fn install(vm: &Vm, guard: &mut CollectionGuard<'_>) {
@@ -165,7 +165,9 @@ impl CustomType for DynamicValue {
                 |this, guard| {
                     this.0
                         .map_ref(|value| value.deep_clone(guard))
-                        .map(|value| muse::value::AnyDynamic::new(Self(Dynamic::new(value)), guard))
+                        .map(|value| {
+                            muse::runtime::value::AnyDynamic::new(Self(Dynamic::new(value)), guard)
+                        })
                 }
             })
         });

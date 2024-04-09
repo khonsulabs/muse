@@ -1,4 +1,9 @@
-use muse::syntax::Sources;
+//! An example demonstrating how to invoke a Muse-written function from Rust.
+//!
+//! Rust code can only access public declarations. Attempting to invoke a
+//! private function will result in an error.
+
+use muse::compiler::syntax::Sources;
 use muse::vm::Vm;
 use refuse::CollectionGuard;
 

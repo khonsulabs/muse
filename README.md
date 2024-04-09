@@ -1,5 +1,10 @@
 # muse
 
+![Muse is considered experimental and unsupported](https://img.shields.io/badge/status-experimental-purple)
+[![crate version](https://img.shields.io/crates/v/muse.svg)](https://crates.io/crates/muse)
+[![Documentation for `main`](https://img.shields.io/badge/docs-main-informational)](https://khonsu.dev/muse/main/docs/muse/)
+[![Muse User's Guide](https://img.shields.io/badge/user%27s%20guide-main-informational)][guide]
+
 A thoughtful, designed-to-be-embedded programming language.
 
 ## What is Muse?

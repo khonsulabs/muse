@@ -1,11 +1,19 @@
+//! Types used in exception handling.
+
 use std::fmt::{self, Debug};
 
 use refuse::Trace;
 
-use crate::syntax::Sources;
-use crate::value::{AnyDynamic, CustomType, RustType, TypeRef, Value};
+use crate::compiler::syntax::Sources;
+use crate::runtime::value::{AnyDynamic, CustomType, RustType, TypeRef, Value};
 use crate::vm::{Code, StackFrame, VmContext};
 
+/// A thrown exception.
+///
+/// An exception contains two pieces of data:
+///
+/// - a [`Value`].
+/// - a [backtrace](Self::backtrace)
 #[derive(Debug)]
 pub struct Exception {
     value: Value,
@@ -13,21 +21,27 @@ pub struct Exception {
 }
 
 impl Exception {
+    /// Returns a new exception with the current backtrace of the virtual
+    /// machine.
     pub fn new(value: Value, vm: &mut VmContext<'_, '_>) -> Self {
-        let stack_trace = vm.stack_trace();
+        let stack_trace = vm.backtrace();
         Self { value, stack_trace }
     }
 
+    /// Returns the thrown value.
     #[must_use]
-    pub const fn value(&self) -> &Value {
-        &self.value
+    pub const fn value(&self) -> Value {
+        self.value
     }
 
+    /// Returns the list of recorded stack frames when this exception was
+    /// thrown.
     #[must_use]
     pub fn backtrace(&self) -> &[StackFrame] {
         &self.stack_trace
     }
 
+    /// Displays this exception with its backtrace into `f`.
     pub fn format(
         &self,
         sources: &Sources,

@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use core::slice;
 use std::collections::VecDeque;
 use std::fmt::{self, Debug, Display};
@@ -9,8 +11,8 @@ use ahash::AHashMap;
 use serde::{Deserialize, Serialize};
 
 use self::token::{FormatString, FormatStringPart, Paired, RegexLiteral, Token, Tokens};
-use crate::exception::Exception;
-use crate::symbol::Symbol;
+use crate::runtime::exception::Exception;
+use crate::runtime::symbol::Symbol;
 use crate::vm::{ExecutionError, VmContext};
 pub mod token;
 

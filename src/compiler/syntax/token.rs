@@ -8,7 +8,7 @@ use std::str::CharIndices;
 use serde::{Deserialize, Serialize};
 
 use super::{Ranged, SourceCode, SourceId};
-use crate::symbol::Symbol;
+use crate::runtime::symbol::Symbol;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Token {

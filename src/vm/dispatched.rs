@@ -15,9 +15,9 @@ use super::{
     VmContext,
 };
 use crate::compiler::{BitcodeModule, UnaryKind};
-use crate::symbol::Symbol;
+use crate::runtime::symbol::Symbol;
+use crate::runtime::value::{ContextOrGuard, Dynamic, Value};
 use crate::syntax::{BitwiseKind, CompareKind};
-use crate::value::{ContextOrGuard, Dynamic, Value};
 use crate::vm::{Fault, SourceRange};
 
 impl CodeData {

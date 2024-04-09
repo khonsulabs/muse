@@ -1,18 +1,25 @@
+//! Types used for maps/dictionaries.
+
 use std::cmp::Ordering;
 
 use parking_lot::Mutex;
 use refuse::{CollectionGuard, Trace};
 
-use crate::list::List;
-use crate::symbol::Symbol;
-use crate::value::{
+use crate::runtime::list::List;
+use crate::runtime::symbol::Symbol;
+use crate::runtime::value::{
     ContextOrGuard, CustomType, Dynamic, RustFunctionTable, RustType, TypeRef, Value,
 };
 use crate::vm::{Fault, Register, VmContext};
 
+/// A collection of key-value pairs.
 #[derive(Debug)]
 pub struct Map(Mutex<Vec<Field>>);
 
+/// The type definition that the [`Map`] type uses.
+///
+/// In general, developers will not need this. However, if you are building your
+/// own `core` module, this type can be used to populate `$.core.Map`.
 pub static MAP_TYPE: RustType<Map> = RustType::new("Map", |t| {
     t.with_construct(|_| {
         |vm, arity| {
@@ -65,11 +72,13 @@ impl Trace for Map {
 }
 
 impl Map {
+    /// Returns an empty map.
     #[must_use]
     pub const fn new() -> Self {
         Self(Mutex::new(Vec::new()))
     }
 
+    /// Creates a map from an iterator of key-value pairs.
     pub fn from_iterator(
         vm: &mut VmContext<'_, '_>,
         iter: impl IntoIterator<Item = (Value, Value)>,
@@ -82,9 +91,18 @@ impl Map {
             })
             .collect();
         fields.sort_unstable_by(|a, b| a.key.hash.cmp(&b.key.hash));
+        // TODO need to de-dup keys. Maybe there's a sorting algorithm that
+        // supports deduping we can use here?
         Self(Mutex::new(fields))
     }
 
+    /// Returns the value contained for `key`, or `None` if this map does not
+    /// contain key.
+    ///
+    /// # Errors
+    ///
+    /// This function does not directly return any errors, but comparing values
+    /// can result in runtime errors.
     pub fn get(&self, vm: &mut VmContext<'_, '_>, key: &Value) -> Result<Option<Value>, Fault> {
         let hash = key.hash(vm);
         let contents = self.0.lock();
@@ -103,6 +121,12 @@ impl Map {
         Ok(None)
     }
 
+    /// Returns the value contained at `index`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Fault::OutOfBounds`] if `index` is out of bounds of this
+    /// collection.
     pub fn nth(&self, index: &Value, guard: &CollectionGuard) -> Result<Value, Fault> {
         let Some(index) = index.as_usize() else {
             return Err(Fault::OutOfBounds);
@@ -114,6 +138,9 @@ impl Map {
             .ok_or(Fault::OutOfBounds)
     }
 
+    /// Inserts a key-value pair into this map.
+    ///
+    /// If an existing value is stored for `key`, it will be returned.
     pub fn insert(
         &self,
         vm: &mut VmContext<'_, '_>,
@@ -141,11 +168,13 @@ impl Map {
             }
         }
 
+        contents.try_reserve(1).map_err(|_| Fault::OutOfMemory)?;
         contents.insert(insert_at, Field { key, value });
 
         Ok(None)
     }
 
+    /// Returns this map as a vec of fields.
     pub fn to_vec(&self) -> Vec<Field> {
         self.0.lock().clone()
     }
@@ -157,6 +186,7 @@ impl CustomType for Map {
     }
 }
 
+/// A key-value pair.
 #[derive(Debug, Clone)]
 pub struct Field {
     key: MapKey,
@@ -164,6 +194,19 @@ pub struct Field {
 }
 
 impl Field {
+    /// Returns the value of this field.
+    #[must_use]
+    pub const fn value(&self) -> Value {
+        self.value
+    }
+
+    #[must_use]
+    /// Returns the key of this field.
+    pub const fn key(&self) -> Value {
+        self.key.value
+    }
+
+    /// Splits this value into its key and value.
     #[must_use]
     pub fn into_parts(self) -> (Value, Value) {
         (self.key.value, self.value)
@@ -177,7 +220,7 @@ struct MapKey {
 }
 
 impl MapKey {
-    pub fn new(vm: &mut VmContext<'_, '_>, key: Value) -> Self {
+    fn new(vm: &mut VmContext<'_, '_>, key: Value) -> Self {
         Self {
             hash: key.hash(vm),
             value: key,
