@@ -14,10 +14,10 @@ use super::{
     precompiled_regex, CodeData, Function, LoadedOp, Module, PrecompiledRegex, Register, Stack,
     VmContext,
 };
+use crate::compiler::syntax::{BitwiseKind, CompareKind};
 use crate::compiler::{BitcodeModule, UnaryKind};
 use crate::runtime::symbol::Symbol;
 use crate::runtime::value::{ContextOrGuard, Dynamic, Value};
-use crate::syntax::{BitwiseKind, CompareKind};
 use crate::vm::{Fault, SourceRange};
 
 impl CodeData {
@@ -1531,7 +1531,7 @@ where
 
         self.dest.store(
             context,
-            Value::Dynamic(context.modules[loading_module.get()].as_any_dynamic()),
+            Value::Dynamic(context.modules[loading_module.get()].into_any_dynamic()),
         )?;
         Ok(ControlFlow::Continue(()))
     }
