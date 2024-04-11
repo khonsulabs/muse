@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use refuse::CollectionGuard;
 
 use crate::compiler::syntax::token::{Paired, Token};
-use crate::compiler::syntax::{Expression, Ranged, SourceRange};
+use crate::compiler::syntax::{Expression, Ranged, SourceRange, TokenizeInto};
 use crate::compiler::Compiler;
 use crate::runtime::exception::Exception;
 use crate::runtime::symbol::Symbol;

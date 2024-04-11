@@ -1,3 +1,5 @@
+//! Source code tokenization.
+
 use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::fmt::Display;
@@ -10,48 +12,104 @@ use serde::{Deserialize, Serialize};
 use super::{Ranged, SourceCode, SourceId};
 use crate::runtime::symbol::Symbol;
 
+/// A Muse token.
+///
+/// A token is the smallest unit of syntax that forms Muse syntax. A series of
+/// tokens can be parsed into an expression using Muse's grammar.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Token {
+    /// A sequence of ASCII whitespace.
+    ///
+    /// Whitespace is insignificant to Muse and is ignored by the compiler.
+    /// While being insignificant, it can still serve as a way to ensure a
+    /// sequence of characters is broken into multiple tokens instead of
+    /// interpreted as a single token (e.g., `forx` parses as a single
+    /// identifier token while `for x` parses as two identifier tokens
+    /// regardless of if you ignore whitespace tokens).
     Whitespace,
+    /// A source code comment.
+    ///
+    /// Comments are ignored by the Muse compiler.
     Comment,
+    /// A name or keyword (`foo`).
     Identifier(Symbol),
+    /// A symbol (`:foo`).
     Symbol(Symbol),
+    /// A sigil (`$foo`).
     Sigil(Symbol),
+    /// A source label name (`@foo`).
     Label(Symbol),
+    /// A signed integer.
     Int(i64),
+    /// An unsigned integer.
     UInt(u64),
+    /// A floating point number.
     Float(f64),
+    /// A single character (not a character literal).
     Char(char),
+    /// A string literal.
     String(Symbol),
+    /// A regular expression literal.
     Regex(RegexLiteral),
+    /// A format string.
     FormatString(FormatString),
+    /// The power token `**`
     Power,
+    /// The less than or equal token `<=`
     LessThanOrEqual,
+    /// The greater than or equal token `>=`
     GreaterThanOrEqual,
+    /// The equals token `==`
     Equals,
+    /// The add assign token `+=`
     AddAssign,
+    /// The add assign token `-=`
     SubtractAssign,
+    /// The add assign token `*=`
     MultiplyAssign,
+    /// The add assign token `/=`
     DivideAssign,
+    /// The add assign token `//`
     IntegerDivide,
+    /// The add assign token `//=`
     IntegerDivideAssign,
+    /// The add assign token `%=`
     RemainderAssign,
+    /// The shift left token `<<`
     ShiftLeft,
+    /// The shift left asign token `<<=`
     ShiftLeftAssign,
+    /// The shift right token `>>`
     ShiftRight,
+    /// The shift right token assign `>>=`
     ShiftRightAssign,
+    /// The not equal token `!=`
     NotEqual,
+    /// The range token `..`
     Range,
+    /// The range inclusive token `..=`
     RangeInclusive,
+    /// The elipses token `...`
     Ellipses,
+    /// The slim arrow token `->`
     SlimArrow,
+    /// The fat arrow token `=>`
     FatArrow,
+    /// Nil coalesce token `??`
     NilCoalesce,
+    /// An opening of a paired token.
     Open(Paired),
+    /// A closing of a paired token.
     Close(Paired),
 }
 
 impl Token {
+    /// Returns true if this token is likely the end of an expression.
+    ///
+    /// This function is used in some locations to make the grammar not require
+    /// as many "hard" keywords. Many grammar keywords only match if the next
+    /// token is not a likely end, which allows for "escaping" ambiguous usage
+    /// by surrounding the keyword in parentheses.
     #[must_use]
     pub fn is_likely_end(&self) -> bool {
         matches!(self, Token::Close(_) | Token::Char(';'))
@@ -116,14 +174,19 @@ impl Hash for Token {
     }
 }
 
+/// A token kind that is expected in pairs.
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Hash, Serialize, Deserialize)]
 pub enum Paired {
+    /// A curly brace (`{` or `}`)
     Brace,
+    /// A parenthesis (`(` or `)`)
     Paren,
+    /// A square bracket (`[` or `]`)
     Bracket,
 }
 
 impl Paired {
+    /// Returns the char corresponding to the opening token of this kind.
     #[must_use]
     pub fn as_open(self) -> char {
         match self {
@@ -133,6 +196,7 @@ impl Paired {
         }
     }
 
+    /// Returns the char corresponding to the closing token of this kind.
     #[must_use]
     pub fn as_close(self) -> char {
         match self {
@@ -225,7 +289,7 @@ impl Iterator for Chars<'_> {
     }
 }
 
-pub struct Tokens<'a> {
+pub(super) struct Tokens<'a> {
     chars: Chars<'a>,
     scratch: String,
     include_whitespace: bool,
@@ -233,7 +297,7 @@ pub struct Tokens<'a> {
 }
 
 impl Iterator for Tokens<'_> {
-    type Item = Result<Ranged<Token>, Ranged<Error>>;
+    type Item = Result<Ranged<Token>, Ranged<LexerError>>;
 
     #[allow(clippy::too_many_lines)]
     fn next(&mut self) -> Option<Self::Item> {
@@ -337,7 +401,7 @@ impl Iterator for Tokens<'_> {
                 (start, ch) if unicode_ident::is_xid_start(ch) => {
                     Ok(self.tokenize_identifier(start, ch))
                 }
-                (start, ch) => Err(self.chars.ranged(start.., Error::UnexpectedChar(ch))),
+                (start, ch) => Err(self.chars.ranged(start.., LexerError::UnexpectedChar(ch))),
             });
         }
     }
@@ -403,7 +467,7 @@ impl<'a> Tokens<'a> {
         &mut self,
         start: usize,
         start_char: char,
-    ) -> Result<Ranged<Token>, Ranged<Error>> {
+    ) -> Result<Ranged<Token>, Ranged<LexerError>> {
         self.scratch.clear();
         self.scratch.push(start_char);
         let has_decimal = if start_char == '.' {
@@ -445,7 +509,7 @@ impl<'a> Tokens<'a> {
 
             let float = self.scratch.parse::<f64>().map_err(|err| {
                 self.chars
-                    .ranged(start.., Error::FloatParse(err.to_string()))
+                    .ranged(start.., LexerError::FloatParse(err.to_string()))
             })?;
             Ok(self.chars.ranged(start.., Token::Float(float)))
         } else {
@@ -472,7 +536,7 @@ impl<'a> Tokens<'a> {
                     self.chars.next();
                     let radix = self.scratch.parse::<u32>().map_err(|err| {
                         self.chars
-                            .ranged(start.., Error::IntegerParse(err.to_string()))
+                            .ranged(start.., LexerError::IntegerParse(err.to_string()))
                     })?;
                     self.tokenize_radix(start, radix, signed)
                 }
@@ -484,7 +548,7 @@ impl<'a> Tokens<'a> {
                     }
                     .map_err(|err| {
                         self.chars
-                            .ranged(start.., Error::IntegerParse(err.to_string()))
+                            .ranged(start.., LexerError::IntegerParse(err.to_string()))
                     })?;
 
                     Ok(self.chars.ranged(start.., token))
@@ -498,7 +562,7 @@ impl<'a> Tokens<'a> {
         start: usize,
         radix: u32,
         signed: bool,
-    ) -> Result<Ranged<Token>, Ranged<Error>> {
+    ) -> Result<Ranged<Token>, Ranged<LexerError>> {
         self.scratch.clear();
         if let Some(alpha_radix @ 1..) = radix.checked_sub(10) {
             // Radix > 10. We need to check ascii_digit as well as filter the
@@ -531,7 +595,7 @@ impl<'a> Tokens<'a> {
 
         let decoded_bits = u64::from_str_radix(&self.scratch, radix).map_err(|err| {
             self.chars
-                .ranged(start.., Error::IntegerParse(err.to_string()))
+                .ranged(start.., LexerError::IntegerParse(err.to_string()))
         })?;
 
         #[allow(clippy::cast_possible_wrap)]
@@ -601,8 +665,8 @@ impl<'a> Tokens<'a> {
     fn tokenize_string_literal_into_scratch(
         &mut self,
         allowed_escapes: &[char],
-        fallback: impl Fn(&mut Self, usize, char) -> Result<StringFlow, Ranged<Error>>,
-    ) -> Result<bool, Ranged<Error>> {
+        fallback: impl Fn(&mut Self, usize, char) -> Result<StringFlow, Ranged<LexerError>>,
+    ) -> Result<bool, Ranged<LexerError>> {
         self.scratch.clear();
         loop {
             match self.chars.next() {
@@ -614,14 +678,20 @@ impl<'a> Tokens<'a> {
                     Some((_, 't')) => self.scratch.push('\t'),
                     Some((_, '\\')) => self.scratch.push('\\'),
                     Some((_, '\0')) => self.scratch.push('\0'),
-                    Some((_, 'u')) => self
-                        .decode_unicode_escape_into_scratch()
-                        .map_err(|()| self.chars.ranged(index.., Error::InvalidEscapeSequence))?,
-                    Some((_, 'x')) => self
-                        .decode_ascii_escape_into_scratch()
-                        .map_err(|()| self.chars.ranged(index.., Error::InvalidEscapeSequence))?,
+                    Some((_, 'u')) => self.decode_unicode_escape_into_scratch().map_err(|()| {
+                        self.chars
+                            .ranged(index.., LexerError::InvalidEscapeSequence)
+                    })?,
+                    Some((_, 'x')) => self.decode_ascii_escape_into_scratch().map_err(|()| {
+                        self.chars
+                            .ranged(index.., LexerError::InvalidEscapeSequence)
+                    })?,
                     Some((_, ch)) if allowed_escapes.contains(&ch) => self.scratch.push(ch),
-                    _ => return Err(self.chars.ranged(index.., Error::InvalidEscapeSequence)),
+                    _ => {
+                        return Err(self
+                            .chars
+                            .ranged(index.., LexerError::InvalidEscapeSequence))
+                    }
                 },
                 Some((offset, ch)) => match fallback(self, offset, ch)? {
                     StringFlow::Break => break Ok(true),
@@ -632,13 +702,13 @@ impl<'a> Tokens<'a> {
                 None => {
                     return Err(self
                         .chars
-                        .ranged(self.chars.last_index.., Error::MissingEndQuote))
+                        .ranged(self.chars.last_index.., LexerError::MissingEndQuote))
                 }
             }
         }
     }
 
-    fn tokenize_string(&mut self, start: usize) -> Result<Ranged<Token>, Ranged<Error>> {
+    fn tokenize_string(&mut self, start: usize) -> Result<Ranged<Token>, Ranged<LexerError>> {
         self.tokenize_string_literal_into_scratch(&[], |_, _, _| Ok(StringFlow::Unhandled))?;
 
         Ok(self
@@ -646,7 +716,7 @@ impl<'a> Tokens<'a> {
             .ranged(start.., Token::String(Symbol::from(&self.scratch))))
     }
 
-    fn tokenize_raw_string(&mut self, start: usize) -> Result<Ranged<Token>, Ranged<Error>> {
+    fn tokenize_raw_string(&mut self, start: usize) -> Result<Ranged<Token>, Ranged<LexerError>> {
         self.tokenize_raw_string_literal_into_scratch(&[], |_, _, _| Ok(StringFlow::Unhandled))?;
 
         Ok(self
@@ -719,7 +789,7 @@ impl<'a> Tokens<'a> {
         }
     }
 
-    fn determine_raw_string_thorpeness(&mut self) -> Result<usize, Ranged<Error>> {
+    fn determine_raw_string_thorpeness(&mut self) -> Result<usize, Ranged<LexerError>> {
         let mut octothorpeness = 0;
         while self.chars.peek() == Some('#') {
             octothorpeness += 1;
@@ -727,18 +797,18 @@ impl<'a> Tokens<'a> {
         }
         match self.chars.next() {
             Some((_, '"')) => Ok(octothorpeness),
-            Some((index, _)) => Err(self.chars.ranged(index.., Error::ExpectedRawString)),
+            Some((index, _)) => Err(self.chars.ranged(index.., LexerError::ExpectedRawString)),
             None => Err(self
                 .chars
-                .ranged(self.chars.last_index.., Error::ExpectedRawString)),
+                .ranged(self.chars.last_index.., LexerError::ExpectedRawString)),
         }
     }
 
     fn tokenize_raw_string_literal_into_scratch(
         &mut self,
         allowed_escapes: &[char],
-        fallback: impl Fn(&mut Self, usize, char) -> Result<StringFlow, Ranged<Error>>,
-    ) -> Result<bool, Ranged<Error>> {
+        fallback: impl Fn(&mut Self, usize, char) -> Result<StringFlow, Ranged<LexerError>>,
+    ) -> Result<bool, Ranged<LexerError>> {
         let octothorpeness = self.determine_raw_string_thorpeness()?;
         self.tokenize_raw_string_literal_into_scratch_with_thorpeness(
             octothorpeness,
@@ -751,8 +821,8 @@ impl<'a> Tokens<'a> {
         &mut self,
         octothorpeness: usize,
         allowed_escapes: &[char],
-        fallback: impl Fn(&mut Self, usize, char) -> Result<StringFlow, Ranged<Error>>,
-    ) -> Result<bool, Ranged<Error>> {
+        fallback: impl Fn(&mut Self, usize, char) -> Result<StringFlow, Ranged<LexerError>>,
+    ) -> Result<bool, Ranged<LexerError>> {
         self.scratch.clear();
         'decoding: loop {
             match self.chars.next() {
@@ -779,7 +849,7 @@ impl<'a> Tokens<'a> {
                 _ => {
                     return Err(self
                         .chars
-                        .ranged(self.chars.last_index.., Error::MissingEndQuote))
+                        .ranged(self.chars.last_index.., LexerError::MissingEndQuote))
                 }
             }
         }
@@ -790,7 +860,7 @@ impl<'a> Tokens<'a> {
         &mut self,
         _offset: usize,
         ch: char,
-    ) -> Result<StringFlow, Ranged<Error>> {
+    ) -> Result<StringFlow, Ranged<LexerError>> {
         match ch {
             '$' if self.chars.peek() == Some('{') => Ok(StringFlow::Break),
             _ => Ok(StringFlow::Unhandled),
@@ -801,7 +871,7 @@ impl<'a> Tokens<'a> {
         &mut self,
         raw: bool,
         octothorpeness: usize,
-    ) -> Result<bool, Ranged<Error>> {
+    ) -> Result<bool, Ranged<LexerError>> {
         if raw {
             self.tokenize_raw_string_literal_into_scratch_with_thorpeness(
                 octothorpeness,
@@ -817,7 +887,7 @@ impl<'a> Tokens<'a> {
         &mut self,
         start: usize,
         raw: bool,
-    ) -> Result<Ranged<Token>, Ranged<Error>> {
+    ) -> Result<Ranged<Token>, Ranged<LexerError>> {
         let octothorpeness = if raw {
             self.determine_raw_string_thorpeness()?
         } else {
@@ -840,7 +910,7 @@ impl<'a> Tokens<'a> {
             while let Some(last_open) = stack.last().copied() {
                 let token = self.next().ok_or_else(|| {
                     self.chars
-                        .ranged(self.chars.last_index.., Error::MissingEndQuote)
+                        .ranged(self.chars.last_index.., LexerError::MissingEndQuote)
                 })??;
                 expression.push(token);
                 match &expression.last().expect("just pushed").0 {
@@ -851,7 +921,7 @@ impl<'a> Tokens<'a> {
                             // TODO change to a MissingEnd, but then refactor the other MissingEnd to use this variant.
                             return Err(self
                                 .chars
-                                .ranged(self.chars.last_index.., Error::MissingEndQuote));
+                                .ranged(self.chars.last_index.., LexerError::MissingEndQuote));
                         }
                     }
                     Token::Open(kind) => {
@@ -880,13 +950,13 @@ impl<'a> Tokens<'a> {
         &mut self,
         start: usize,
         expanded: bool,
-    ) -> Result<Ranged<Token>, Ranged<Error>> {
+    ) -> Result<Ranged<Token>, Ranged<LexerError>> {
         self.scratch.clear();
         loop {
             match self.chars.next() {
                 Some((_, '/')) => break,
                 Some((index, ch @ ('\r' | '\n'))) if !expanded => {
-                    return Err(self.chars.ranged(index.., Error::UnexpectedChar(ch)))
+                    return Err(self.chars.ranged(index.., LexerError::UnexpectedChar(ch)))
                 }
                 Some((index, '\\')) => match self.chars.next() {
                     Some((_, '/')) => self.scratch.push('/'),
@@ -894,7 +964,11 @@ impl<'a> Tokens<'a> {
                         self.scratch.push('\\');
                         self.scratch.push(ch);
                     }
-                    _ => return Err(self.chars.ranged(index.., Error::InvalidEscapeSequence)),
+                    _ => {
+                        return Err(self
+                            .chars
+                            .ranged(index.., LexerError::InvalidEscapeSequence))
+                    }
                 },
                 Some((_, ch)) => {
                     self.scratch.push(ch);
@@ -902,7 +976,7 @@ impl<'a> Tokens<'a> {
                 None => {
                     return Err(self
                         .chars
-                        .ranged(self.chars.last_index.., Error::MissingRegexEnd))
+                        .ranged(self.chars.last_index.., LexerError::MissingRegexEnd))
                 }
             }
         }
@@ -960,74 +1034,101 @@ fn decode_hex_char_tests() {
     assert_eq!(decode_hex_char('.'), None);
 }
 
+/// An error occurred while tokenizing source code.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub enum Error {
+pub enum LexerError {
+    /// An unexpected character was found.
     UnexpectedChar(char),
+    /// An error occurred parsing an integer value.
     IntegerParse(String),
+    /// An error occurred parsing a floating point value.
     FloatParse(String),
+    /// A string literal is missing its end quote.
     MissingEndQuote,
+    /// A regular expression literal is missing its end slash.
     MissingRegexEnd,
+    /// A raw string literal was expected.
     ExpectedRawString,
+    /// An invalid escape sequence in a string literal.
     InvalidEscapeSequence,
 }
 
-impl crate::ErrorKind for Error {
+impl crate::ErrorKind for LexerError {
     fn kind(&self) -> &'static str {
         match self {
-            Error::UnexpectedChar(_) => "unexpected char",
-            Error::IntegerParse(_) => "invalid integer literal",
-            Error::FloatParse(_) => "invalid float literal",
-            Error::MissingEndQuote => "missing end quote",
-            Error::MissingRegexEnd => "missing regex end",
-            Error::InvalidEscapeSequence => "invalid escape sequence",
-            Error::ExpectedRawString => "expected raw string",
+            LexerError::UnexpectedChar(_) => "unexpected char",
+            LexerError::IntegerParse(_) => "invalid integer literal",
+            LexerError::FloatParse(_) => "invalid float literal",
+            LexerError::MissingEndQuote => "missing end quote",
+            LexerError::MissingRegexEnd => "missing regex end",
+            LexerError::InvalidEscapeSequence => "invalid escape sequence",
+            LexerError::ExpectedRawString => "expected raw string",
         }
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for LexerError {}
 
-impl Display for Error {
+impl Display for LexerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::UnexpectedChar(ch) => write!(f, "unexpected character: {ch}"),
-            Error::IntegerParse(err) => write!(f, "invalid integer literal: {err}"),
-            Error::FloatParse(err) => write!(f, "invalid floating point literal: {err}"),
-            Error::MissingEndQuote => f.write_str("missing end quote (\")"),
-            Error::MissingRegexEnd => f.write_str("missing regular expression end (/)"),
-            Error::InvalidEscapeSequence => f.write_str("invalid escape sequence"),
-            Error::ExpectedRawString => f.write_str("expected raw string"),
+            LexerError::UnexpectedChar(ch) => write!(f, "unexpected character: {ch}"),
+            LexerError::IntegerParse(err) => write!(f, "invalid integer literal: {err}"),
+            LexerError::FloatParse(err) => write!(f, "invalid floating point literal: {err}"),
+            LexerError::MissingEndQuote => f.write_str("missing end quote (\")"),
+            LexerError::MissingRegexEnd => f.write_str("missing regular expression end (/)"),
+            LexerError::InvalidEscapeSequence => f.write_str("invalid escape sequence"),
+            LexerError::ExpectedRawString => f.write_str("expected raw string"),
         }
     }
 }
 
+/// A regular expression literal.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, Hash, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct RegexLiteral {
+    /// The regular expression source.
     pub pattern: String,
+    /// If true, whitespace is ignored by default.
+    ///
+    /// See the documentation for [ignore_whitespace][regex-whitespace] for more
+    /// information.
+    ///
+    /// [regex-whitespace]:
+    ///     https://docs.rs/regex/latest/regex/struct.RegexBuilder.html#method.ignore_whitespace
     #[serde(default)]
     pub expanded: bool,
+    /// If true, the regular expression will ignore uppercase/lowercase differences when matching.
     #[serde(default)]
     pub ignore_case: bool,
+    /// When true, unicode mode is enabled for the regular expression.
     #[serde(default)]
     pub unicode: bool,
+    /// When true, `.` matches all characters including new lines.
     #[serde(default)]
     pub dot_matches_all: bool,
+    /// When true, the regular expression will operate in multiline mode.
     #[serde(default)]
     pub multiline: bool,
 }
 
+/// A format string literal.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, Hash, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct FormatString {
+    /// The initial portion of the string literal.
     pub initial: Ranged<Symbol>,
+    /// The remaining parts that are joined to the intitial string.
     pub parts: Vec<FormatStringPart>,
 }
 
+/// A part of a format string literal.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, Hash, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct FormatStringPart {
+    /// The expression to evaluate and convert to a string.
     pub expression: Vec<Ranged<Token>>,
+    /// The literal string that follows the expression.
     pub suffix: Ranged<Symbol>,
 }
 

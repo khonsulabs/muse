@@ -1,4 +1,4 @@
-#![allow(missing_docs)]
+//! Types for representing data in the Muse runtime.
 
 use std::any::Any;
 use std::cmp::Ordering;
@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 
+/// The [`Hash`] used by Muse when hashing values.
 pub type ValueHasher = ahash::AHasher;
 
 use kempt::Map;
@@ -21,19 +22,28 @@ use crate::runtime::string::MuseString;
 use crate::runtime::symbol::{Symbol, SymbolList, SymbolRef};
 use crate::vm::{Arity, ExecutionError, Fault, VmContext};
 
+/// A Muse virtual machine value.
 #[derive(Default, Clone, Copy, Debug)]
 pub enum Value {
+    /// A value representing nothing.
     #[default]
     Nil,
+    /// A boolean value.
     Bool(bool),
+    /// A signed 64-bit integer.
     Int(i64),
+    /// An unsigned 64-bit integer.
     UInt(u64),
+    /// A double-preceision floating point number.
     Float(f64),
+    /// A symbol.
     Symbol(SymbolRef),
+    /// A dynamically allocated, garbage collected type.
     Dynamic(AnyDynamic),
 }
 
 impl Value {
+    /// Moves `value` into the virtual machine.
     pub fn dynamic<'guard, T>(value: T, guard: impl AsRef<CollectionGuard<'guard>>) -> Self
     where
         T: DynamicValue + Trace,
@@ -41,11 +51,13 @@ impl Value {
         Self::Dynamic(AnyDynamic::new(value, guard))
     }
 
+    /// Returns true if this value is nil.
     #[must_use]
     pub const fn is_nil(&self) -> bool {
         matches!(self, Self::Nil)
     }
 
+    /// Returns this value as an i64, if possible.
     #[must_use]
     pub fn as_i64(&self) -> Option<i64> {
         match self {
@@ -57,6 +69,7 @@ impl Value {
         }
     }
 
+    /// Returns this value as an u64, if possible.
     #[must_use]
     pub fn as_u64(&self) -> Option<u64> {
         match self {
@@ -68,6 +81,7 @@ impl Value {
         }
     }
 
+    /// Returns this value as an u32, if possible.
     #[must_use]
     pub fn as_u32(&self) -> Option<u32> {
         match self {
@@ -79,6 +93,7 @@ impl Value {
         }
     }
 
+    /// Returns this value as an u16, if possible.
     #[must_use]
     pub fn as_u16(&self) -> Option<u16> {
         match self {
@@ -90,6 +105,7 @@ impl Value {
         }
     }
 
+    /// Returns this value as an usize, if possible.
     #[must_use]
     pub fn as_usize(&self) -> Option<usize> {
         match self {
@@ -101,6 +117,7 @@ impl Value {
         }
     }
 
+    /// Returns this value as an f64, if possible.
     #[must_use]
     pub fn as_f64(&self) -> Option<f64> {
         match self {
@@ -111,6 +128,7 @@ impl Value {
         }
     }
 
+    /// Converts this value to an i64, if possible.
     #[must_use]
     pub fn to_i64(&self) -> Option<i64> {
         match self {
@@ -124,6 +142,7 @@ impl Value {
         }
     }
 
+    /// Converts this value to an u64, if possible.
     #[must_use]
     pub fn to_u64(&self) -> Option<u64> {
         match self {
@@ -137,6 +156,7 @@ impl Value {
         }
     }
 
+    /// Converts this value to an u32, if possible.
     #[must_use]
     pub fn to_u32(&self) -> Option<u32> {
         match self {
@@ -150,6 +170,7 @@ impl Value {
         }
     }
 
+    /// Converts this value to an usize, if possible.
     #[must_use]
     pub fn to_usize(&self) -> Option<usize> {
         match self {
@@ -163,6 +184,7 @@ impl Value {
         }
     }
 
+    /// Converts this value to an f64, if possible.
     #[must_use]
     pub fn to_f64(&self) -> Option<f64> {
         match self {
@@ -177,6 +199,7 @@ impl Value {
         }
     }
 
+    /// Returns this value as a `SymbolRef`, if possible.
     #[must_use]
     pub fn as_symbol_ref(&self) -> Option<&SymbolRef> {
         match self {
@@ -185,6 +208,7 @@ impl Value {
         }
     }
 
+    /// Returns this value as a `Symbol`, if possible.
     #[must_use]
     pub fn as_symbol(&self, guard: &CollectionGuard<'_>) -> Option<Symbol> {
         match self {
@@ -193,6 +217,7 @@ impl Value {
         }
     }
 
+    /// Returns this value as an `AnyDynamic`, if possible.
     #[must_use]
     pub fn as_any_dynamic(&self) -> Option<AnyDynamic> {
         match self {
@@ -201,6 +226,7 @@ impl Value {
         }
     }
 
+    /// Returns this value as a `Dynamic<T>`, if this value contains a `T`.
     #[must_use]
     pub fn as_dynamic<T>(&self) -> Option<Dynamic<T>>
     where
@@ -212,6 +238,7 @@ impl Value {
         }
     }
 
+    /// Returns this value as a `Rooted<T>`, if this value contains a `T`.
     #[must_use]
     pub fn as_rooted<T>(&self, guard: &CollectionGuard<'_>) -> Option<Rooted<T>>
     where
@@ -223,6 +250,7 @@ impl Value {
         }
     }
 
+    /// Returns this value as a`&T`, if this value contains a `T`.
     #[must_use]
     pub fn as_downcast_ref<'guard, T>(&self, guard: &'guard CollectionGuard) -> Option<&'guard T>
     where
@@ -234,6 +262,8 @@ impl Value {
         }
     }
 
+    /// Returns true if this value should be considered `true` in a boolean
+    /// expression.
     pub fn truthy(&self, vm: &mut VmContext<'_, '_>) -> bool {
         match self {
             Value::Nil => false,
@@ -246,6 +276,7 @@ impl Value {
         }
     }
 
+    /// Invokes this value as a function.
     pub fn call(
         &self,
         vm: &mut VmContext<'_, '_>,
@@ -262,6 +293,7 @@ impl Value {
         }
     }
 
+    /// Invokes `name` on this value.
     pub fn invoke(
         &self,
         vm: &mut VmContext<'_, '_>,
@@ -276,6 +308,7 @@ impl Value {
         }
     }
 
+    /// Adds `self` to `rhs`.
     pub fn add(&self, vm: &mut VmContext<'_, '_>, rhs: &Self) -> Result<Value, Fault> {
         match (self, rhs) {
             (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
@@ -311,6 +344,7 @@ impl Value {
         }
     }
 
+    /// Subtracts `rhs` from `self`.
     pub fn sub(&self, vm: &mut VmContext<'_, '_>, rhs: &Self) -> Result<Value, Fault> {
         match (self, rhs) {
             (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
@@ -338,6 +372,7 @@ impl Value {
         }
     }
 
+    /// Multiplies `self` by `rhs`.
     pub fn mul(&self, vm: &mut VmContext<'_, '_>, rhs: &Self) -> Result<Value, Fault> {
         match (self, rhs) {
             (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
@@ -375,6 +410,7 @@ impl Value {
         }
     }
 
+    /// Raises `self` to the `rhs` power.
     pub fn pow(&self, vm: &mut VmContext<'_, '_>, exp: &Self) -> Result<Value, Fault> {
         match (self, exp) {
             (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
@@ -414,6 +450,7 @@ impl Value {
         }
     }
 
+    /// Divides `self` by `rhs`.
     pub fn div(&self, vm: &mut VmContext<'_, '_>, rhs: &Self) -> Result<Value, Fault> {
         match (self, rhs) {
             (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
@@ -479,6 +516,7 @@ impl Value {
         }
     }
 
+    /// Divides `self` by `rhs`, using whole numbers.
     pub fn idiv(&self, vm: &mut VmContext<'_, '_>, rhs: &Self) -> Result<Value, Fault> {
         match (self, rhs) {
             (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
@@ -548,6 +586,8 @@ impl Value {
         }
     }
 
+    /// Calcualtes the remainder of dividing `self` by `rhs` using whole
+    /// numbers.
     pub fn rem(&self, vm: &mut VmContext<'_, '_>, rhs: &Self) -> Result<Value, Fault> {
         match (self, rhs) {
             (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
@@ -615,10 +655,12 @@ impl Value {
         }
     }
 
+    /// Returns the inverse of [`Self::truthy`].
     pub fn not(&self, vm: &mut VmContext<'_, '_>) -> Result<Self, Fault> {
         Ok(Value::Bool(!self.truthy(vm)))
     }
 
+    /// Negates this value.
     pub fn negate(&self, vm: &mut VmContext<'_, '_>) -> Result<Self, Fault> {
         match self {
             Value::Nil => Ok(Value::Nil),
@@ -635,6 +677,7 @@ impl Value {
         }
     }
 
+    /// Returns the bitwise not of this value.
     pub fn bitwise_not(&self, vm: &mut VmContext<'_, '_>) -> Result<Self, Fault> {
         match self {
             Value::Nil => Ok(Value::Nil),
@@ -646,6 +689,7 @@ impl Value {
         }
     }
 
+    /// Returns the bitwise and of `self` and `rhs`.
     pub fn bitwise_and(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Self, Fault> {
         match (self, rhs) {
             (Value::Dynamic(dymamic), other) | (other, Value::Dynamic(dymamic)) => {
@@ -690,6 +734,7 @@ impl Value {
         }
     }
 
+    /// Returns the bitwise or of `self` and `rhs`.
     pub fn bitwise_or(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Self, Fault> {
         match (self, rhs) {
             (Value::Dynamic(dymamic), other) | (other, Value::Dynamic(dymamic)) => {
@@ -734,6 +779,7 @@ impl Value {
         }
     }
 
+    /// Returns the bitwise xor of `self` and `rhs`.
     pub fn bitwise_xor(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Self, Fault> {
         match (self, rhs) {
             (Value::Dynamic(dymamic), other) | (other, Value::Dynamic(dymamic)) => {
@@ -778,6 +824,7 @@ impl Value {
         }
     }
 
+    /// Returns the bitwise shift left of `self` by `rhs`.
     pub fn shift_left(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Self, Fault> {
         match self {
             Value::Dynamic(dymamic) => dymamic.shift_left(vm, rhs),
@@ -805,6 +852,7 @@ impl Value {
         }
     }
 
+    /// Returns the shift right of `self` by `rhs`.
     pub fn shift_right(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Self, Fault> {
         match self {
             Value::Dynamic(dymamic) => dymamic.shift_right(vm, rhs),
@@ -832,6 +880,7 @@ impl Value {
         }
     }
 
+    /// Returns this value as a shared string reference.
     pub fn to_string(&self, vm: &mut VmContext<'_, '_>) -> Result<SymbolRef, Fault> {
         match self {
             Value::Nil => Ok(Symbol::empty().downgrade()),
@@ -844,6 +893,7 @@ impl Value {
         }
     }
 
+    /// Maps the contents of this value as a `str`, if possible.
     pub fn map_str<R>(
         &self,
         vm: &mut VmContext<'_, '_>,
@@ -857,6 +907,7 @@ impl Value {
         Ok(map(vm, &str))
     }
 
+    /// Hashes this value into `hasher`.
     pub fn hash_into(&self, vm: &mut VmContext<'_, '_>, hasher: &mut ValueHasher) {
         core::mem::discriminant(self).hash(hasher);
         match self {
@@ -870,6 +921,7 @@ impl Value {
         }
     }
 
+    /// Calculates the hash of this value.
     pub fn hash(&self, vm: &mut VmContext<'_, '_>) -> u64 {
         let mut hasher = ValueHasher::default();
 
@@ -887,6 +939,7 @@ impl Value {
         hasher.finish()
     }
 
+    /// Returns true if `self` and `other` are equivalent values.
     pub fn equals(&self, vm: ContextOrGuard<'_, '_, '_>, other: &Self) -> Result<bool, Fault> {
         match (self, other) {
             (Self::Nil, Self::Nil) => Ok(true),
@@ -928,6 +981,7 @@ impl Value {
         }
     }
 
+    /// Returns true if `self` matches `other`.
     pub fn matches(&self, vm: &mut VmContext<'_, '_>, other: &Self) -> Result<bool, Fault> {
         match (self, other) {
             (Self::Dynamic(l0), _) => l0.matches(vm, other),
@@ -936,6 +990,8 @@ impl Value {
         }
     }
 
+    /// Returns an ordering of `self` and `other` that takes into account both
+    /// the type of data and the value itself.
     pub fn total_cmp(&self, vm: &mut VmContext<'_, '_>, other: &Self) -> Result<Ordering, Fault> {
         match (self, other) {
             (Value::Nil, Value::Nil) => Ok(Ordering::Equal),
@@ -986,11 +1042,16 @@ impl Value {
         }
     }
 
+    /// Take the contents of this value, leaving nil behind.
     #[must_use]
     pub fn take(&mut self) -> Value {
         std::mem::take(self)
     }
 
+    /// Perform a deep-clone on the contents of this value.
+    ///
+    /// Not all types are able to be deeply cloned. Unsupported types will
+    /// result in `None`.
     pub fn deep_clone(&self, guard: &CollectionGuard) -> Option<Value> {
         match self {
             Value::Nil => Some(Value::Nil),
@@ -1003,6 +1064,7 @@ impl Value {
         }
     }
 
+    /// Formats this value for display into `f`.
     pub fn format(&self, context: &mut VmContext<'_, '_>, mut f: impl fmt::Write) -> fmt::Result {
         if let Some(s) = self
             .to_string(context)
@@ -1085,10 +1147,12 @@ impl_try_from!(Value, usize, UInt);
 impl_try_from!(Value, isize, Int);
 impl_try_from!(Value, i128, UInt);
 
+/// A weak reference to a [`Rooted<T>`].
 #[derive(Clone, Copy, Hash, Eq, PartialEq)]
 pub struct AnyDynamic(pub(crate) AnyRef);
 
 impl AnyDynamic {
+    /// Returns `value` as a garbage collected value that can be used in Muse.
     pub fn new<'guard, T>(value: T, guard: impl AsRef<CollectionGuard<'guard>>) -> Self
     where
         T: DynamicValue + Trace,
@@ -1096,6 +1160,10 @@ impl AnyDynamic {
         Self(Ref::new(Custom(value), guard).as_any())
     }
 
+    /// Upgrades this reference to a [`Dynamic<T>`].
+    ///
+    /// This function does no type checking. If `T` is the incorrect type,
+    /// trying to access the underyling data will return None/an error.
     #[must_use]
     pub fn as_dynamic<T>(&self) -> Dynamic<T>
     where
@@ -1104,6 +1172,12 @@ impl AnyDynamic {
         Dynamic(self.0.downcast_ref::<Custom<T>>())
     }
 
+    /// Tries to upgrade this reference to a [`Rooted<T>`].
+    ///
+    /// This function can return None if:
+    ///
+    /// - `T` is not the correct type.
+    /// - The value has been garbage collected.
     #[must_use]
     pub fn as_rooted<T>(&self, guard: &CollectionGuard<'_>) -> Option<Rooted<T>>
     where
@@ -1114,6 +1188,12 @@ impl AnyDynamic {
             .map(|cast| Rooted(cast))
     }
 
+    /// Tries to load a reference to this reference's underlying data.
+    ///
+    /// This function can return None if:
+    ///
+    /// - `T` is not the correct type.
+    /// - The value has been garbage collected.
     #[must_use]
     pub fn downcast_ref<'guard, T>(&self, guard: &'guard CollectionGuard) -> Option<&'guard T>
     where
@@ -1124,6 +1204,7 @@ impl AnyDynamic {
             .and_then(|d| d.0.as_any().downcast_ref())
     }
 
+    /// Invokes `deep_clone` on the underlying type's [`TypeVtable`].
     #[must_use]
     pub fn deep_clone(&self, guard: &CollectionGuard) -> Option<AnyDynamic> {
         (self
@@ -1134,6 +1215,7 @@ impl AnyDynamic {
             .deep_clone)(self, guard)
     }
 
+    /// Invokes `call` on the underlying type's [`TypeVtable`].
     pub fn call(
         &self,
         vm: &mut VmContext<'_, '_>,
@@ -1150,6 +1232,7 @@ impl AnyDynamic {
         }
     }
 
+    /// Invokes `invoke` on the underlying type's [`TypeVtable`].
     pub fn invoke(
         &self,
         vm: &mut VmContext<'_, '_>,
@@ -1159,145 +1242,158 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
             .invoke)(self, vm, symbol, arity.into())
     }
 
+    /// Invokes `add` on the underlying type's [`TypeVtable`].
     pub fn add(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Value, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
             .add)(self, vm, rhs)
     }
 
+    /// Invokes `add_right` on the underlying type's [`TypeVtable`].
     pub fn add_right(&self, vm: &mut VmContext<'_, '_>, lhs: &Value) -> Result<Value, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
             .add_right)(self, vm, lhs)
     }
 
+    /// Invokes `sub` on the underlying type's [`TypeVtable`].
     pub fn sub(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Value, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
             .sub)(self, vm, rhs)
     }
 
+    /// Invokes `sub_right` on the underlying type's [`TypeVtable`].
     pub fn sub_right(&self, vm: &mut VmContext<'_, '_>, lhs: &Value) -> Result<Value, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
             .sub_right)(self, vm, lhs)
     }
 
+    /// Invokes `mul` on the underlying type's [`TypeVtable`].
     pub fn mul(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Value, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
             .mul)(self, vm, rhs)
     }
 
+    /// Invokes `mul_right` on the underlying type's [`TypeVtable`].
     pub fn mul_right(&self, vm: &mut VmContext<'_, '_>, lhs: &Value) -> Result<Value, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
             .mul_right)(self, vm, lhs)
     }
 
+    /// Invokes `div` on the underlying type's [`TypeVtable`].
     pub fn div(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Value, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
             .div)(self, vm, rhs)
     }
 
+    /// Invokes `div_right` on the underlying type's [`TypeVtable`].
     pub fn div_right(&self, vm: &mut VmContext<'_, '_>, lhs: &Value) -> Result<Value, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
             .div_right)(self, vm, lhs)
     }
 
+    /// Invokes `rem` on the underlying type's [`TypeVtable`].
     pub fn rem(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Value, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
             .rem)(self, vm, rhs)
     }
 
+    /// Invokes `rem_right` on the underlying type's [`TypeVtable`].
     pub fn rem_right(&self, vm: &mut VmContext<'_, '_>, lhs: &Value) -> Result<Value, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
             .rem_right)(self, vm, lhs)
     }
 
+    /// Invokes `idiv` on the underlying type's [`TypeVtable`].
     pub fn idiv(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Value, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
-            .div)(self, vm, rhs)
+            .idiv)(self, vm, rhs)
     }
 
+    /// Invokes `idiv_right` on the underlying type's [`TypeVtable`].
     pub fn idiv_right(&self, vm: &mut VmContext<'_, '_>, lhs: &Value) -> Result<Value, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
             .idiv_right)(self, vm, lhs)
     }
 
+    /// Invokes `hash` on the underlying type's [`TypeVtable`].
     pub fn hash(&self, vm: &mut VmContext<'_, '_>, hasher: &mut ValueHasher) {
         let Some(value) = self.0.load_mapped::<dyn CustomType>(vm.as_ref()) else {
             return;
@@ -1305,94 +1401,103 @@ impl AnyDynamic {
         (value.muse_type().clone().vtable.hash)(self, vm, hasher);
     }
 
+    /// Invokes `bitwise_not` on the underlying type's [`TypeVtable`].
     pub fn bitwise_not(&self, vm: &mut VmContext<'_, '_>) -> Result<Value, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
             .bitwise_not)(self, vm)
     }
 
+    /// Invokes `bitwise_and` on the underlying type's [`TypeVtable`].
     pub fn bitwise_and(&self, vm: &mut VmContext<'_, '_>, other: &Value) -> Result<Value, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
             .bitwise_and)(self, vm, other)
     }
 
+    /// Invokes `bitwise_or` on the underlying type's [`TypeVtable`].
     pub fn bitwise_or(&self, vm: &mut VmContext<'_, '_>, other: &Value) -> Result<Value, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
             .bitwise_or)(self, vm, other)
     }
 
+    /// Invokes `bitwise_xor` on the underlying type's [`TypeVtable`].
     pub fn bitwise_xor(&self, vm: &mut VmContext<'_, '_>, other: &Value) -> Result<Value, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
             .bitwise_xor)(self, vm, other)
     }
 
+    /// Invokes `shift_left` on the underlying type's [`TypeVtable`].
     pub fn shift_left(&self, vm: &mut VmContext<'_, '_>, amount: &Value) -> Result<Value, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
             .shift_left)(self, vm, amount)
     }
 
+    /// Invokes `shift_right` on the underlying type's [`TypeVtable`].
     pub fn shift_right(&self, vm: &mut VmContext<'_, '_>, amount: &Value) -> Result<Value, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
             .shift_right)(self, vm, amount)
     }
 
+    /// Invokes `negate` on the underlying type's [`TypeVtable`].
     pub fn negate(&self, vm: &mut VmContext<'_, '_>) -> Result<Value, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
             .negate)(self, vm)
     }
 
+    /// Invokes `to_string` on the underlying type's [`TypeVtable`].
     pub fn to_string(&self, vm: &mut VmContext<'_, '_>) -> Result<SymbolRef, Fault> {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::OperationOnNil)?
+            .ok_or(Fault::ValueFreed)?
             .muse_type()
             .clone()
             .vtable
             .to_string)(self, vm)
     }
 
+    /// Invokes `truthy` on the underlying type's [`TypeVtable`].
     pub fn truthy(&self, vm: &mut VmContext<'_, '_>) -> bool {
         let Some(value) = self.0.load_mapped::<dyn CustomType>(vm.as_ref()) else {
             return false;
@@ -1400,13 +1505,14 @@ impl AnyDynamic {
         (value.muse_type().clone().vtable.truthy)(self, vm)
     }
 
+    /// Invokes `eq` on the underlying type's [`TypeVtable`].
     pub fn eq(&self, vm: ContextOrGuard<'_, '_, '_>, rhs: &Value) -> Result<bool, Fault> {
         match rhs {
             Value::Dynamic(dynamic) if self.0 == dynamic.0 => Ok(true),
             _ => (self
                 .0
                 .load_mapped::<dyn CustomType>(vm.as_ref())
-                .ok_or(Fault::OperationOnNil)?
+                .ok_or(Fault::ValueFreed)?
                 .muse_type()
                 .clone()
                 .vtable
@@ -1414,13 +1520,14 @@ impl AnyDynamic {
         }
     }
 
+    /// Invokes `matches` on the underlying type's [`TypeVtable`].
     pub fn matches(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<bool, Fault> {
         match rhs {
             Value::Dynamic(dynamic) if self.0 == dynamic.0 => Ok(true),
             _ => (self
                 .0
                 .load_mapped::<dyn CustomType>(vm.as_ref())
-                .ok_or(Fault::OperationOnNil)?
+                .ok_or(Fault::ValueFreed)?
                 .muse_type()
                 .clone()
                 .vtable
@@ -1428,6 +1535,7 @@ impl AnyDynamic {
         }
     }
 
+    /// Invokes `total_cmp` on the underlying type's [`TypeVtable`].
     pub fn cmp(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Ordering, Fault> {
         (self
             .0
@@ -1457,21 +1565,32 @@ impl Trace for AnyDynamic {
     }
 }
 
+/// A reference counted pointer to a garbage collected value.
 pub struct Rooted<T: CustomType + Trace>(Root<Custom<T>>);
 impl<T> Rooted<T>
 where
     T: CustomType + Trace,
 {
+    /// Moves `value` into the garbage collector and returns a rooted reference
+    /// to it.
     #[must_use]
     pub fn new<'guard>(value: T, guard: impl AsRef<CollectionGuard<'guard>>) -> Self {
         Self(Root::new(Custom(value), guard))
     }
 
+    /// Returns a weak, typeless reference to this value.
     #[must_use]
-    pub fn as_any_dynamic(&self) -> AnyDynamic {
+    pub const fn as_any_dynamic(&self) -> AnyDynamic {
         AnyDynamic(self.0.downgrade_any())
     }
 
+    /// Returns a weak reference to this value.
+    #[must_use]
+    pub const fn downgrade(&self) -> Dynamic<T> {
+        Dynamic(self.0.downgrade())
+    }
+
+    /// Returns this value as a typeless root reference.
     #[must_use]
     pub fn into_any_root(self) -> AnyRoot {
         self.0.into_any_root()
@@ -1504,22 +1623,27 @@ impl From<AnyDynamic> for AnyRef {
     }
 }
 
+/// A weak reference to a [`Rooted<T>`].
 pub struct Dynamic<T: CustomType>(Ref<Custom<T>>);
 
 impl<T> Dynamic<T>
 where
     T: CustomType + Trace,
 {
+    /// Moves `value` into the garbage collector and returns a weak reference to
+    /// it.
     #[must_use]
     pub fn new<'guard>(value: T, guard: impl AsRef<CollectionGuard<'guard>>) -> Self {
         Self(Ref::new(Custom(value), guard))
     }
 
+    /// Loads a reference to the underlying data, if it has not been collected.
     #[must_use]
     pub fn load<'guard>(&self, guard: &'guard CollectionGuard) -> Option<&'guard T> {
         self.0.load(guard).map(|c| &c.0)
     }
 
+    /// Loads a reference to the underlying data, if it has not been collected.
     pub fn try_load<'guard>(
         &self,
         guard: &'guard CollectionGuard,
@@ -1527,29 +1651,23 @@ where
         self.load(guard).ok_or(ValueFreed)
     }
 
+    /// Loads a rooted reference to the underlying data, if it has not been
+    /// collected.
     #[must_use]
     pub fn as_rooted(&self, guard: &CollectionGuard<'_>) -> Option<Rooted<T>> {
         self.0.as_root(guard).map(Rooted)
     }
 
+    /// Returns this dynamic as a Value.
     #[must_use]
-    pub fn as_any_dynamic(&self) -> AnyDynamic {
-        AnyDynamic(self.0.as_any())
-    }
-
-    #[must_use]
-    pub fn to_value(&self) -> Value {
-        Value::Dynamic(self.as_any_dynamic())
-    }
-
-    #[must_use]
-    pub fn into_value(self) -> Value {
+    pub const fn into_value(self) -> Value {
         Value::Dynamic(self.into_any_dynamic())
     }
 
+    /// Returns this reference with its type erased.
     #[must_use]
-    pub fn into_any_dynamic(self) -> AnyDynamic {
-        self.as_any_dynamic()
+    pub const fn into_any_dynamic(self) -> AnyDynamic {
+        AnyDynamic(self.0.as_any())
     }
 }
 
@@ -1606,6 +1724,8 @@ where
 
 impl<T> Copy for Dynamic<T> where T: CustomType {}
 
+/// A weak reference could not be loaded because the underlying data has been
+/// freed.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct ValueFreed;
 
@@ -1621,9 +1741,11 @@ impl From<ValueFreed> for ExecutionError {
     }
 }
 
+/// A static [`TypeRef`].
 pub struct StaticType(OnceLock<TypeRef>, fn() -> Type);
 
 impl StaticType {
+    /// creates a new static type from the given type initializer.
     pub const fn new(init: fn() -> Type) -> Self {
         Self(OnceLock::new(), init)
     }
@@ -1638,16 +1760,18 @@ impl Deref for StaticType {
     }
 }
 
+/// A static [`TypeRef`] defined in Rust.
 pub struct RustType<T>(
     OnceLock<TypeRef>,
     &'static str,
-    fn(TypedTypeBuilder<T>) -> TypedTypeBuilder<T>,
+    fn(RustTypeBuilder<T>) -> RustTypeBuilder<T>,
 );
 
 impl<T> RustType<T> {
+    /// Returns a new type of the given name and initializer.
     pub const fn new(
         name: &'static str,
-        init: fn(TypedTypeBuilder<T>) -> TypedTypeBuilder<T>,
+        init: fn(RustTypeBuilder<T>) -> RustTypeBuilder<T>,
     ) -> Self {
         Self(OnceLock::new(), name, init)
     }
@@ -1661,17 +1785,21 @@ where
 
     fn deref(&self) -> &Self::Target {
         self.0
-            .get_or_init(|| self.2(TypedTypeBuilder::new(self.1)).seal(&CollectionGuard::acquire()))
+            .get_or_init(|| self.2(RustTypeBuilder::new(self.1)).seal(&CollectionGuard::acquire()))
     }
 }
 
+/// A Muse type definition.
 #[derive(Trace)]
 pub struct Type {
+    /// The name of the type.
     pub name: Symbol,
+    /// The virtual function table.
     pub vtable: TypeVtable,
 }
 
 impl Type {
+    /// Returns a new type with the default virtual table.
     pub fn new(name: impl Into<Symbol>) -> Self {
         Self {
             name: name.into(),
@@ -1679,6 +1807,12 @@ impl Type {
         }
     }
 
+    /// Replaces the constructor with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_construct<Func>(mut self, func: impl FnOnce(ConstructFn) -> Func) -> Self
     where
@@ -1688,6 +1822,12 @@ impl Type {
         self
     }
 
+    /// Replaces the call handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_call<Func>(mut self, func: impl FnOnce(CallFn) -> Func) -> Self
     where
@@ -1700,6 +1840,12 @@ impl Type {
         self
     }
 
+    /// Replaces the invoke handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_invoke<Func>(mut self, func: impl FnOnce(InvokeFn) -> Func) -> Self
     where
@@ -1712,6 +1858,12 @@ impl Type {
         self
     }
 
+    /// Replaces the hash handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_hash<Func>(mut self, func: impl FnOnce(HashFn) -> Func) -> Self
     where
@@ -1721,6 +1873,12 @@ impl Type {
         self
     }
 
+    /// Replaces the bitwise not handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_bitwise_not<Func>(mut self, func: impl FnOnce(UnaryFn) -> Func) -> Self
     where
@@ -1731,6 +1889,12 @@ impl Type {
         self
     }
 
+    /// Replaces the bitwise and with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_bitwise_and<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -1743,6 +1907,12 @@ impl Type {
         self
     }
 
+    /// Replaces the bitwise or handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_bitwise_or<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -1755,6 +1925,12 @@ impl Type {
         self
     }
 
+    /// Replaces the bitwise xor handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_bitwise_xor<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -1767,6 +1943,12 @@ impl Type {
         self
     }
 
+    /// Replaces the shift left handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_shift_left<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -1779,6 +1961,12 @@ impl Type {
         self
     }
 
+    /// Replaces the shift right handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_shift_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -1791,6 +1979,12 @@ impl Type {
         self
     }
 
+    /// Replaces the negate handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_negate<Func>(mut self, func: impl FnOnce(UnaryFn) -> Func) -> Self
     where
@@ -1801,6 +1995,12 @@ impl Type {
         self
     }
 
+    /// Replaces the eq handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_eq<Func>(mut self, func: impl FnOnce(EqFn) -> Func) -> Self
     where
@@ -1814,6 +2014,12 @@ impl Type {
         self
     }
 
+    /// Replaces the matches handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_matches<Func>(mut self, func: impl FnOnce(MatchesFn) -> Func) -> Self
     where
@@ -1827,6 +2033,12 @@ impl Type {
         self
     }
 
+    /// Replaces the comparison handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_total_cmp<Func>(mut self, func: impl FnOnce(TotalCmpFn) -> Func) -> Self
     where
@@ -1840,6 +2052,12 @@ impl Type {
         self
     }
 
+    /// Replaces the add handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_add<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -1852,6 +2070,12 @@ impl Type {
         self
     }
 
+    /// Replaces the add-right handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_add_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -1864,6 +2088,12 @@ impl Type {
         self
     }
 
+    /// Replaces the sub handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_sub<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -1876,6 +2106,12 @@ impl Type {
         self
     }
 
+    /// Replaces the sub-right handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_sub_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -1888,6 +2124,12 @@ impl Type {
         self
     }
 
+    /// Replaces the mul handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_mul<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -1900,6 +2142,12 @@ impl Type {
         self
     }
 
+    /// Replaces the mul-right handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_mul_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -1912,6 +2160,12 @@ impl Type {
         self
     }
 
+    /// Replaces the div handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_div<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -1924,6 +2178,12 @@ impl Type {
         self
     }
 
+    /// Replaces the div-right handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_div_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -1936,6 +2196,12 @@ impl Type {
         self
     }
 
+    /// Replaces the idiv handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_idiv<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -1948,6 +2214,12 @@ impl Type {
         self
     }
 
+    /// Replaces the idiv-right handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_idiv_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -1960,6 +2232,12 @@ impl Type {
         self
     }
 
+    /// Replaces the rem handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_rem<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -1972,6 +2250,12 @@ impl Type {
         self
     }
 
+    /// Replaces the rem-right handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_rem_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -1984,6 +2268,12 @@ impl Type {
         self
     }
 
+    /// Replaces the truthy handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_truthy<Func>(mut self, func: impl FnOnce(TruthyFn) -> Func) -> Self
     where
@@ -1993,6 +2283,12 @@ impl Type {
         self
     }
 
+    /// Replaces the `to_string` handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_to_string<Func>(mut self, func: impl FnOnce(ToStringFn) -> Func) -> Self
     where
@@ -2005,6 +2301,12 @@ impl Type {
         self
     }
 
+    /// Replaces the `deep_clone` handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_deep_clone<Func>(mut self, func: impl FnOnce(DeepCloneFn) -> Func) -> Self
     where
@@ -2019,6 +2321,8 @@ impl Type {
         self
     }
 
+    /// Replaces all functions on this table by invoking `mapping` and invoking
+    /// the corresponding functionality on the returned value.
     #[must_use]
     #[allow(clippy::too_many_lines)]
     pub fn with_fallback<Mapping>(mut self, mapping: Mapping) -> Self
@@ -2379,6 +2683,7 @@ impl Type {
         self
     }
 
+    /// Finalizes this type for use in Muse.
     #[must_use]
     pub fn seal(self, guard: &CollectionGuard) -> TypeRef {
         TypeRef::new(self, guard)
@@ -2393,12 +2698,13 @@ impl Debug for Type {
     }
 }
 
-pub struct TypedTypeBuilder<T> {
+/// A builder for a [`RustType<T>`].
+pub struct RustTypeBuilder<T> {
     t: Type,
     _t: PhantomData<T>,
 }
 
-impl<T> TypedTypeBuilder<T>
+impl<T> RustTypeBuilder<T>
 where
     T: CustomType + Trace,
 {
@@ -2409,6 +2715,12 @@ where
         }
     }
 
+    /// Replaces the constructor with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_construct<Func>(mut self, func: impl FnOnce(ConstructFn) -> Func) -> Self
     where
@@ -2421,6 +2733,12 @@ where
         self
     }
 
+    /// Replaces the call handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_call<Func>(mut self, func: impl FnOnce(CallFn) -> Func) -> Self
     where
@@ -2439,15 +2757,23 @@ where
         self
     }
 
+    /// Replaces the invoke handler with a handler that invokes the appropriate
+    /// function.
     #[must_use]
-    pub fn with_function_table(self, invoked: RustFunctionTable<T>) -> Self {
+    pub fn with_function_table(self, functions: RustFunctionTable<T>) -> Self {
         self.with_invoke(Box::new(move |_| {
             move |this, vm: &mut VmContext<'_, '_>, name: &SymbolRef, arity| {
-                invoked.invoke(vm, name, arity, &this)
+                functions.invoke(vm, name, arity, &this)
             }
         }))
     }
 
+    /// Replaces the invoke handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_invoke<Func>(mut self, func: impl FnOnce(InvokeFn) -> Func) -> Self
     where
@@ -2466,6 +2792,12 @@ where
         self
     }
 
+    /// Replaces the hash handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_hash<Func>(mut self, func: impl FnOnce(HashFn) -> Func) -> Self
     where
@@ -2486,6 +2818,12 @@ where
         self
     }
 
+    /// Replaces the bitwise not handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_bitwise_not<Func>(mut self, func: impl FnOnce(UnaryFn) -> Func) -> Self
     where
@@ -2506,6 +2844,12 @@ where
         self
     }
 
+    /// Replaces the bitwise and with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_bitwise_and<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -2526,6 +2870,12 @@ where
         self
     }
 
+    /// Replaces the bitwise or handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_bitwise_or<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -2546,6 +2896,12 @@ where
         self
     }
 
+    /// Replaces the bitwise xor handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_bitwise_xor<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -2566,6 +2922,12 @@ where
         self
     }
 
+    /// Replaces the shift left handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_shift_left<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -2586,6 +2948,12 @@ where
         self
     }
 
+    /// Replaces the shift right handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_shift_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -2606,6 +2974,12 @@ where
         self
     }
 
+    /// Replaces the negate handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_negate<Func>(mut self, func: impl FnOnce(UnaryFn) -> Func) -> Self
     where
@@ -2626,6 +3000,12 @@ where
         self
     }
 
+    /// Replaces the eq handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_eq<Func>(mut self, func: impl FnOnce(EqFn) -> Func) -> Self
     where
@@ -2644,6 +3024,12 @@ where
         self
     }
 
+    /// Replaces the matches handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_matches<Func>(mut self, func: impl FnOnce(MatchesFn) -> Func) -> Self
     where
@@ -2662,6 +3048,12 @@ where
         self
     }
 
+    /// Replaces the comparison handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_total_cmp<Func>(mut self, func: impl FnOnce(TotalCmpFn) -> Func) -> Self
     where
@@ -2680,6 +3072,12 @@ where
         self
     }
 
+    /// Replaces the add handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_add<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -2700,6 +3098,12 @@ where
         self
     }
 
+    /// Replaces the add-right handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_add_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -2720,6 +3124,12 @@ where
         self
     }
 
+    /// Replaces the sub handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_sub<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -2740,6 +3150,12 @@ where
         self
     }
 
+    /// Replaces the sub-right handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_sub_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -2760,6 +3176,12 @@ where
         self
     }
 
+    /// Replaces the mul handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_mul<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -2780,6 +3202,12 @@ where
         self
     }
 
+    /// Replaces the mul-right handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_mul_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -2800,6 +3228,12 @@ where
         self
     }
 
+    /// Replaces the div handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_div<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -2820,6 +3254,12 @@ where
         self
     }
 
+    /// Replaces the div-right handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_div_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -2840,6 +3280,12 @@ where
         self
     }
 
+    /// Replaces the idiv handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_idiv<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -2860,6 +3306,12 @@ where
         self
     }
 
+    /// Replaces the idiv-right handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_idiv_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -2880,6 +3332,12 @@ where
         self
     }
 
+    /// Replaces the rem handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_rem<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -2900,6 +3358,12 @@ where
         self
     }
 
+    /// Replaces the rem-right handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_rem_right<Func>(mut self, func: impl FnOnce(BinaryFn) -> Func) -> Self
     where
@@ -2920,6 +3384,12 @@ where
         self
     }
 
+    /// Replaces the truthy handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_truthy<Func>(mut self, func: impl FnOnce(TruthyFn) -> Func) -> Self
     where
@@ -2935,6 +3405,12 @@ where
         self
     }
 
+    /// Replaces the `to_string` handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_to_string<Func>(mut self, func: impl FnOnce(ToStringFn) -> Func) -> Self
     where
@@ -2953,6 +3429,12 @@ where
         self
     }
 
+    /// Replaces the `deep_clone` handler with `func`.
+    ///
+    /// `func` is a function that returns the actual handler function. It takes
+    /// a single parameter: the existing handler. This design allows for
+    /// functions to be overridden while still falling back to the previous
+    /// implementation.
     #[must_use]
     pub fn with_deep_clone<Func>(mut self, func: impl FnOnce(DeepCloneFn) -> Func) -> Self
     where
@@ -2971,6 +3453,8 @@ where
         self
     }
 
+    /// Replaces the `deep_clone` handler with an implementation that uses
+    /// [`Clone`].
     #[must_use]
     pub fn with_clone(self) -> Self
     where
@@ -2979,6 +3463,8 @@ where
         self.with_deep_clone(|_| |this, guard| Some(AnyDynamic::new((*this).clone(), guard)))
     }
 
+    /// Replaces all functions on this table by invoking `mapping` and invoking
+    /// the corresponding functionality on the returned value.
     #[must_use]
     #[allow(clippy::too_many_lines)]
     pub fn with_fallback<Mapping>(mut self, mapping: Mapping) -> Self
@@ -3007,8 +3493,14 @@ impl CustomType for Type {
     }
 }
 
+/// A reference to a [`CollectionGuard`] or a [`VmContext`].
+///
+/// This type is used when a function may need to be invoked with or without a
+/// [`VmContext`].
 pub enum ContextOrGuard<'a, 'context, 'guard> {
+    /// A collection guard.
     Guard(&'a CollectionGuard<'guard>),
+    /// An execution context.
     Context(&'a mut VmContext<'context, 'guard>),
 }
 
@@ -3022,6 +3514,7 @@ impl<'context, 'guard> AsRef<CollectionGuard<'guard>> for ContextOrGuard<'_, 'co
 }
 
 impl<'a, 'context, 'guard> ContextOrGuard<'a, 'context, 'guard> {
+    /// Returns a reference to the execution context, if available.
     pub fn vm(&mut self) -> Option<&mut VmContext<'context, 'guard>> {
         let Self::Context(context) = self else {
             return None;
@@ -3029,6 +3522,7 @@ impl<'a, 'context, 'guard> ContextOrGuard<'a, 'context, 'guard> {
         Some(context)
     }
 
+    /// Returns a new [`ContextOrGuard`] that borrows from `self`.
     pub fn borrowed(&mut self) -> ContextOrGuard<'_, 'context, 'guard> {
         match self {
             ContextOrGuard::Guard(guard) => ContextOrGuard::Guard(guard),
@@ -3037,37 +3531,50 @@ impl<'a, 'context, 'guard> ContextOrGuard<'a, 'context, 'guard> {
     }
 }
 
+/// A reference to a [`Type`].
 pub type TypeRef = Rooted<Type>;
 
+/// A boxed constructor used in a [`TypeVtable`].
 pub type ConstructFn =
     Box<dyn Fn(&mut VmContext<'_, '_>, Arity) -> Result<Value, Fault> + Send + Sync>;
+/// A boxed call handler used in a [`TypeVtable`].
 pub type CallFn =
     Box<dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>, Arity) -> Result<Value, Fault> + Send + Sync>;
+/// A boxed hash handler used in a [`TypeVtable`].
 pub type HashFn = Box<dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>, &mut ValueHasher) + Send + Sync>;
+/// A boxed single-argument handler used in a [`TypeVtable`].
 pub type UnaryFn =
     Box<dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>) -> Result<Value, Fault> + Send + Sync>;
+/// A boxed two-argument handler used in a [`TypeVtable`].
 pub type BinaryFn =
     Box<dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Value, Fault> + Send + Sync>;
+/// A boxed matches handler used in a [`TypeVtable`].
 pub type MatchesFn =
     Box<dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<bool, Fault> + Send + Sync>;
+/// A boxed eq handler used in a [`TypeVtable`].
 pub type EqFn = Box<
     dyn Fn(&AnyDynamic, ContextOrGuard<'_, '_, '_>, &Value) -> Result<bool, Fault> + Send + Sync,
 >;
+/// A boxed comparison handler used in a [`TypeVtable`].
 pub type TotalCmpFn = Box<
     dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>, &Value) -> Result<Ordering, Fault> + Send + Sync,
 >;
+/// A boxed invoke handler used in a [`TypeVtable`].
 pub type InvokeFn = Box<
     dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>, &SymbolRef, Arity) -> Result<Value, Fault>
         + Send
         + Sync,
 >;
+/// A boxed `deep_clone` handler used in a [`TypeVtable`].
 pub type DeepCloneFn =
     Box<dyn Fn(&AnyDynamic, &CollectionGuard) -> Option<AnyDynamic> + Send + Sync>;
+/// A boxed truthy handler used in a [`TypeVtable`].
 pub type TruthyFn = Box<dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>) -> bool + Send + Sync>;
+/// A boxed `to_string` handler used in a [`TypeVtable`].
 pub type ToStringFn =
     Box<dyn Fn(&AnyDynamic, &mut VmContext<'_, '_>) -> Result<SymbolRef, Fault> + Send + Sync>;
 
-#[allow(clippy::type_complexity)]
+/// A virtual function table for a [`Type`].
 pub struct TypeVtable {
     construct: ConstructFn,
     call: CallFn,
@@ -3145,7 +3652,9 @@ impl Default for TypeVtable {
 
 impl ContainsNoRefs for TypeVtable {}
 
+/// A mapping from a Rust type to its Muse [`Type`].
 pub trait CustomType: Send + Sync + Debug + 'static {
+    /// Returns the Muse type for this Rust type.
     fn muse_type(&self) -> &TypeRef;
 }
 
@@ -3173,6 +3682,7 @@ where
     }
 }
 
+/// A table containing Rust-defined functions for various names and arities.
 pub struct RustFunctionTable<T> {
     functions: Map<Symbol, Map<Arity, Arc<dyn RustFn<T>>>>,
 }
@@ -3181,6 +3691,7 @@ impl<T> RustFunctionTable<T>
 where
     T: CustomType + Trace,
 {
+    /// Returns an empty function table.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -3188,6 +3699,7 @@ where
         }
     }
 
+    /// Adds a function with `name` and `arity` to this table, and returns self.q
     #[must_use]
     pub fn with_fn<F>(mut self, name: impl SymbolList, arity: impl Into<Arity>, func: F) -> Self
     where
@@ -3204,6 +3716,14 @@ where
         self
     }
 
+    /// Invokes a function named `name` with `arity` arguments.
+    ///
+    /// # Errors
+    ///
+    /// - [`Fault::UnknownSymbol`]: Returned if this table has no functions with
+    ///       the given name.
+    /// - [`Fault::IncorrectNumberOfArguments`]: Returned if no functions with
+    ///       the given name accept the given number of arguments.
     pub fn invoke(
         &self,
         vm: &mut VmContext<'_, '_>,
@@ -3223,12 +3743,15 @@ where
     }
 }
 
+/// A statically defined [`RustFunctionTable`].
 pub struct StaticRustFunctionTable<T>(
     OnceLock<RustFunctionTable<T>>,
     fn(RustFunctionTable<T>) -> RustFunctionTable<T>,
 );
 
 impl<T> StaticRustFunctionTable<T> {
+    /// Returns a new static function table that initializes itself using
+    /// `init`.
     pub const fn new(init: fn(RustFunctionTable<T>) -> RustFunctionTable<T>) -> Self {
         Self(OnceLock::new(), init)
     }
@@ -3264,10 +3787,12 @@ where
 
 type ArcRustFn = Arc<dyn Fn(&mut VmContext<'_, '_>, Arity) -> Result<Value, Fault> + Send + Sync>;
 
+/// A Rust function that can be stored in a [`Value`] and called.
 #[derive(Clone)]
 pub struct RustFunction(ArcRustFn);
 
 impl RustFunction {
+    /// Returns a new function that invokes `function` when called.
     pub fn new<F>(function: F) -> Self
     where
         F: Fn(&mut VmContext<'_, '_>, Arity) -> Result<Value, Fault> + Send + Sync + 'static,
@@ -3311,10 +3836,13 @@ type ArcAsyncFunction = Arc<
         + Sync,
 >;
 
+/// An asynchronous Rust function that can be stored in a [`Value`] and called.
 #[derive(Clone)]
 pub struct AsyncFunction(ArcAsyncFunction);
 
 impl AsyncFunction {
+    /// Returns a new function that invokes `function` and awaits the returned
+    /// future when called.
     pub fn new<F, Fut>(function: F) -> Self
     where
         F: Fn(&mut VmContext<'_, '_>, Arity) -> Fut + Send + Sync + 'static,
@@ -3401,8 +3929,11 @@ impl Debug for ValueFuture {
     }
 }
 
+/// A [`CustomType`] that can be type-erased.
 pub trait DynamicValue: CustomType {
+    /// Returns `self` as an [`Any`].
     fn as_any(&self) -> &dyn Any;
+    /// Returns `self` as a mut [`Any`].
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
@@ -3423,7 +3954,7 @@ where
 fn dynamic() {
     impl CustomType for usize {
         fn muse_type(&self) -> &TypeRef {
-            static TYPE: RustType<usize> = RustType::new("usize", TypedTypeBuilder::with_clone);
+            static TYPE: RustType<usize> = RustType::new("usize", RustTypeBuilder::with_clone);
             &TYPE
         }
     }

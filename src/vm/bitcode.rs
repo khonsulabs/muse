@@ -1,4 +1,4 @@
-#![allow(missing_docs)]
+//! The Muse intermediate representation (IR).
 
 use std::ops::{Deref, DerefMut};
 use std::str;
@@ -13,21 +13,34 @@ use super::{Arity, Code, CodeData, Function, LoadedSource, Register};
 use crate::compiler::syntax::token::RegexLiteral;
 use crate::compiler::syntax::{BitwiseKind, CompareKind, Literal, SourceRange};
 use crate::compiler::{BitcodeModule, SourceMap, UnaryKind};
-use crate::runtime::symbol::Symbol;
+use crate::runtime::symbol::{IntoOptionSymbol, Symbol};
 use crate::vm::Stack;
 
+/// A value or a source of a value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ValueOrSource {
+    /// [`Value::Nil`](crate::runtime::value::Value::Nil)
     Nil,
+    /// [`Value::Nil`](crate::runtime::value::Value::Bool)
     Bool(bool),
+    /// [`Value::Nil`](crate::runtime::value::Value::Int)
     Int(i64),
+    /// [`Value::Nil`](crate::runtime::value::Value::UInt)
     UInt(u64),
+    /// [`Value::Nil`](crate::runtime::value::Value::Float)
     Float(f64),
+    /// [`Value::Nil`](crate::runtime::value::Value::Symbol)
     Symbol(Symbol),
+    /// A regular expression literal. When loaded, it is compiled into a
+    /// [`MuseRegex`](crate::runtime::regex::MuseRegex).
     Regex(RegexLiteral),
-    Register(Register),
+    /// A function declaration. When loaded, it becomes a [`Function`].
     Function(BitcodeFunction),
+    /// A virtual machine register.
+    Register(Register),
+    /// A location on the stack.
     Stack(Stack),
+    /// A label representing an instruction offset.
     Label(Label),
 }
 
@@ -75,7 +88,6 @@ impl_from!(ValueOrSource, u32, UInt);
 impl_from!(ValueOrSource, u64, UInt);
 impl_from!(ValueOrSource, f64, Float);
 impl_from!(ValueOrSource, Symbol, Symbol);
-// impl_from!(ValueOrSource, &'_ str, Symbol);
 impl_from!(ValueOrSource, Register, Register);
 impl_from!(ValueOrSource, Stack, Stack);
 impl_from!(ValueOrSource, Label, Label);
@@ -83,11 +95,16 @@ impl_from!(ValueOrSource, bool, Bool);
 impl_from!(ValueOrSource, BitcodeFunction, Function);
 impl_from!(ValueOrSource, RegexLiteral, Regex);
 
+/// A destination for an operation.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum OpDestination {
+    /// Ignore the result of the operation.
     Void,
+    /// Store the result in the provided register.
     Register(Register),
+    /// Store the result at a given stack offset.
     Stack(Stack),
+    /// Jump to the label if the value is truthy.
     Label(Label),
 }
 
@@ -101,55 +118,90 @@ impl_from!(OpDestination, Register, Register);
 impl_from!(OpDestination, Stack, Stack);
 impl_from!(OpDestination, Label, Label);
 
+/// A virtual machine operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Op {
+    /// Return from the current function.
     Return,
+    /// Assign this label to the next instruction.
     Label(Label),
+    /// Load `module`, storing a reference into `dest`.
     LoadModule {
+        /// The module to load.
         module: BitcodeModule,
+        /// The location to store the loaded module.
         dest: OpDestination,
     },
+    /// Declare `name` with `value`, storing a copy of the value in `dest`.
     Declare {
+        /// The name of the declaration.
         name: Symbol,
+        /// If true, the value will be able to be updated with an assignment.
         mutable: bool,
+        /// The initial value of the declaration.
         value: ValueOrSource,
+        /// The destination to store a copy of `value`.
         dest: OpDestination,
     },
+    /// An operation with one argument that stores its result in `dest`.
     Unary {
+        /// The value to operate on.
         op: ValueOrSource,
+        /// The destination for the result.
         dest: OpDestination,
+        /// The operation kind.
         kind: UnaryKind,
     },
+    /// An operation with two arguments that stores its result in `dest`.
     BinOp {
+        /// The first value to operate on.
         op1: ValueOrSource,
+        /// The second value to operate on.
         op2: ValueOrSource,
+        /// The destination for the result.
         dest: OpDestination,
+        /// The operation kind.
         kind: BinaryKind,
     },
+    /// Invoke `name` as a function with `arity` number of arguments provided.
     Call {
+        /// The name of the function.
         name: ValueOrSource,
+        /// The number of arguments provided to this invocation.
         arity: ValueOrSource,
     },
+    /// Invoke `name` on `target` with `arity` number of arguments provided.
     Invoke {
+        /// The target to invoke the function on.
         target: ValueOrSource,
+        /// The name of the function.
         name: Symbol,
+        /// The number of arguments provided to this invocation.
         arity: ValueOrSource,
     },
+    /// Throw an exception.
     Throw(FaultKind),
 }
 
+/// An IR [`Fault`](crate::vm::Fault).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Hash)]
 pub enum FaultKind {
+    /// Create an exception from the contents of register 0.
     Exception,
+    /// Return a [`Fault::PatternMismatch`](crate::vm::Fault::PatternMismatch).
     PatternMismatch,
 }
 
+/// A tag that can be converted to the instruction address of an [`Op::Label`]
+/// instruction.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Label(pub(crate) usize);
 
+/// A collection of [`Op`]s that represent a block of code that can be executed.
 #[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct BitcodeBlock {
     ops: Vec<Op>,
+    /// The amount of stack space this code needs to have allocated to execute.
     pub stack_requirement: usize,
     labels: usize,
     current_location: SourceRange,
@@ -157,6 +209,7 @@ pub struct BitcodeBlock {
 }
 
 impl BitcodeBlock {
+    /// Returns an IR code block from a runtime code block.
     #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn from_code(code: &'_ Code, guard: &CollectionGuard<'_>) -> Self {
@@ -286,27 +339,49 @@ impl BitcodeBlock {
         }
     }
 
+    /// Returns a newly allocated [`Label`].
+    ///
+    /// This value must be used in an [`Op::Label`], otherwise an error will
+    /// occur when used.
     pub fn new_label(&mut self) -> Label {
         let label = Label(self.labels);
         self.labels += 1;
         label
     }
 
+    /// Returns a newly allocated stack address.
     pub fn new_variable(&mut self) -> Stack {
         let var = Stack(self.stack_requirement);
         self.stack_requirement += 1;
         var
     }
 
+    /// Applies `range` to all operations after this call.
+    ///
+    /// The range information is compiled into a [`SourceMap`], enabling
+    /// exception backtraces to be traced to the original source code locations.
     pub fn set_current_source_range(&mut self, range: SourceRange) {
         self.current_location = range;
     }
 
+    /// Pushes a new operation to this block.
+    ///
+    /// Most operations have helpers that make it easier to push instructions
+    /// with various automatic datatype conversions.
     pub fn push(&mut self, op: Op) {
         self.ops.push(op);
         self.map.push(self.current_location);
     }
 
+    /// Empties this code block.
+    pub fn clear(&mut self) {
+        self.ops.clear();
+        self.map = SourceMap::default();
+        self.current_location = SourceRange::default();
+        self.labels = 0;
+    }
+
+    /// Pushes an [`Op::Declare`] operation.
     pub fn declare(
         &mut self,
         name: Symbol,
@@ -323,13 +398,7 @@ impl BitcodeBlock {
         });
     }
 
-    pub fn clear(&mut self) {
-        self.ops.clear();
-        self.map = SourceMap::default();
-        self.current_location = SourceRange::default();
-        self.labels = 0;
-    }
-
+    /// Pushes an [`Op::BinOp`] operation with kind [`BinaryKind::Compare`].
     pub fn compare(
         &mut self,
         comparison: CompareKind,
@@ -345,6 +414,7 @@ impl BitcodeBlock {
         });
     }
 
+    /// Pushes an [`Op::BinOp`] operation with kind [`BinaryKind::Matches`].
     pub fn matches(
         &mut self,
         lhs: impl Into<ValueOrSource>,
@@ -359,6 +429,7 @@ impl BitcodeBlock {
         });
     }
 
+    /// Pushes an [`Op::Call`] operation.
     pub fn call(&mut self, function: impl Into<ValueOrSource>, arity: impl Into<ValueOrSource>) {
         self.push(Op::Call {
             name: function.into(),
@@ -366,6 +437,7 @@ impl BitcodeBlock {
         });
     }
 
+    /// Pushes an [`Op::Invoke`] operation.
     pub fn invoke(
         &mut self,
         target: impl Into<ValueOrSource>,
@@ -379,6 +451,7 @@ impl BitcodeBlock {
         });
     }
 
+    /// Pushes an [`Op::BinOp`] operation with kind [`BinaryKind::Add`].
     pub fn add(
         &mut self,
         lhs: impl Into<ValueOrSource>,
@@ -393,6 +466,7 @@ impl BitcodeBlock {
         });
     }
 
+    /// Pushes an [`Op::BinOp`] operation with kind [`BinaryKind::Subtract`].
     pub fn sub(
         &mut self,
         lhs: impl Into<ValueOrSource>,
@@ -407,6 +481,7 @@ impl BitcodeBlock {
         });
     }
 
+    /// Pushes an [`Op::BinOp`] operation with kind [`BinaryKind::Multiply`].
     pub fn mul(
         &mut self,
         lhs: impl Into<ValueOrSource>,
@@ -421,6 +496,7 @@ impl BitcodeBlock {
         });
     }
 
+    /// Pushes an [`Op::BinOp`] operation with kind [`BinaryKind::Divide`].
     pub fn div(
         &mut self,
         lhs: impl Into<ValueOrSource>,
@@ -435,6 +511,7 @@ impl BitcodeBlock {
         });
     }
 
+    /// Pushes an [`Op::BinOp`] operation with kind [`BinaryKind::IntegerDivide`].
     pub fn idiv(
         &mut self,
         lhs: impl Into<ValueOrSource>,
@@ -449,6 +526,7 @@ impl BitcodeBlock {
         });
     }
 
+    /// Pushes an [`Op::BinOp`] operation with kind [`BinaryKind::Remainder`].
     pub fn rem(
         &mut self,
         lhs: impl Into<ValueOrSource>,
@@ -463,6 +541,7 @@ impl BitcodeBlock {
         });
     }
 
+    /// Pushes an [`Op::BinOp`] operation with kind [`BinaryKind::Power`].
     pub fn pow(
         &mut self,
         lhs: impl Into<ValueOrSource>,
@@ -477,6 +556,7 @@ impl BitcodeBlock {
         });
     }
 
+    /// Pushes an [`Op::LoadModule`] operation.
     pub fn load_module(&mut self, module: BitcodeModule, dest: impl Into<OpDestination>) {
         self.push(Op::LoadModule {
             module,
@@ -484,6 +564,7 @@ impl BitcodeBlock {
         });
     }
 
+    /// Pushes an [`Op::Unary`] operation with kind [`UnaryKind::Copy`].
     pub fn copy(&mut self, source: impl Into<ValueOrSource>, dest: impl Into<OpDestination>) {
         self.push(Op::Unary {
             op: source.into(),
@@ -492,10 +573,12 @@ impl BitcodeBlock {
         });
     }
 
+    /// Pushes an [`Op::Throw`] operation.
     pub fn throw(&mut self, kind: FaultKind) {
         self.push(Op::Throw(kind));
     }
 
+    /// Pushes an [`Op::Unary`] operation with kind [`UnaryKind::SetExceptionHandler`].
     pub fn set_exception_handler(
         &mut self,
         target: impl Into<ValueOrSource>,
@@ -508,6 +591,12 @@ impl BitcodeBlock {
         });
     }
 
+    /// Initializes a new map with `element_count` elements.
+    ///
+    /// This pushes two instructions:
+    ///
+    /// - [`Op::Call`] with name `$.core.Map`
+    /// - A copy from register 0 to `dest`.
     pub fn new_map(
         &mut self,
         element_count: impl Into<ValueOrSource>,
@@ -517,6 +606,12 @@ impl BitcodeBlock {
         self.copy(Register(0), dest);
     }
 
+    /// Initializes a new list with `element_count` elements.
+    ///
+    /// This pushes two instructions:
+    ///
+    /// - [`Op::Call`] with name `$.core.List`
+    /// - A copy from register 0 to `dest`.
     pub fn new_list(
         &mut self,
         element_count: impl Into<ValueOrSource>,
@@ -526,6 +621,7 @@ impl BitcodeBlock {
         self.copy(Register(0), dest);
     }
 
+    /// Pushes an [`Op::Unary`] operation with kind [`UnaryKind::Resolve`].
     pub fn resolve(&mut self, source: impl Into<ValueOrSource>, dest: impl Into<OpDestination>) {
         self.push(Op::Unary {
             op: source.into(),
@@ -534,10 +630,12 @@ impl BitcodeBlock {
         });
     }
 
+    /// Pushes an [`Op::Return`] operation.
     pub fn return_early(&mut self) {
         self.push(Op::Return);
     }
 
+    /// Pushes an [`Op::Unary`] operation with kind [`UnaryKind::Jump`].
     pub fn jump(
         &mut self,
         target: impl Into<ValueOrSource>,
@@ -550,10 +648,12 @@ impl BitcodeBlock {
         });
     }
 
+    /// Pushes an [`Op::Label`] operation.
     pub fn label(&mut self, label: Label) {
         self.push(Op::Label(label));
     }
 
+    /// Pushes an [`Op::BinOp`] operation with kind [`BinaryKind::Assign`].
     pub fn assign(
         &mut self,
         target: impl Into<ValueOrSource>,
@@ -568,6 +668,7 @@ impl BitcodeBlock {
         });
     }
 
+    /// Pushes an [`Op::BinOp`] operation with kind [`BinaryKind::JumpIf`].
     pub fn jump_if(
         &mut self,
         target: impl Into<ValueOrSource>,
@@ -582,6 +683,7 @@ impl BitcodeBlock {
         });
     }
 
+    /// Pushes an [`Op::BinOp`] operation with kind [`BinaryKind::JumpIfNot`].
     pub fn jump_if_not(
         &mut self,
         target: impl Into<ValueOrSource>,
@@ -596,6 +698,7 @@ impl BitcodeBlock {
         });
     }
 
+    /// Pushes an [`Op::Unary`] operation with kind [`UnaryKind::LogicalNot`].
     pub fn not(&mut self, value: impl Into<ValueOrSource>, dest: impl Into<OpDestination>) {
         self.push(Op::Unary {
             op: value.into(),
@@ -604,6 +707,7 @@ impl BitcodeBlock {
         });
     }
 
+    /// Pushes an [`Op::Unary`] operation with kind [`UnaryKind::Truthy`].
     pub fn truthy(&mut self, value: impl Into<ValueOrSource>, dest: impl Into<OpDestination>) {
         self.push(Op::Unary {
             op: value.into(),
@@ -612,6 +716,7 @@ impl BitcodeBlock {
         });
     }
 
+    /// Pushes an [`Op::Unary`] operation with kind [`UnaryKind::BitwiseNot`].
     pub fn bitwise_not(&mut self, value: impl Into<ValueOrSource>, dest: impl Into<OpDestination>) {
         self.push(Op::Unary {
             op: value.into(),
@@ -620,6 +725,7 @@ impl BitcodeBlock {
         });
     }
 
+    /// Prepare this code block for executing in the virtual machine.
     #[must_use]
     pub fn to_code(&self, guard: &CollectionGuard) -> Code {
         let mut code = Code::default();
@@ -670,6 +776,7 @@ impl DerefMut for BitcodeBlock {
     }
 }
 
+/// An IR [`Function`].
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BitcodeFunction {
     name: Option<Symbol>,
@@ -678,14 +785,16 @@ pub struct BitcodeFunction {
 }
 
 impl BitcodeFunction {
-    pub fn new(name: impl Into<Option<Symbol>>) -> Self {
+    /// Returns a new function with `name`.
+    pub fn new(name: impl IntoOptionSymbol) -> Self {
         Self {
-            name: name.into(),
+            name: name.into_symbol(),
             bodies: Map::new(),
             varg_bodies: Map::new(),
         }
     }
 
+    /// Returns a function from the contents of `bit`.
     #[must_use]
     pub fn from_function(bit: &'_ Function, guard: &CollectionGuard<'_>) -> Self {
         Self {
@@ -703,10 +812,14 @@ impl BitcodeFunction {
         }
     }
 
+    /// Inserts a new function body to be executed when `arity` number of
+    /// arguments are provided.
     pub fn insert_arity(&mut self, arity: impl Into<Arity>, body: impl Into<BitcodeBlock>) {
         self.bodies.insert(arity.into(), body.into());
     }
 
+    /// Inserts a new function body to be executed when `arity` or more number
+    /// of arguments are provided.
     pub fn insert_variable_arity(
         &mut self,
         arity: impl Into<Arity>,
@@ -715,17 +828,21 @@ impl BitcodeFunction {
         self.varg_bodies.insert(arity.into(), body.into());
     }
 
+    /// Adds a new function body to be executed when `arity` number of arguments
+    /// are provided, and returns self.
     #[must_use]
     pub fn when(mut self, arity: impl Into<Arity>, body: impl Into<BitcodeBlock>) -> Self {
         self.insert_arity(arity, body);
         self
     }
 
+    /// Returns the name of this function.
     #[must_use]
     pub const fn name(&self) -> &Option<Symbol> {
         &self.name
     }
 
+    /// Loads this function for execution in the virtual machine.
     #[must_use]
     pub fn to_function(&self, guard: &CollectionGuard<'_>) -> Function {
         Function {
@@ -745,20 +862,35 @@ impl BitcodeFunction {
     }
 }
 
+/// An IR binary (two-argument) operation.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum BinaryKind {
+    /// `op1 + op2`
     Add,
+    /// `op1 - op2`
     Subtract,
+    /// `op1 * op2`
     Multiply,
+    /// `op1 / op2`
     Divide,
+    /// `op1 // op2`
     IntegerDivide,
+    /// `op1 % op2`
     Remainder,
+    /// `op1 ** op2`
     Power,
+    /// If `op1` is truthy, jump to `op2`.
     JumpIf,
+    /// If `op1` is falsey, jump to `op2`.
     JumpIfNot,
+    /// `op1 xor op2`
     LogicalXor,
+    /// `op1 = op2`
     Assign,
+    /// True if `op1` matches `op2`
     Matches,
+    /// Perform a binary bitwise operation.
     Bitwise(BitwiseKind),
+    /// The result of comparing the two arguments.
     Compare(CompareKind),
 }

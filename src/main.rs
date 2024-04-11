@@ -34,7 +34,7 @@ fn main() {
     let mut sources = Sources::default();
     let mut compiler = Compiler::default();
     loop {
-        let line_num = sources.next_id().get().map_or(0, NonZeroUsize::get);
+        let line_num = sources.len() + 1;
         match editor.readline(&format!("{line_num}> ")) {
             Ok(line) => {
                 let _err = editor.append_history(&history_path);
@@ -184,8 +184,8 @@ impl Validator for Muse {
         match parse(source) {
             Ok(_) => Ok(ValidationResult::Valid(None)),
             Err(Ranged(
-                muse::compiler::syntax::Error::UnexpectedEof
-                | muse::compiler::syntax::Error::MissingEnd(_),
+                muse::compiler::syntax::ParseError::UnexpectedEof
+                | muse::compiler::syntax::ParseError::MissingEnd(_),
                 _,
             )) => Ok(ValidationResult::Incomplete),
             Err(err) => {

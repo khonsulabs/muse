@@ -59,7 +59,7 @@ enum VmFault {
     UnknownSymbol(Symbol),
     IncorrectNumberOfArguments,
     OperationOnNil,
-    MissingModule,
+    NotAModule,
     NotAFunction,
     StackOverflow,
     StackUnderflow,

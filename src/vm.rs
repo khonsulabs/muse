@@ -1,4 +1,16 @@
 //! Virtual Machine types for executing Muse code.
+//!
+//! Muse contains a compiler that generates an Intermediate Representation (IR),
+//! and a virtual machine that load and execute the intermediate representation.
+//!
+//! These are the types that Muse uses that have both IR and loaded
+//! representations:
+//!
+//! | IR | Loaded | Purpose |
+//! |----|--------|--|
+//! | [`BitcodeBlock`](bitcode::BitcodeBlock) | [`Code`] | An isolated block of code that can be executed. |
+//! | [`BitcodeFunction`] | [`Function`] | A function definition. |
+//! | [`BitcodeModule`] | [`Module`] | A module definition. |
 
 use std::cmp::Ordering;
 use std::fmt::{Debug, Write};
@@ -615,7 +627,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
             return Err(ExecutionError::new(Fault::NotAFunction, self));
         };
 
-        match function.as_any_dynamic().call(self, arity) {
+        match function.into_any_dynamic().call(self, arity) {
             Ok(value) => Ok(value),
             Err(Fault::FrameChanged) => self.resume(),
             Err(other) => Err(ExecutionError::new(other, self)),
@@ -832,7 +844,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
             let mut path = path.split('.').peekable();
             path.next();
             return if path.peek().is_none() {
-                Ok(module_dynamic.to_value())
+                Ok(module_dynamic.into_value())
             } else {
                 let name = loop {
                     let Some(name) = path.next() else {
@@ -882,11 +894,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
             {
                 Ok(value)
             } else if name == Symbol::super_symbol() {
-                Ok(module
-                    .parent
-                    .as_ref()
-                    .map(Dynamic::to_value)
-                    .unwrap_or_default())
+                Ok(module.parent.map(Dynamic::into_value).unwrap_or_default())
             } else {
                 Err(Fault::UnknownSymbol)
             }
@@ -1376,7 +1384,7 @@ impl VmContext<'_, '_> {
 
         self.op_store(
             code_index,
-            self.modules[loading_module.get()].to_value(),
+            self.modules[loading_module.get()].into_value(),
             dest,
         )?;
         Ok(())

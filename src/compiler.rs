@@ -1,4 +1,5 @@
-#![allow(missing_docs)]
+//! The Muse compiler.
+
 use std::collections::VecDeque;
 use std::fmt::{Debug, Display};
 use std::ops::{BitOr, BitOrAssign, Range};
@@ -17,7 +18,7 @@ use syntax::{
     AssignTarget, BinaryExpression, BreakExpression, CompareKind, ContinueExpression, Delimited,
     DelimitedIter, EntryKeyPattern, Expression, FunctionCall, FunctionDefinition, Index, Literal,
     LogicalKind, Lookup, LoopExpression, LoopKind, MatchExpression, MatchPattern, Matches,
-    PatternKind, Ranged, SourceCode, SourceRange, TryExpression, UnaryExpression, Variable,
+    PatternKind, Ranged, SingleMatch, SourceCode, SourceRange, TryExpression, UnaryExpression,
 };
 
 use crate::runtime::symbol::Symbol;
@@ -26,10 +27,11 @@ use crate::vm::bitcode::{
 };
 use crate::vm::{Code, Register, Stack};
 
+/// A Muse compiler instance.
 #[derive(Debug)]
 pub struct Compiler {
     function_name: Option<Symbol>,
-    parsed: Vec<Result<Ranged<Expression>, Ranged<syntax::Error>>>,
+    parsed: Vec<Result<Ranged<Expression>, Ranged<syntax::ParseError>>>,
     errors: Vec<Ranged<Error>>,
     code: BitcodeBlock,
     declarations: Map<Symbol, BlockDeclaration>,
@@ -39,6 +41,7 @@ pub struct Compiler {
 }
 
 impl Compiler {
+    /// Pushes `source` into the list of sources to build.
     pub fn push<'a>(&mut self, source: impl Into<SourceCode<'a>>) {
         let mut parsed = syntax::parse(source);
         if let Ok(parsed) = &mut parsed {
@@ -47,12 +50,17 @@ impl Compiler {
         self.parsed.push(parsed);
     }
 
+    /// Adds `source` to this compiler, and returns self.
     #[must_use]
     pub fn with<'a>(mut self, source: impl Into<SourceCode<'a>>) -> Self {
         self.push(source.into());
         self
     }
 
+    /// Adds a macro to this compiler instance.
+    ///
+    /// Macros are functions that accept a `VecDeque<Ranged<Token>>` and return
+    /// a `VecDeque<Ranged<Token>>`.
     pub fn push_macro<M>(&mut self, name: impl Into<Symbol>, func: M)
     where
         M: MacroFn + 'static,
@@ -60,6 +68,10 @@ impl Compiler {
         self.macros.insert(name.into(), Macro(Box::new(func)));
     }
 
+    /// Adds a macro to this compiler instance and returns self.
+    ///
+    /// Macros are functions that accept a `VecDeque<Ranged<Token>>` and return
+    /// a `VecDeque<Ranged<Token>>`.
     #[must_use]
     pub fn with_macro<M>(mut self, name: impl Into<Symbol>, func: M) -> Self
     where
@@ -69,6 +81,10 @@ impl Compiler {
         self
     }
 
+    /// Adds an infix macro to this compiler instance.
+    ///
+    /// Infix macros are functions that accept a `Ranged<Expression>` and a
+    /// `VecDeque<Ranged<Token>>` and returns a `VecDeque<Ranged<Token>>`.
     pub fn push_infix_macro<M>(&mut self, name: impl Into<Symbol>, func: M)
     where
         M: InfixMacroFn + 'static,
@@ -77,6 +93,10 @@ impl Compiler {
             .insert(name.into(), InfixMacro(Box::new(func)));
     }
 
+    /// Adds an infix macro to this compiler instance, and returns self.
+    ///
+    /// Infix macros are functions that accept a `Ranged<Expression>` and a
+    /// `VecDeque<Ranged<Token>>` and returns a `VecDeque<Ranged<Token>>`.
     #[must_use]
     pub fn with_infix_macro<M>(mut self, name: impl Into<Symbol>, func: M) -> Self
     where
@@ -86,6 +106,7 @@ impl Compiler {
         self
     }
 
+    /// Compile's `source`.
     pub fn compile<'a>(
         source: impl Into<SourceCode<'a>>,
         guard: &CollectionGuard,
@@ -93,6 +114,8 @@ impl Compiler {
         Self::default().with(source).build(guard)
     }
 
+    /// Builds all of the sources added to this compiler into a single code
+    /// block.
     pub fn build(&mut self, guard: &CollectionGuard) -> Result<Code, Vec<Ranged<Error>>> {
         self.code.clear();
         let mut expressions = Vec::with_capacity(self.parsed.len());
@@ -136,6 +159,10 @@ impl Compiler {
         }
     }
 
+    /// Perform macro expansion on `expr`.
+    ///
+    /// After this function executions `expr` and all subexpressions will not
+    /// contain any [`Expression::Macro`]s.
     #[allow(clippy::too_many_lines)]
     pub fn expand_macros(&mut self, expr: &mut Ranged<Expression>) {
         match &mut expr.0 {
@@ -188,18 +215,18 @@ impl Compiler {
                 self.expand_macros(&mut e.value);
             }
             Expression::Map(e) => {
-                for field in &mut e.fields {
+                for field in &mut e.fields.enclosed {
                     self.expand_macros(&mut field.key);
                     self.expand_macros(&mut field.value);
                 }
             }
             Expression::List(list) => {
-                for value in &mut list.values {
+                for value in &mut list.values.enclosed {
                     self.expand_macros(value);
                 }
             }
             Expression::Call(e) => {
-                for value in &mut e.parameters {
+                for value in &mut e.parameters.enclosed {
                     self.expand_macros(value);
                 }
             }
@@ -243,12 +270,12 @@ impl Compiler {
                 self.expand_macros(&mut e.value);
             }
             Expression::Module(e) => {
-                self.expand_macros(&mut e.contents);
+                self.expand_macros(&mut e.contents.body.enclosed);
             }
             Expression::Function(e) => {
                 self.expand_macros_in_matches(&mut e.body);
             }
-            Expression::Variable(e) => {
+            Expression::SingleMatch(e) => {
                 self.expand_macros(&mut e.value);
                 if let Some(guard) = &mut e.pattern.guard {
                     self.expand_macros(guard);
@@ -276,7 +303,7 @@ impl Compiler {
 
     fn expand_macros_in_index(&mut self, e: &mut Index) {
         self.expand_macros(&mut e.target);
-        for value in &mut e.parameters {
+        for value in &mut e.parameters.enclosed {
             self.expand_macros(value);
         }
     }
@@ -335,7 +362,9 @@ impl Default for Compiler {
     }
 }
 
+/// A function that can be used as a macro in a [`Compiler`].
 pub trait MacroFn: Send + Sync {
+    /// Returns a series of tokens from the given tokens.
     fn transform(&mut self, tokens: VecDeque<Ranged<Token>>) -> VecDeque<Ranged<Token>>;
 }
 
@@ -348,7 +377,7 @@ where
     }
 }
 
-pub struct Macro(Box<dyn MacroFn>);
+struct Macro(Box<dyn MacroFn>);
 
 impl Debug for Macro {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -356,7 +385,9 @@ impl Debug for Macro {
     }
 }
 
+/// A function that can be used as an infix macro in a [`Compiler`].
 pub trait InfixMacroFn: Send + Sync {
+    /// Returns a series of tokens from the given expression and tokens.
     fn transform(
         &mut self,
         expression: &Ranged<Expression>,
@@ -377,7 +408,7 @@ where
     }
 }
 
-pub struct InfixMacro(Box<dyn InfixMacroFn>);
+struct InfixMacro(Box<dyn InfixMacroFn>);
 
 impl Debug for InfixMacro {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -385,9 +416,12 @@ impl Debug for InfixMacro {
     }
 }
 
+/// A declaration made within a block.
 #[derive(Debug, Clone, Copy)]
 pub struct BlockDeclaration {
+    /// The stack location of the value.
     pub stack: Stack,
+    /// If true, this declaration can be reassigned to.
     pub mutable: bool,
 }
 
@@ -558,8 +592,8 @@ impl<'a> Scope<'a> {
                 }
             }
             Expression::Map(map) => {
-                let mut elements = Vec::with_capacity(map.fields.len());
-                for field in &map.fields {
+                let mut elements = Vec::with_capacity(map.fields.enclosed.len());
+                for field in &map.fields.enclosed {
                     let key = self.compile_expression_into_temporary(&field.key);
                     let value = self.compile_expression_into_temporary(&field.value);
                     elements.push((key, value));
@@ -579,8 +613,8 @@ impl<'a> Scope<'a> {
                 self.compiler.code.new_map(num_elements, dest);
             }
             Expression::List(list) => {
-                let mut elements = Vec::with_capacity(list.values.len());
-                for field in &list.values {
+                let mut elements = Vec::with_capacity(list.values.enclosed.len());
+                for field in &list.values.enclosed {
                     let value = self.compile_expression_into_temporary(field);
                     elements.push(value);
                 }
@@ -666,6 +700,7 @@ impl<'a> Scope<'a> {
                     let value = self.compile_source(&assign.value);
                     let arity = if let Some(arity) = index
                         .parameters
+                        .enclosed
                         .len()
                         .checked_add(1)
                         .and_then(|arity| u8::try_from(arity).ok())
@@ -677,7 +712,7 @@ impl<'a> Scope<'a> {
                             .push(Ranged::new(expr.range(), Error::TooManyArguments));
                         u8::MAX
                     };
-                    self.compile_function_args(&index.parameters, arity - 1);
+                    self.compile_function_args(&index.parameters.enclosed, arity - 1);
                     self.compiler.code.set_current_source_range(expr.range());
                     self.compiler
                         .code
@@ -695,7 +730,7 @@ impl<'a> Scope<'a> {
                 let break_label = self.compiler.code.new_label();
                 let mut scope = self.enter_block(
                     block
-                        .name
+                        .label
                         .as_ref()
                         .map(|label| (label.name.0.clone(), break_label, dest)),
                 );
@@ -712,19 +747,14 @@ impl<'a> Scope<'a> {
             Expression::Throw(throw) => self.compile_throw(&throw.value, expr.range()),
             Expression::Call(call) => self.compile_function_call(call, expr.range(), dest),
             Expression::Index(index) => self.compile_index(index, expr.range(), dest),
-            Expression::Variable(decl) => {
-                self.declare_variable(decl, expr.range(), dest);
+            Expression::SingleMatch(decl) => {
+                self.compile_single_match(decl, expr.range(), dest);
             }
             Expression::Function(decl) => {
                 self.compile_function(decl, expr.range(), dest);
             }
             Expression::Module(module) => {
-                let Expression::Block(block) = &module.contents.0 else {
-                    self.compiler
-                        .errors
-                        .push(Ranged::new(module.contents.1, Error::InvalidDeclaration));
-                    return;
-                };
+                let block = &module.contents.0;
                 let mut mod_compiler = Compiler::default();
                 let mut mod_scope = Scope::module_root(&mut mod_compiler);
 
@@ -941,7 +971,7 @@ impl<'a> Scope<'a> {
             (None, true) => {
                 self.compiler
                     .errors
-                    .push(Ranged::new(range, Error::InvalidDeclaration));
+                    .push(Ranged::new(range, Error::PublicFunctionRequiresName));
             }
             (None, false) => {
                 self.compiler.code.copy(fun, dest);
@@ -1226,6 +1256,7 @@ impl<'a> Scope<'a> {
         let conditions = if let Expression::List(list) = &match_expr.condition.0 {
             MatchExpressions::List(
                 list.values
+                    .enclosed
                     .iter()
                     .map(|expr| self.compile_source(expr))
                     .collect(),
@@ -1672,7 +1703,7 @@ impl<'a> Scope<'a> {
         };
 
         let mut loop_scope = outer_scope.enter_loop(
-            expr.block.name.as_ref().map(|label| label.name.0.clone()),
+            expr.block.label.as_ref().map(|label| label.name.0.clone()),
             continue_label,
             break_label,
             dest,
@@ -1708,7 +1739,12 @@ impl<'a> Scope<'a> {
         drop(outer_scope);
     }
 
-    fn declare_variable(&mut self, decl: &Variable, range: SourceRange, dest: OpDestination) {
+    fn compile_single_match(
+        &mut self,
+        decl: &SingleMatch,
+        range: SourceRange,
+        dest: OpDestination,
+    ) {
         let value = self.compile_source(&decl.value);
         self.compiler.code.set_current_source_range(range);
 
@@ -1827,7 +1863,7 @@ impl<'a> Scope<'a> {
             | Expression::Binary(_)
             | Expression::Module(_)
             | Expression::Function(_)
-            | Expression::Variable(_)
+            | Expression::SingleMatch(_)
             | Expression::RootModule
             | Expression::FormatString(_) => Err(expr.1),
             Expression::Macro(_) | Expression::InfixMacro(_) => {
@@ -2068,7 +2104,7 @@ impl<'a> Scope<'a> {
             | Expression::Module(_)
             | Expression::Call(_)
             | Expression::Index(_)
-            | Expression::Variable(_)
+            | Expression::SingleMatch(_)
             | Expression::Assign(_)
             | Expression::Unary(_)
             | Expression::Binary(_)
@@ -2102,7 +2138,7 @@ impl<'a> Scope<'a> {
         range: SourceRange,
         dest: OpDestination,
     ) {
-        let arity = if let Ok(arity) = u8::try_from(call.parameters.len()) {
+        let arity = if let Ok(arity) = u8::try_from(call.parameters.enclosed.len()) {
             arity
         } else {
             self.compiler
@@ -2124,7 +2160,7 @@ impl<'a> Scope<'a> {
                 let base = lookup.base.as_ref().expect("just matched");
                 let base = self.compile_source(&base.expression);
 
-                self.compile_function_args(&call.parameters, arity);
+                self.compile_function_args(&call.parameters.enclosed, arity);
                 self.compiler
                     .code
                     .invoke(base, lookup.name.0.clone(), arity);
@@ -2134,14 +2170,14 @@ impl<'a> Scope<'a> {
             _ => self.compile_source(&call.function),
         };
 
-        self.compile_function_args(&call.parameters, arity);
+        self.compile_function_args(&call.parameters.enclosed, arity);
         self.compiler.code.set_current_source_range(range);
         self.compiler.code.call(function, arity);
         self.compiler.code.copy(Register(0), dest);
     }
 
     fn compile_index(&mut self, index: &Index, range: SourceRange, dest: OpDestination) {
-        let arity = if let Ok(arity) = u8::try_from(index.parameters.len()) {
+        let arity = if let Ok(arity) = u8::try_from(index.parameters.enclosed.len()) {
             arity
         } else {
             self.compiler
@@ -2151,7 +2187,7 @@ impl<'a> Scope<'a> {
         };
 
         let target = self.compile_source(&index.target);
-        self.compile_function_args(&index.parameters, arity);
+        self.compile_function_args(&index.parameters.enclosed, arity);
         self.compiler.code.set_current_source_range(range);
         self.compiler
             .code
@@ -2260,22 +2296,40 @@ impl BitOrAssign for Refutability {
     }
 }
 
+/// A compilation error.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Error {
+    /// A variable cannot be assigned to if it is not mutable.
     VariableNotMutable,
+    /// Too many arguments were provided to a function call. The maximum number
+    /// of arguments to a function is 255.
     TooManyArguments,
+    /// A `usize` was too large to convert into a smaller integer type. In
+    /// general, this should not ever be returned given that other limits will
+    /// likely be reached before this could be.
     UsizeTooLarge,
-    InvalidDeclaration,
+    /// A public function requires a name.
+    PublicFunctionRequiresName,
+    /// A label is not valid.
     InvalidLabel,
+    /// Public declarations can only exist within a module's scope.
     PubOnlyInModules,
+    /// Expected a block/
     ExpectedBlock,
+    /// This name is already bound in the current pattern match.
     NameAlreadyBound,
+    /// This sigil is not known to the compiler.
     UnknownSigil,
+    /// All pattern options must contain the same name bindings.
     OrPatternBindingsMismatch,
+    /// Else was provided on an irrefutable pattern.
     ElseOnIrrefutablePattern,
+    /// The else expression in a `let..else` expression must diverge.
     LetElseMustDiverge,
-    Syntax(syntax::Error),
-    SigilSyntax(syntax::Error),
+    /// A syntax error occurred.
+    Syntax(syntax::ParseError),
+    /// A syntax error occurred while parsing an expanded macro.
+    SigilSyntax(syntax::ParseError),
 }
 
 impl crate::ErrorKind for Error {
@@ -2284,7 +2338,7 @@ impl crate::ErrorKind for Error {
             Error::VariableNotMutable => "variable not mutable",
             Error::TooManyArguments => "too many arguments",
             Error::UsizeTooLarge => "usize too large",
-            Error::InvalidDeclaration => "invalid declaration",
+            Error::PublicFunctionRequiresName => "public function must have a name",
             Error::InvalidLabel => "invalid label",
             Error::PubOnlyInModules => "pub only in modules",
             Error::ExpectedBlock => "expected block",
@@ -2308,7 +2362,7 @@ impl Display for Error {
             Error::UsizeTooLarge => {
                 f.write_str("integer too large for the architecture's index type")
             }
-            Error::InvalidDeclaration => f.write_str("invalid declaration"),
+            Error::PublicFunctionRequiresName => f.write_str("public function must have a name"),
             Error::InvalidLabel => f.write_str("invalid label"),
             Error::PubOnlyInModules => {
                 f.write_str("declarations may only be published within modules")
@@ -2331,27 +2385,41 @@ impl Display for Error {
     }
 }
 
-impl From<Ranged<syntax::Error>> for Ranged<Error> {
-    fn from(err: Ranged<syntax::Error>) -> Self {
+impl From<Ranged<syntax::ParseError>> for Ranged<Error> {
+    fn from(err: Ranged<syntax::ParseError>) -> Self {
         err.map(Error::Syntax)
     }
 }
 
+/// An operation that is performed on a single argument.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum UnaryKind {
+    /// Evaluates the argument's truthyness
     Truthy,
+    /// `not op`
     LogicalNot,
+    /// `!op`
     BitwiseNot,
+    /// `-op`
     Negate,
+    /// Copies the argument.
     Copy,
+    /// Resolves a name in the current scope.
     Resolve,
+    /// Jumps to the instruction address. The destination will contain the
+    /// current address before jumping.
     Jump,
+    /// Sets the exception handler to the label provided. The destination will
+    /// contain the overwritten exception handler.
     SetExceptionHandler,
 }
 
+/// An IR [`Module`](crate::vm::Module).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BitcodeModule {
+    /// The name of the module.
     pub name: Symbol,
+    /// The initializer that loads the module.
     pub initializer: BitcodeBlock,
 }
 
@@ -2362,6 +2430,7 @@ struct PatternBindings {
     bound_names: Set<Symbol>,
 }
 
+/// A mapping of [`SourceRange`]s to instruction addresses.
 #[derive(Default, Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct SourceMap(Arc<SourceMapData>);
 
@@ -2371,7 +2440,8 @@ struct SourceMapData {
 }
 
 impl SourceMap {
-    pub fn push(&mut self, range: SourceRange) {
+    /// Record a new instruction with `range` as its source.
+    pub(crate) fn push(&mut self, range: SourceRange) {
         let map = Arc::make_mut(&mut self.0);
         if let Some(inst) = map
             .instructions
@@ -2393,6 +2463,7 @@ impl SourceMap {
         }
     }
 
+    /// Returns the range of a given instruction, if found.
     #[must_use]
     pub fn get(&self, instruction: usize) -> Option<SourceRange> {
         self.0.instructions.iter().find_map(|probe| {
