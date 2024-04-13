@@ -170,7 +170,7 @@ impl From<Value> for TestOutput {
 }
 
 fn run_test_cases(path: &Path, filter: &str) {
-    let contents = std::fs::read_to_string(path).unwrap();
+    let contents = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
 
     let cases: BTreeMap<String, Case> = match rsn::parser::Config::default()
         .allow_implicit_map(true)
