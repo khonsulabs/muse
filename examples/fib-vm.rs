@@ -52,7 +52,7 @@ fn main() {
 
     let mut context = VmContext::new(&vm, &mut guard);
     context
-        .declare_function(dbg!(Function::new("fib").when(1, fib)))
+        .declare_function(Function::new("fib").when(1, fib))
         .unwrap();
     dbg!(context.execute(&code).unwrap());
 }

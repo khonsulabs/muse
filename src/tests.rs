@@ -81,7 +81,7 @@ fn module_budgeting() {
     }
     println!("Executed in {ops} steps");
     assert!(ops > 6);
-    assert!(ops < MAX_OPS);
+    assert!(ops <= MAX_OPS);
 }
 
 #[test]

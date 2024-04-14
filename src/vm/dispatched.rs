@@ -7,7 +7,7 @@ use std::sync::Arc;
 use refuse::CollectionGuard;
 
 use super::bitcode::{
-    trusted_loaded_source_to_value, BinaryKind, BitcodeFunction, FaultKind, Label, Op,
+    trusted_loaded_source_to_value, Access, BinaryKind, BitcodeFunction, FaultKind, Label, Op,
     OpDestination, ValueOrSource,
 };
 use super::{
@@ -36,6 +36,7 @@ impl CodeData {
             LoadedOp::Declare {
                 name,
                 mutable,
+                access,
                 value,
                 dest,
             } => {
@@ -47,6 +48,7 @@ impl CodeData {
                     guard,
                     &name,
                     mutable,
+                    access,
                 );
             }
             LoadedOp::Truthy(loaded) => match_truthy(
@@ -1213,7 +1215,7 @@ decode_sd_simple!(match_logical_not, compile_logical_not, LogicalNot);
 decode_sd_simple!(match_bitwise_not, compile_bitwise_not, BitwiseNot);
 decode_sd_simple!(match_negate, compile_negate, Negate);
 
-decode_sd!(match_declare_function, compile_declare_function, name: &Symbol, mutable: bool);
+decode_sd!(match_declare_function, compile_declare_function, name: &Symbol, mutable: bool, access: Access);
 
 fn compile_declare_function<Value, Dest>(
     _dest: &OpDestination,
@@ -1222,6 +1224,7 @@ fn compile_declare_function<Value, Dest>(
     f: Value,
     name: &Symbol,
     mutable: bool,
+    access: Access,
     dest: Dest,
 ) where
     Value: Source,
@@ -1230,6 +1233,7 @@ fn compile_declare_function<Value, Dest>(
     code.push_dispatched(Declare {
         name: name.clone(),
         mutable,
+        access,
         declaration: f,
         dest,
     });
@@ -1526,6 +1530,7 @@ where
             vm.frames[vm.current_frame].module = module_index.get();
             vm.frames[executing_frame].loading_module = Some(module_index);
             let _init_result = context.resume_async_inner(context.current_frame)?;
+            context.vm.frames[executing_frame].loading_module = None;
             module_index
         };
 
@@ -1548,6 +1553,7 @@ where
 struct Declare<Value, Dest> {
     name: Symbol,
     mutable: bool,
+    access: Access,
     declaration: Value,
     dest: Dest,
 }
@@ -1559,7 +1565,7 @@ where
 {
     fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         let value = self.declaration.load(vm)?;
-        vm.declare_inner(self.name.downgrade(), value, self.mutable)?;
+        vm.declare_inner(self.name.downgrade(), value, self.mutable, self.access)?;
 
         self.dest.store(vm, value)?;
 
@@ -1570,6 +1576,7 @@ where
         Op::Declare {
             name: self.name.clone(),
             mutable: self.mutable,
+            access: self.access,
             value: self.declaration.as_source(guard),
             dest: self.dest.as_dest(),
         }

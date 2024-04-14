@@ -23,7 +23,8 @@ use syntax::{
 
 use crate::runtime::symbol::Symbol;
 use crate::vm::bitcode::{
-    BinaryKind, BitcodeBlock, BitcodeFunction, FaultKind, Label, Op, OpDestination, ValueOrSource,
+    Access, BinaryKind, BitcodeBlock, BitcodeFunction, FaultKind, Label, Op, OpDestination,
+    ValueOrSource,
 };
 use crate::vm::{Code, Register, Stack};
 
@@ -471,6 +472,10 @@ impl<'a> Scope<'a> {
         }
     }
 
+    fn is_module_root(&self) -> bool {
+        self.module && self.depth == 0
+    }
+
     fn function_root(compiler: &'a mut Compiler) -> Self {
         compiler.scopes.push(ScopeInfo {
             kind: ScopeKind::Function,
@@ -770,10 +775,17 @@ impl<'a> Scope<'a> {
                 self.compiler
                     .code
                     .load_module(instance, OpDestination::Stack(stack));
-                if module.publish.is_some() {
+                if self.is_module_root() || module.publish.is_some() {
                     self.ensure_in_module(module.name.1);
 
-                    self.compiler.code.declare(name.clone(), false, stack, dest);
+                    let access = if module.publish.is_some() {
+                        Access::Public
+                    } else {
+                        Access::Private
+                    };
+                    self.compiler
+                        .code
+                        .declare(name.clone(), false, access, stack, dest);
                 } else {
                     self.declare_local(name.clone(), false, stack, dest);
                 }
@@ -958,22 +970,28 @@ impl<'a> Scope<'a> {
             }
         }
 
-        match (&decl.name, decl.publish.is_some()) {
-            (Some(name), true) => {
-                self.ensure_in_module(name.1);
-                self.compiler.code.declare(name.0.clone(), false, fun, dest);
+        match (&decl.name, decl.publish.is_some(), self.is_module_root()) {
+            (Some(name), true, _) | (Some(name), _, true) => {
+                let access = if decl.publish.is_some() {
+                    Access::Public
+                } else {
+                    Access::Private
+                };
+                self.compiler
+                    .code
+                    .declare(name.0.clone(), false, access, fun, dest);
             }
-            (Some(name), false) => {
+            (Some(name), false, _) => {
                 let stack = self.new_temporary();
                 self.compiler.code.copy(fun, stack);
                 self.declare_local(name.0.clone(), false, stack, dest);
             }
-            (None, true) => {
+            (None, true, _) => {
                 self.compiler
                     .errors
                     .push(Ranged::new(range, Error::PublicFunctionRequiresName));
             }
-            (None, false) => {
+            (None, false, _) => {
                 self.compiler.code.copy(fun, dest);
             }
         }
@@ -1034,12 +1052,18 @@ impl<'a> Scope<'a> {
                         self.compiler.code.invoke(matches, Symbol::get_symbol(), 1);
                         self.compiler.code.copy(Register(0), variable);
 
-                        if bindings.publish {
+                        if self.is_module_root() || bindings.publish {
                             self.ensure_in_module(range);
+                            let access = if bindings.publish {
+                                Access::Public
+                            } else {
+                                Access::Private
+                            };
 
                             self.compiler.code.declare(
                                 name.clone(),
                                 bindings.mutable,
+                                access,
                                 variable,
                                 (),
                             );
@@ -1090,10 +1114,19 @@ impl<'a> Scope<'a> {
                 if let Some(name) = name {
                     self.check_bound_name(Ranged::new(pattern.range(), name.clone()), bindings);
 
-                    if bindings.publish {
-                        self.compiler
-                            .code
-                            .declare(name.clone(), bindings.mutable, source, ());
+                    if self.is_module_root() || bindings.publish {
+                        let access = if bindings.publish {
+                            Access::Public
+                        } else {
+                            Access::Private
+                        };
+                        self.compiler.code.declare(
+                            name.clone(),
+                            bindings.mutable,
+                            access,
+                            source,
+                            (),
+                        );
                     } else {
                         let stack = self.new_temporary();
                         self.compiler.code.copy(source, stack);
@@ -2161,6 +2194,7 @@ impl<'a> Scope<'a> {
                 let base = self.compile_source(&base.expression);
 
                 self.compile_function_args(&call.parameters.enclosed, arity);
+                self.compiler.code.set_current_source_range(range);
                 self.compiler
                     .code
                     .invoke(base, lookup.name.0.clone(), arity);

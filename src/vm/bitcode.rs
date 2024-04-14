@@ -118,6 +118,15 @@ impl_from!(OpDestination, Register, Register);
 impl_from!(OpDestination, Stack, Stack);
 impl_from!(OpDestination, Label, Label);
 
+/// The level of access of a member.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Ord, PartialOrd)]
+pub enum Access {
+    /// The member is accessible by any code.
+    Private,
+    /// The member is only accessible to code in the same module.
+    Public,
+}
+
 /// A virtual machine operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Op {
@@ -138,6 +147,8 @@ pub enum Op {
         name: Symbol,
         /// If true, the value will be able to be updated with an assignment.
         mutable: bool,
+        /// The access level to allow for this declaration.
+        access: Access,
         /// The initial value of the declaration.
         value: ValueOrSource,
         /// The destination to store a copy of `value`.
@@ -243,11 +254,13 @@ impl BitcodeBlock {
                 LoadedOp::Declare {
                     name,
                     mutable,
+                    access,
                     value,
                     dest,
                 } => Op::Declare {
                     name: code.data.symbols[*name].clone(),
                     mutable: *mutable,
+                    access: *access,
                     value: trusted_loaded_source_to_value(value, &code.data),
                     dest: *dest,
                 },
@@ -386,6 +399,7 @@ impl BitcodeBlock {
         &mut self,
         name: Symbol,
         mutable: bool,
+        access: Access,
         value: impl Into<ValueOrSource>,
         dest: impl Into<OpDestination>,
     ) {
@@ -393,6 +407,7 @@ impl BitcodeBlock {
         self.push(Op::Declare {
             name,
             mutable,
+            access,
             value,
             dest: dest.into(),
         });

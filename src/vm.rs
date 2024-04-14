@@ -26,7 +26,6 @@ use std::{array, task};
 
 use ahash::AHashMap;
 use crossbeam_utils::sync::{Parker, Unparker};
-use kempt::map::Entry;
 use kempt::Map;
 use parking_lot::{Mutex, MutexGuard};
 use refuse::{CollectionGuard, ContainsNoRefs, NoMapping, Root, Trace};
@@ -35,7 +34,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(not(feature = "dispatched"))]
 use self::bitcode::trusted_loaded_source_to_value;
 use self::bitcode::{
-    BinaryKind, BitcodeFunction, FaultKind, Label, Op, OpDestination, ValueOrSource,
+    Access, BinaryKind, BitcodeFunction, FaultKind, Label, Op, OpDestination, ValueOrSource,
 };
 use crate::compiler::syntax::token::RegexLiteral;
 use crate::compiler::syntax::{BitwiseKind, CompareKind, SourceCode, SourceRange};
@@ -277,7 +276,7 @@ impl Vm {
         value: Value,
         guard: &mut CollectionGuard<'_>,
     ) -> Result<Option<Value>, Fault> {
-        VmContext::new(self, guard).declare_inner(name, value, false)
+        VmContext::new(self, guard).declare(name, value)
     }
 
     /// Declares an mutable variable with `name` containing `value`.
@@ -442,6 +441,16 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         &mut self.vm
     }
 
+    /// Returns the access to allow the caller of the current function.
+    pub fn caller_access_level(&self, module: &Dynamic<Module>) -> Access {
+        let current_module = &self.modules[self.frames[self.current_frame].module];
+        if current_module == module {
+            Access::Private
+        } else {
+            Access::Public
+        }
+    }
+
     fn budget_and_yield(&mut self) -> Result<(), Fault> {
         let next_count = self.counter - 1;
         if next_count > 0 {
@@ -589,18 +598,25 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
     ) -> Result<Value, ExecutionError> {
         let arity = params.load(self)?;
 
-        let mut module_dynamic = self.modules[0]
+        let mut module_dynamic = self.modules[self.frames[self.current_frame].module]
             .as_rooted(self.guard)
             .expect("module missing");
         let mut module_declarations = module_dynamic.declarations();
         let function = if let Some(decl) = module_declarations.get(name) {
-            decl.value
+            if decl.access == Access::Public {
+                decl.value
+            } else {
+                return Err(ExecutionError::new(Fault::UnknownSymbol, self));
+            }
         } else {
             let name = name.try_load(self.guard)?;
             let mut parts = name.split('.').peekable();
             while let Some(part) = parts.next() {
                 let part = SymbolRef::from(part);
-                let Some(decl) = module_declarations.get(&part).map(|decl| decl.value) else {
+                let Some(decl) = module_declarations
+                    .get(&part)
+                    .and_then(|decl| (decl.access == Access::Public).then_some(decl.value))
+                else {
                     break;
                 };
                 if parts.peek().is_some() {
@@ -786,7 +802,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         name: impl Into<SymbolRef>,
         value: Value,
     ) -> Result<Option<Value>, Fault> {
-        self.declare_inner(name, value, false)
+        self.declare_inner(name, value, false, Access::Public)
     }
 
     /// Declares an mutable variable with `name` containing `value`.
@@ -795,7 +811,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         name: impl Into<SymbolRef>,
         value: Value,
     ) -> Result<Option<Value>, Fault> {
-        self.declare_inner(name, value, true)
+        self.declare_inner(name, value, true, Access::Public)
     }
 
     fn declare_inner(
@@ -803,22 +819,21 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         name: impl Into<SymbolRef>,
         value: Value,
         mutable: bool,
+        access: Access,
     ) -> Result<Option<Value>, Fault> {
-        match self.modules[self.frames[self.current_frame].module]
+        Ok(self.modules[self.frames[self.current_frame].module]
             .load(self.guard)
             .ok_or(Fault::ValueFreed)?
             .declarations()
-            .entry(name.into())
-        {
-            Entry::Occupied(mut field) if field.mutable => {
-                Ok(Some(std::mem::replace(&mut field.value, value)))
-            }
-            Entry::Occupied(_) => Err(Fault::NotMutable),
-            Entry::Vacant(entry) => {
-                entry.insert(ModuleDeclaration { mutable, value });
-                Ok(None)
-            }
-        }
+            .insert(
+                name.into(),
+                ModuleDeclaration {
+                    mutable,
+                    value,
+                    access,
+                },
+            )
+            .map(|d| d.value.value))
     }
 
     /// Declares a compiled function.
@@ -831,7 +846,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         };
 
         function.module = Some(0);
-        self.declare_inner(name, Value::dynamic(function, &self), true)
+        self.declare_inner(name, Value::dynamic(function, &self), true, Access::Public)
     }
 
     /// Resolves the value at `path`.
@@ -853,10 +868,15 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
                     let name = Symbol::from(name);
                     if path.peek().is_some() {
                         let declarations = module.declarations();
-                        let value = &declarations
+                        let decl = &declarations
                             .get(&name.downgrade())
-                            .ok_or(Fault::UnknownSymbol)?
-                            .value;
+                            .ok_or(Fault::UnknownSymbol)?;
+                        let value = if decl.access >= self.caller_access_level(&module_dynamic) {
+                            decl.value
+                        } else {
+                            return Err(Fault::UnknownSymbol); // TODO accessd error
+                        };
+
                         let Some(inner) = value.as_dynamic::<Module>() else {
                             return Err(Fault::NotAModule);
                         };
@@ -919,6 +939,8 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
             let module = &vm.modules[vm.frames[vm.current_frame].module];
             if let Some(decl) = module.try_load(self.guard)?.declarations().get_mut(name) {
                 if decl.mutable {
+                    let name = name.try_load(self.guard()).expect("missing symbol");
+                    println!("Set {name} from {:?} to {value:?}", decl.value);
                     decl.value = value;
                     Ok(())
                 } else {
@@ -1169,9 +1191,10 @@ impl VmContext<'_, '_> {
             LoadedOp::Declare {
                 name,
                 mutable,
+                access,
                 value,
                 dest,
-            } => self.op_declare(code_index, *name, *mutable, *value, *dest),
+            } => self.op_declare(code_index, *name, *mutable, *access, *value, *dest),
             LoadedOp::Call { name, arity } => self.op_call(code_index, *name, *arity),
             LoadedOp::Invoke {
                 target,
@@ -1395,6 +1418,7 @@ impl VmContext<'_, '_> {
         code_index: usize,
         name: usize,
         mutable: bool,
+        access: Access,
         value: LoadedSource,
         dest: OpDestination,
     ) -> Result<(), Fault> {
@@ -1408,7 +1432,7 @@ impl VmContext<'_, '_> {
             .ok_or(Fault::InvalidOpcode)?;
 
         self.op_store(code_index, value, dest)?;
-        self.declare_inner(name, value, mutable)?;
+        self.declare_inner(name, value, mutable, access)?;
         Ok(())
     }
 
@@ -1477,6 +1501,7 @@ impl VmContext<'_, '_> {
         };
 
         let resolved = self.resolve(&name)?;
+        println!("Resolved {name} to {resolved:?}");
         self.op_store(code_index, resolved, dest)
     }
 
@@ -2127,6 +2152,7 @@ impl CodeData {
             Op::Declare {
                 name,
                 mutable,
+                access,
                 value,
                 dest,
             } => {
@@ -2137,6 +2163,7 @@ impl CodeData {
                     LoadedOp::Declare {
                         name,
                         mutable: *mutable,
+                        access: *access,
                         value,
                         dest,
                     },
@@ -2366,6 +2393,7 @@ impl Module {
                 ModuleDeclaration {
                     mutable: false,
                     value: Value::dynamic(core, guard),
+                    access: Access::Public,
                 },
             );
 
@@ -2382,6 +2410,7 @@ impl Module {
             ModuleDeclaration {
                 mutable: false,
                 value: Value::Dynamic(crate::runtime::map::MAP_TYPE.as_any_dynamic()),
+                access: Access::Public,
             },
         );
         declarations.insert(
@@ -2389,6 +2418,7 @@ impl Module {
             ModuleDeclaration {
                 mutable: false,
                 value: Value::Dynamic(crate::runtime::list::LIST_TYPE.as_any_dynamic()),
+                access: Access::Public,
             },
         );
         declarations.insert(
@@ -2396,6 +2426,7 @@ impl Module {
             ModuleDeclaration {
                 mutable: false,
                 value: Value::Dynamic(crate::runtime::string::STRING_TYPE.as_any_dynamic()),
+                access: Access::Public,
             },
         );
         drop(declarations);
@@ -2422,7 +2453,12 @@ impl CustomType for Module {
                                     let value = vm[Register(1)].take();
 
                                     match this.declarations().get_mut(sym) {
-                                        Some(decl) if decl.mutable => {
+                                        Some(decl)
+                                            if decl.mutable
+                                                && decl.access
+                                                    >= vm
+                                                        .caller_access_level(&this.downgrade()) =>
+                                        {
                                             Ok(std::mem::replace(&mut decl.value, value))
                                         }
                                         Some(_) => Err(Fault::NotMutable),
@@ -2433,17 +2469,24 @@ impl CustomType for Module {
                                     let field = vm[Register(0)].take();
                                     let sym = field.as_symbol_ref().ok_or(Fault::ExpectedSymbol)?;
 
-                                    this.declarations()
-                                        .get(sym)
-                                        .map(|decl| decl.value)
-                                        .ok_or(Fault::UnknownSymbol)
+                                    let declarations = this.declarations();
+                                    let decl = declarations.get(sym).ok_or(Fault::UnknownSymbol)?;
+                                    if decl.access >= vm.caller_access_level(&this.downgrade()) {
+                                        Ok(decl.value)
+                                    } else {
+                                        Err(Fault::UnknownSymbol)
+                                    }
                                 })
                         });
                     let declarations = this.declarations();
                     if let Some(decl) = declarations.get(name) {
-                        let possible_invoke = decl.value;
-                        drop(declarations);
-                        possible_invoke.call(vm, arity)
+                        if decl.access >= vm.caller_access_level(&this.downgrade()) {
+                            let possible_invoke = decl.value;
+                            drop(declarations);
+                            possible_invoke.call(vm, arity)
+                        } else {
+                            Err(Fault::UnknownSymbol)
+                        }
                     } else {
                         drop(declarations);
                         FUNCTIONS.invoke(vm, name, arity, &this)
@@ -2472,6 +2515,7 @@ impl Trace for Module {
 
 #[derive(Debug)]
 struct ModuleDeclaration {
+    access: Access,
     mutable: bool,
     value: Value,
 }
@@ -2530,6 +2574,7 @@ enum LoadedOp {
     Declare {
         name: usize,
         mutable: bool,
+        access: Access,
         value: LoadedSource,
         dest: OpDestination,
     },

@@ -1684,6 +1684,15 @@ where
     }
 }
 
+impl<T> PartialEq for Dynamic<T>
+where
+    T: CustomType + Trace,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.0.as_any() == other.0.as_any()
+    }
+}
+
 impl<T> From<Dynamic<T>> for AnyRef
 where
     T: CustomType + Trace,
