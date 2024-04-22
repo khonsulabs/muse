@@ -43,6 +43,7 @@ use crate::runtime::exception::Exception;
 use crate::runtime::regex::MuseRegex;
 use crate::runtime::string::MuseString;
 use crate::runtime::symbol::{IntoOptionSymbol, Symbol, SymbolRef};
+use crate::runtime::types::BitcodeType;
 #[cfg(not(feature = "dispatched"))]
 use crate::runtime::value::ContextOrGuard;
 use crate::runtime::value::{
@@ -375,6 +376,16 @@ impl VmState {
         self.steps_per_charge = steps;
         self.counter = self.counter.min(steps);
     }
+
+    /// Returns a slice of the registers.
+    pub const fn registers(&self) -> &[Value; 256] {
+        &self.registers
+    }
+
+    /// Returns exclusive access to the registers.
+    pub fn registers_mut(&mut self) -> &mut [Value; 256] {
+        &mut self.registers
+    }
 }
 
 impl Index<Register> for VmState {
@@ -639,11 +650,11 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         };
         drop(module_declarations);
 
-        let Some(function) = function.as_dynamic::<Function>() else {
+        let Some(function) = function.as_any_dynamic() else {
             return Err(ExecutionError::new(Fault::NotAFunction, self));
         };
 
-        match function.into_any_dynamic().call(self, arity) {
+        match function.call(self, arity) {
             Ok(value) => Ok(value),
             Err(Fault::FrameChanged) => self.resume(),
             Err(other) => Err(ExecutionError::new(other, self)),
@@ -1184,7 +1195,7 @@ impl VmContext<'_, '_> {
             Ordering::Equal => return Ok(StepResult::Complete),
             Ordering::Greater => return Err(Fault::InvalidInstructionAddress),
         };
-        // println!("Executing {instruction:?}");
+        println!("Executing {instruction:?}");
         let next_instruction = StepResult::from(address.checked_add(1));
         let result = match instruction {
             LoadedOp::Return => return Ok(StepResult::Complete),
@@ -1501,7 +1512,6 @@ impl VmContext<'_, '_> {
         };
 
         let resolved = self.resolve(&name)?;
-        println!("Resolved {name} to {resolved:?}");
         self.op_store(code_index, resolved, dest)
     }
 
@@ -1542,7 +1552,7 @@ impl VmContext<'_, '_> {
             return Err(Fault::InvalidArity);
         };
 
-        self[Register(0)] = target.invoke(self, &name.downgrade(), arity)?;
+        self[Register(0)] = target.invoke(self, &name, arity)?;
 
         Ok(())
     }
@@ -1665,13 +1675,13 @@ impl VmContext<'_, '_> {
         )
     }
 
-    fn op_load_symbol(&mut self, code_index: usize, symbol: usize) -> Result<Symbol, Fault> {
+    fn op_load_symbol(&mut self, code_index: usize, symbol: usize) -> Result<SymbolRef, Fault> {
         self.code[code_index]
             .code
             .data
             .symbols
             .get(symbol)
-            .cloned()
+            .map(|s| s.downgrade())
             .ok_or(Fault::InvalidOpcode)
     }
 
@@ -1682,9 +1692,7 @@ impl VmContext<'_, '_> {
             LoadedSource::Int(v) => Ok(Value::Int(v)),
             LoadedSource::UInt(v) => Ok(Value::UInt(v)),
             LoadedSource::Float(v) => Ok(Value::Float(v)),
-            LoadedSource::Symbol(v) => self
-                .op_load_symbol(code_index, v)
-                .map(|s| Value::Symbol(s.downgrade())),
+            LoadedSource::Symbol(v) => self.op_load_symbol(code_index, v).map(Value::Symbol),
             LoadedSource::Register(v) => Ok(self[v]),
             LoadedSource::Stack(v) => self
                 .current_frame()
@@ -1716,6 +1724,18 @@ impl VmContext<'_, '_> {
                         function
                             .to_function(self.guard)
                             .in_module(self.frames[self.current_frame].module),
+                        &self,
+                    )
+                })
+                .ok_or(Fault::InvalidOpcode),
+            LoadedSource::Type(v) => self.code[code_index]
+                .code
+                .data
+                .types
+                .get(v)
+                .map(|ty| {
+                    Value::dynamic(
+                        ty.load(self.guard, self.frames[self.current_frame].module),
                         &self,
                     )
                 })
@@ -2007,7 +2027,7 @@ impl Function {
         }
     }
 
-    fn in_module(mut self, module: usize) -> Self {
+    pub(crate) fn in_module(mut self, module: usize) -> Self {
         self.module = Some(module);
         self
     }
@@ -2134,6 +2154,7 @@ struct CodeData {
     symbols: Vec<Symbol>,
     known_symbols: AHashMap<Symbol, usize>,
     functions: Vec<BitcodeFunction>,
+    types: Vec<BitcodeType>,
     modules: Vec<BitcodeModule>,
     map: SourceMap,
 }
@@ -2283,6 +2304,12 @@ impl CodeData {
         index
     }
 
+    fn push_type(&mut self, ty: BitcodeType) -> usize {
+        let index = self.types.len();
+        self.types.push(ty);
+        index
+    }
+
     fn push_symbol(&mut self, symbol: Symbol) -> usize {
         *self.known_symbols.entry(symbol.clone()).or_insert_with(|| {
             let index = self.symbols.len();
@@ -2322,6 +2349,10 @@ impl CodeData {
             ValueOrSource::Function(function) => {
                 let function = self.push_function(function.clone());
                 LoadedSource::Function(function)
+            }
+            ValueOrSource::Type(ty) => {
+                let ty = self.push_type(ty.clone());
+                LoadedSource::Type(ty)
             }
         }
     }
@@ -2671,6 +2702,7 @@ enum LoadedSource {
     Symbol(usize),
     Register(Register),
     Function(usize),
+    Type(usize),
     Stack(Stack),
     Label(Label),
     Regex(usize),

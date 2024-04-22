@@ -22,11 +22,14 @@ use syntax::{
 };
 
 use crate::runtime::symbol::Symbol;
+use crate::runtime::types::BitcodeType;
 use crate::vm::bitcode::{
-    Access, BinaryKind, BitcodeBlock, BitcodeFunction, FaultKind, Label, Op, OpDestination,
-    ValueOrSource,
+    Access, Accessable, BinaryKind, BitcodeBlock, BitcodeFunction, FaultKind, Label, Op,
+    OpDestination, ValueOrSource,
 };
 use crate::vm::{Code, Register, Stack};
+
+use self::syntax::StructureMember;
 
 /// A Muse compiler instance.
 #[derive(Debug)]
@@ -275,6 +278,22 @@ impl Compiler {
             }
             Expression::Function(e) => {
                 self.expand_macros_in_matches(&mut e.body);
+            }
+            Expression::Structure(e) => {
+                if let Some(members) = &mut e.members {
+                    for m in &mut members.enclosed {
+                        if let StructureMember::Function(func) = &mut m.0 {
+                            self.expand_macros_in_matches(&mut func.body);
+                        }
+                    }
+                }
+            }
+            Expression::StructureLiteral(e) => {
+                if let Some(fields) = &mut e.fields {
+                    for field in &mut fields.enclosed {
+                        self.expand_macros(&mut field.value);
+                    }
+                }
             }
             Expression::SingleMatch(e) => {
                 self.expand_macros(&mut e.value);
@@ -758,6 +777,93 @@ impl<'a> Scope<'a> {
             Expression::Function(decl) => {
                 self.compile_function(decl, expr.range(), dest);
             }
+            Expression::Structure(e) => {
+                let mut functions = Map::new();
+                let mut fields = Map::new();
+
+                if let Some(members) = &e.members {
+                    for member in &members.enclosed {
+                        match &member.0 {
+                            StructureMember::Field { visibility, name } => {
+                                fields.insert(
+                                    name.0.clone(),
+                                    if visibility.is_some() {
+                                        Access::Public
+                                    } else {
+                                        Access::Private
+                                    },
+                                );
+                            }
+                            StructureMember::Function(f) => {
+                                if let Some(name) = &f.name {
+                                    functions.insert(
+                                        name.0.clone(),
+                                        Accessable {
+                                            access: if f.visibility.is_some() {
+                                                Access::Public
+                                            } else {
+                                                Access::Private
+                                            },
+                                            accessable: self
+                                                .compile_bitcode_function(&f, member.range()),
+                                        },
+                                    );
+                                } else {
+                                    todo!("struct functions can't be anonymous")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let ty = BitcodeType {
+                    name: e.name.0.clone(),
+                    functions,
+                    fields,
+                };
+
+                // TODO struct access
+                if self.is_module_root() {
+                    self.compiler
+                        .code
+                        .declare(e.name.0.clone(), false, Access::Public, ty, dest);
+                } else {
+                    let stack = self.new_temporary();
+                    self.compiler.code.copy(ty, stack);
+                    self.declare_local(e.name.0.clone(), false, stack, dest);
+                }
+            }
+            Expression::StructureLiteral(lit) => {
+                let kind = self.compile_source(&lit.name);
+                let length = lit.fields.as_ref().map_or(0, |e| e.enclosed.len());
+                let arity = if let Some(arity @ 0..=127) = u8::try_from(length).ok() {
+                    arity
+                } else {
+                    self.compiler
+                        .errors
+                        .push(Ranged::new(expr.range(), Error::TooManyArguments));
+                    127
+                };
+                let mut fields = Vec::with_capacity(length);
+                if let Some(lit_fields) = &lit.fields {
+                    for field in &lit_fields.enclosed {
+                        fields.push(self.compile_source(&field.value));
+                    }
+                }
+
+                self.compiler.code.set_current_source_range(expr.range());
+                if let Some(lit_fields) = &lit.fields {
+                    for ((field, value), index) in lit_fields.enclosed.iter().zip(fields).zip(0..) {
+                        self.compiler
+                            .code
+                            .copy(field.name.0.clone(), Register(index * 2));
+                        self.compiler.code.copy(value, Register(index * 2 + 1));
+                    }
+                }
+
+                self.compiler.code.call(kind, arity * 2);
+                self.compiler.code.copy(Register(0), dest);
+            }
             Expression::Module(module) => {
                 let block = &module.contents.0;
                 let mut mod_compiler = Compiler::default();
@@ -862,14 +968,12 @@ impl<'a> Scope<'a> {
             Literal::Regex(regex) => self.compiler.code.copy(regex.clone(), dest),
         }
     }
-
     #[allow(clippy::too_many_lines)]
-    fn compile_function(
+    fn compile_bitcode_function(
         &mut self,
         decl: &FunctionDefinition,
         range: SourceRange,
-        dest: OpDestination,
-    ) {
+    ) -> BitcodeFunction {
         let mut bodies_by_arity = kempt::Map::<(u8, bool), Vec<&MatchPattern>>::new();
         for def in &decl.body.patterns {
             let arity = if let Some(arity) = def.arity() {
@@ -969,10 +1073,21 @@ impl<'a> Scope<'a> {
                 fun.insert_arity(arity, fn_compiler.code);
             }
         }
+        fun
+    }
 
-        match (&decl.name, decl.publish.is_some(), self.is_module_root()) {
+    #[allow(clippy::too_many_lines)]
+    fn compile_function(
+        &mut self,
+        decl: &FunctionDefinition,
+        range: SourceRange,
+        dest: OpDestination,
+    ) {
+        let fun = self.compile_bitcode_function(decl, range);
+
+        match (&decl.name, decl.visibility.is_some(), self.is_module_root()) {
             (Some(name), true, _) | (Some(name), _, true) => {
-                let access = if decl.publish.is_some() {
+                let access = if decl.visibility.is_some() {
                     Access::Public
                 } else {
                     Access::Private
@@ -1898,6 +2013,8 @@ impl<'a> Scope<'a> {
             | Expression::Function(_)
             | Expression::SingleMatch(_)
             | Expression::RootModule
+            | Expression::Structure(_)
+            | Expression::StructureLiteral(_)
             | Expression::FormatString(_) => Err(expr.1),
             Expression::Macro(_) | Expression::InfixMacro(_) => {
                 unreachable!("macros should be expanded already")
@@ -2135,6 +2252,7 @@ impl<'a> Scope<'a> {
             | Expression::Match(_)
             | Expression::Function(_)
             | Expression::Module(_)
+            | Expression::Structure(_)
             | Expression::Call(_)
             | Expression::Index(_)
             | Expression::SingleMatch(_)
@@ -2150,6 +2268,7 @@ impl<'a> Scope<'a> {
             | Expression::Continue(_)
             | Expression::RootModule
             | Expression::Return(_)
+            | Expression::StructureLiteral(_)
             | Expression::FormatString(_) => {
                 ValueOrSource::Stack(self.compile_expression_into_temporary(source))
             }

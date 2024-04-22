@@ -4,7 +4,7 @@ use std::ops::{Deref, DerefMut};
 use std::str;
 
 use kempt::Map;
-use refuse::CollectionGuard;
+use refuse::{CollectionGuard, Trace};
 use serde::{Deserialize, Serialize};
 
 #[cfg(not(feature = "dispatched"))]
@@ -14,6 +14,7 @@ use crate::compiler::syntax::token::RegexLiteral;
 use crate::compiler::syntax::{BitwiseKind, CompareKind, Literal, SourceRange};
 use crate::compiler::{BitcodeModule, SourceMap, UnaryKind};
 use crate::runtime::symbol::{IntoOptionSymbol, Symbol};
+use crate::runtime::types::BitcodeType;
 use crate::vm::Stack;
 
 /// A value or a source of a value.
@@ -36,6 +37,8 @@ pub enum ValueOrSource {
     Regex(RegexLiteral),
     /// A function declaration. When loaded, it becomes a [`Function`].
     Function(BitcodeFunction),
+    /// A type definition.
+    Type(BitcodeType),
     /// A virtual machine register.
     Register(Register),
     /// A location on the stack.
@@ -94,6 +97,7 @@ impl_from!(ValueOrSource, Label, Label);
 impl_from!(ValueOrSource, bool, Bool);
 impl_from!(ValueOrSource, BitcodeFunction, Function);
 impl_from!(ValueOrSource, RegexLiteral, Regex);
+impl_from!(ValueOrSource, BitcodeType, Type);
 
 /// A destination for an operation.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -119,12 +123,30 @@ impl_from!(OpDestination, Stack, Stack);
 impl_from!(OpDestination, Label, Label);
 
 /// The level of access of a member.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Ord, PartialOrd)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Ord, PartialOrd, Trace)]
 pub enum Access {
     /// The member is accessible by any code.
     Private,
     /// The member is only accessible to code in the same module.
     Public,
+}
+
+/// A type that has an `access` field.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Ord, PartialOrd)]
+pub struct Accessable<T> {
+    /// The access of the item.
+    pub access: Access,
+    /// The item having its access controlled.
+    pub accessable: T,
+}
+
+// TODO this should be derivable, but there's an error.
+impl<T: Trace> Trace for Accessable<T> {
+    const MAY_CONTAIN_REFERENCES: bool = T::MAY_CONTAIN_REFERENCES;
+
+    fn trace(&self, tracer: &mut refuse::Tracer) {
+        self.accessable.trace(tracer);
+    }
 }
 
 /// A virtual machine operation.
@@ -774,6 +796,7 @@ pub(super) fn trusted_loaded_source_to_value(
         LoadedSource::Label(loaded) => ValueOrSource::Label(*loaded),
         LoadedSource::Regex(loaded) => ValueOrSource::Regex(code.regexes[*loaded].literal.clone()),
         LoadedSource::Function(loaded) => ValueOrSource::Function(code.functions[*loaded].clone()),
+        LoadedSource::Type(loaded) => ValueOrSource::Type(code.types[*loaded].clone()),
     }
 }
 

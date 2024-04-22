@@ -954,6 +954,8 @@ impl Source for Value {
             Value::Dynamic(value) => {
                 if let Some(func) = value.downcast_ref::<Function>(guard) {
                     ValueOrSource::Function(BitcodeFunction::from_function(func, guard))
+                } else if let Some(func) = value.downcast_ref::<DeclaredType>(guard) {
+                    ValueOrSource::Type(func.to_bitcode_type(guard))
                 } else {
                     // All dynamics generated into a Source must be known by
                     // Muse

@@ -122,7 +122,12 @@ impl PartialEq for Token {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Identifier(l0), Self::Identifier(r0)) => l0 == r0,
+            (Self::Symbol(l0), Self::Symbol(r0)) => l0 == r0,
+            (Self::Regex(l0), Self::Regex(r0)) => l0 == r0,
+            (Self::String(l0), Self::String(r0)) => l0 == r0,
+            (Self::FormatString(l0), Self::FormatString(r0)) => l0 == r0,
             (Self::Int(l0), Self::Int(r0)) => l0 == r0,
+            (Self::UInt(l0), Self::UInt(r0)) => l0 == r0,
             (Self::Float(l0), Self::Float(r0)) => l0.total_cmp(r0) == Ordering::Equal,
             (Self::Char(l0), Self::Char(r0)) => l0 == r0,
             (Self::Open(l0), Self::Open(r0)) | (Self::Close(l0), Self::Close(r0)) => l0 == r0,

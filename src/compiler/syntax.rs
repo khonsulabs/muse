@@ -584,6 +584,12 @@ where
     }
 }
 
+impl TokenizeRanged for Symbol {
+    fn tokenize_ranged(&self, range: SourceRange, tokens: &mut VecDeque<Ranged<Token>>) {
+        tokens.push_back(Ranged::new(range, Token::Symbol(self.clone())));
+    }
+}
+
 /// A Muse expression.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
@@ -631,6 +637,10 @@ pub enum Expression {
     Module(Box<ModuleDefinition>),
     /// A function declaration.
     Function(Box<FunctionDefinition>),
+    /// A structure definition.
+    Structure(Box<StructureDefinition>),
+    /// A structure literal.
+    StructureLiteral(Box<NewStruct>),
     /// A variable declaration.
     SingleMatch(Box<SingleMatch>),
     /// A macro invocation.
@@ -723,6 +733,8 @@ impl TokenizeRanged for Expression {
             Expression::Continue(it) => it.tokenize_into(tokens),
             Expression::Return(it) => it.tokenize_into(tokens),
             Expression::Module(it) => it.tokenize_into(tokens),
+            Expression::Structure(it) => it.tokenize_into(tokens),
+            Expression::StructureLiteral(it) => it.tokenize_into(tokens),
             Expression::Function(it) => it.tokenize_into(tokens),
             Expression::SingleMatch(it) => it.tokenize_into(tokens),
             Expression::Macro(it) => it.tokenize_into(tokens),
@@ -844,6 +856,47 @@ pub struct ListExpression {
 impl TokenizeInto for ListExpression {
     fn tokenize_into(&self, tokens: &mut VecDeque<Ranged<Token>>) {
         self.values.tokenize_into(tokens);
+    }
+}
+
+/// A new structure instantiation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewStruct {
+    /// The `new` token.
+    pub new: Ranged<Token>,
+    /// The name of the struct to instantiate, or the path to it.
+    pub name: Ranged<Expression>,
+    /// The fields to provide to the constructor.
+    pub fields: Option<Enclosed<Delimited<NewStructField>>>,
+}
+
+impl TokenizeInto for NewStruct {
+    fn tokenize_into(&self, tokens: &mut VecDeque<Ranged<Token>>) {
+        tokens.push_back(self.new.clone());
+        self.name.tokenize_into(tokens);
+        if let Some(fields) = &self.fields {
+            fields.tokenize_into(tokens);
+        }
+    }
+}
+
+/// A single field in a [`NewStruct`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewStructField {
+    /// The name of the field.
+    pub name: Ranged<Symbol>,
+    /// The `:` token
+    pub colon: Ranged<Token>,
+    /// The value of the field.
+    pub value: Ranged<Expression>,
+}
+
+impl TokenizeInto for NewStructField {
+    fn tokenize_into(&self, tokens: &mut VecDeque<Ranged<Token>>) {
+        self.name.tokenize_into(tokens);
+
+        tokens.push_back(self.colon.clone());
+        self.value.tokenize_into(tokens);
     }
 }
 
@@ -1185,7 +1238,7 @@ impl TokenizeInto for ModuleDefinition {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDefinition {
     /// The pub keyword.
-    pub publish: Option<Ranged<Token>>,
+    pub visibility: Option<Ranged<Symbol>>,
     /// The fn keyword.
     pub r#fn: Ranged<Token>,
     /// The name of the function.
@@ -1196,14 +1249,70 @@ pub struct FunctionDefinition {
 
 impl TokenizeInto for FunctionDefinition {
     fn tokenize_into(&self, tokens: &mut VecDeque<Ranged<Token>>) {
-        if let Some(publish) = &self.publish {
-            tokens.push_back(publish.clone());
+        if let Some(publish) = &self.visibility {
+            tokens.push_back(publish.clone().map(Token::Symbol));
         }
         tokens.push_back(self.r#fn.clone());
         if let Some(name) = &self.name {
             tokens.push_back(name.clone().map(Token::Identifier));
         }
         self.body.tokenize_into(tokens);
+    }
+}
+
+/// A custom structure type definition.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructureDefinition {
+    /// The visibility keyword, if specified.
+    pub visibility: Option<Ranged<Symbol>>,
+    /// The struct keyword.
+    pub r#struct: Ranged<Token>,
+    /// The name of the structure.
+    pub name: Ranged<Symbol>,
+    /// The members of the structure, if present.
+    pub members: Option<Enclosed<Delimited<Ranged<StructureMember>>>>,
+}
+
+impl TokenizeInto for StructureDefinition {
+    fn tokenize_into(&self, tokens: &mut VecDeque<Ranged<Token>>) {
+        if let Some(visibility) = &self.visibility {
+            tokens.push_back(visibility.clone().map(Token::Symbol));
+        }
+
+        tokens.push_back(self.r#struct.clone());
+        tokens.push_back(self.name.clone().map(Token::Symbol));
+        if let Some(members) = &self.members {
+            members.tokenize_into(tokens);
+        }
+    }
+}
+
+/// A member of ta [`StructureDefinition`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum StructureMember {
+    /// A member field.
+    Field {
+        /// The visibility of this member.
+        visibility: Option<Ranged<Symbol>>,
+        /// The name of this field.
+        name: Ranged<Symbol>,
+    },
+    /// A function definition.
+    Function(FunctionDefinition),
+}
+
+impl TokenizeInto for StructureMember {
+    fn tokenize_into(&self, tokens: &mut VecDeque<Ranged<Token>>) {
+        match self {
+            StructureMember::Field { visibility, name } => {
+                if let Some(visibility) = visibility {
+                    tokens.push_back(visibility.clone().map(Token::Symbol));
+                }
+
+                tokens.push_back(name.clone().map(Token::Symbol));
+            }
+            StructureMember::Function(func) => func.tokenize_into(tokens),
+        }
     }
 }
 
@@ -1598,6 +1707,14 @@ impl<'a> TokenReader<'a> {
         Ok(token)
     }
 
+    fn next_identifier(&mut self, err: ParseError) -> Result<Ranged<Symbol>, Ranged<ParseError>> {
+        let token = self.next(err.clone())?;
+        match token.0 {
+            Token::Identifier(ident) => Ok(Ranged::new(token.1, ident)),
+            _ => Err(Ranged::new(token.1, err)),
+        }
+    }
+
     fn ranged<T>(&self, range: impl RangeBounds<usize>, value: T) -> Ranged<T> {
         Ranged::bounded(self.tokens.source(), range, self.last_index, value)
     }
@@ -1640,6 +1757,8 @@ pub enum ParseError {
     ExpectedEof,
     /// Missing the end of a paired token.
     MissingEnd(Paired),
+    /// Missing the end of a paired token.
+    MissingEndOr(Paired, char),
     /// An error tokenizing the source code.
     Token(token::LexerError),
     /// An unexpectecd token was encountered in the given context.
@@ -1648,6 +1767,8 @@ pub enum ParseError {
     ExpectedDeclaration,
     /// Expected a name.
     ExpectedName,
+    /// Expected a structure member.
+    ExpectedStructureMember,
     /// Expected a block.
     ExpectedBlock,
     /// Expected a module body.
@@ -1689,7 +1810,8 @@ impl crate::ErrorKind for ParseError {
         match self {
             ParseError::UnexpectedEof => "unexpected eof",
             ParseError::ExpectedEof => "expected eof",
-            ParseError::MissingEnd(_) => "missing end",
+            ParseError::MissingEnd(_) | ParseError::MissingEndOr(..) => "missing end",
+
             ParseError::Token(err) => err.kind(),
             ParseError::UnexpectedToken => "unexpected token",
             ParseError::ExpectedDeclaration => "expected declaration",
@@ -1697,6 +1819,7 @@ impl crate::ErrorKind for ParseError {
             ParseError::ExpectedBlock => "expected block",
             ParseError::ExpectedModuleBody => "expected module body",
             ParseError::ExpectedFunctionBody => "expected function body",
+            ParseError::ExpectedStructureMember => "expected structure member",
             ParseError::ExpectedIn => "expected in",
             ParseError::ExpectedFunctionParameters => "expected function parameters",
             ParseError::ExpectedThenOrBrace => "expected then or brace",
@@ -1722,6 +1845,12 @@ impl Display for ParseError {
             ParseError::UnexpectedEof => f.write_str("unexpected end-of-file"),
             ParseError::ExpectedEof => f.write_str("expected the end of input or \";\""),
             ParseError::MissingEnd(kind) => write!(f, "missing closing \"{}\"", kind.as_close()),
+            ParseError::MissingEndOr(kind, token) => write!(
+                f,
+                "missing closing \"{}\" or \"{}\"",
+                kind.as_close(),
+                token
+            ),
             ParseError::Token(err) => Display::fmt(err, f),
             ParseError::UnexpectedToken => f.write_str("unexpected token"),
             ParseError::ExpectedDeclaration => f.write_str("expected a declaration"),
@@ -1729,6 +1858,7 @@ impl Display for ParseError {
             ParseError::ExpectedBlock => f.write_str("expected a block"),
             ParseError::ExpectedModuleBody => f.write_str("expected a module body"),
             ParseError::ExpectedFunctionBody => f.write_str("expected function body"),
+            ParseError::ExpectedStructureMember => f.write_str("expected structure member"),
             ParseError::ExpectedIn => f.write_str("expected \"in\""),
             ParseError::ExpectedFunctionParameters => f.write_str("expected function parameters"),
             ParseError::ExpectedThenOrBrace => f.write_str("expected \"then\" or \"{\""),
@@ -2660,16 +2790,75 @@ impl PrefixParselet for Braces {
     }
 }
 
+struct New;
+
+impl Parselet for New {
+    fn token(&self) -> Option<Token> {
+        None
+    }
+
+    fn matches(&self, token: &Token, tokens: &mut TokenReader<'_>) -> bool {
+        matches!(token, Token::Identifier(ident) if ident == Symbol::new_symbol())
+            && tokens
+                .peek_token()
+                .map_or(false, |t| matches!(t, Token::Identifier(_)))
+    }
+}
+
+impl PrefixParselet for New {
+    fn parse_prefix(
+        &self,
+        new: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<ParseError>> {
+        let start = new.range().start;
+        let name = config.parse_expression(tokens)?;
+        let fields = if tokens.peek_token() == Some(Token::Open(Paired::Brace)) {
+            let mut fields = Delimited::build_empty();
+            let open = tokens.next_or_eof()?;
+            let (_trailing_delimiter, close) =
+                parse_paired(Paired::Brace, ',', tokens, |delimiter, tokens| {
+                    if let Some(delimiter) = delimiter {
+                        fields.set_delimiter(delimiter);
+                    }
+                    let name = tokens.next_identifier(ParseError::ExpectedName)?;
+
+                    let colon = tokens.next(ParseError::ExpectedColon)?;
+                    let Token::Char(':') = colon.0 else {
+                        return Err(Ranged::new(colon.1, ParseError::ExpectedColon));
+                    };
+                    let value = config.parse_expression(tokens)?;
+                    fields.push(NewStructField { name, colon, value });
+                    Ok(())
+                })?;
+            Some(Enclosed {
+                open,
+                close,
+                enclosed: fields.finish(),
+            })
+        } else {
+            None
+        };
+
+        Ok(tokens.ranged(
+            start..,
+            Expression::StructureLiteral(Box::new(NewStruct { new, name, fields })),
+        ))
+    }
+}
+
 type SeparatorAndEnd = (Option<Ranged<Token>>, Ranged<Token>);
 
 fn parse_paired(
     end: Paired,
-    separator: &Token,
+    separator: char,
     tokens: &mut TokenReader<'_>,
     mut inner: impl FnMut(Option<Ranged<Token>>, &mut TokenReader<'_>) -> Result<(), Ranged<ParseError>>,
 ) -> Result<SeparatorAndEnd, Ranged<ParseError>> {
     let mut ending_separator = None;
-    if tokens.peek().map_or(false, |token| &token.0 == separator) {
+    let sep_token = Token::Char(separator);
+    if tokens.peek().map_or(false, |token| token.0 == sep_token) {
         ending_separator = Some(tokens.next_or_eof()?);
     } else {
         while tokens
@@ -2678,7 +2867,7 @@ fn parse_paired(
         {
             inner(ending_separator, tokens)?;
 
-            if tokens.peek_token().as_ref() == Some(separator) {
+            if tokens.peek_token().as_ref() == Some(&sep_token) {
                 ending_separator = Some(tokens.next_or_eof()?);
             } else {
                 ending_separator = None;
@@ -2692,9 +2881,11 @@ fn parse_paired(
         Ok(Ranged(Token::Close(token), _)) if token == &end => {
             Ok((ending_separator, close.expect("just matched")))
         }
-        Ok(Ranged(_, range)) | Err(Ranged(_, range)) => {
-            Err(Ranged::new(*range, ParseError::MissingEnd(end)))
-        }
+        Ok(Ranged(_, range)) => Err(Ranged::new(
+            *range,
+            ParseError::MissingEndOr(end, separator),
+        )),
+        Err(Ranged(_, range)) => Err(Ranged::new(*range, ParseError::MissingEnd(end))),
     }
 }
 
@@ -2741,19 +2932,14 @@ impl InfixParselet for Parentheses {
     ) -> Result<Ranged<Expression>, Ranged<ParseError>> {
         let mut parameters = Delimited::<_, Ranged<Token>>::build_empty();
 
-        let (_, close) = parse_paired(
-            Paired::Paren,
-            &Token::Char(','),
-            tokens,
-            |delimiter, tokens| {
-                if let Some(delimiter) = delimiter {
-                    parameters.set_delimiter(delimiter);
-                }
-                config
-                    .parse_expression(tokens)
-                    .map(|expr| parameters.push(expr))
-            },
-        )?;
+        let (_, close) = parse_paired(Paired::Paren, ',', tokens, |delimiter, tokens| {
+            if let Some(delimiter) = delimiter {
+                parameters.set_delimiter(delimiter);
+            }
+            config
+                .parse_expression(tokens)
+                .map(|expr| parameters.push(expr))
+        })?;
 
         Ok(tokens.ranged(
             function.range().start..,
@@ -2786,19 +2972,14 @@ impl PrefixParselet for Brackets {
     ) -> Result<Ranged<Expression>, Ranged<ParseError>> {
         let mut expressions = Delimited::<_, Ranged<Token>>::build_empty();
 
-        let (_, close) = parse_paired(
-            Paired::Bracket,
-            &Token::Char(','),
-            tokens,
-            |delimiter, tokens| {
-                if let Some(delimiter) = delimiter {
-                    expressions.set_delimiter(delimiter);
-                }
-                config
-                    .parse_expression(tokens)
-                    .map(|expr| expressions.push(expr))
-            },
-        )?;
+        let (_, close) = parse_paired(Paired::Bracket, ',', tokens, |delimiter, tokens| {
+            if let Some(delimiter) = delimiter {
+                expressions.set_delimiter(delimiter);
+            }
+            config
+                .parse_expression(tokens)
+                .map(|expr| expressions.push(expr))
+        })?;
 
         Ok(tokens.ranged(
             open.range().start..,
@@ -2823,19 +3004,14 @@ impl InfixParselet for Brackets {
     ) -> Result<Ranged<Expression>, Ranged<ParseError>> {
         let mut parameters = Delimited::<_, Ranged<Token>>::build_empty();
 
-        let (_, close) = parse_paired(
-            Paired::Bracket,
-            &Token::Char(','),
-            tokens,
-            |delimiter, tokens| {
-                if let Some(delimiter) = delimiter {
-                    parameters.set_delimiter(delimiter);
-                }
-                config
-                    .parse_expression(tokens)
-                    .map(|expr| parameters.push(expr))
-            },
-        )?;
+        let (_, close) = parse_paired(Paired::Bracket, ',', tokens, |delimiter, tokens| {
+            if let Some(delimiter) = delimiter {
+                parameters.set_delimiter(delimiter);
+            }
+            config
+                .parse_expression(tokens)
+                .map(|expr| parameters.push(expr))
+        })?;
 
         Ok(tokens.ranged(
             target.range().start..,
@@ -2850,31 +3026,6 @@ impl InfixParselet for Brackets {
         ))
     }
 }
-
-// impl InfixParselet for Parentheses {
-//     fn parse(
-//         &self,
-//         function: Ranged<Expression>,
-//         tokens: &mut TokenReader<'_>,
-//         config: &ParserConfig<'_>,
-//     ) -> Result<Ranged<Expression>, Ranged<Error>> {
-//         let mut parameters = Vec::new();
-
-//         parse_paired(Paired::Paren, &Token::Char(','), tokens, |tokens| {
-//             config
-//                 .parse_expression(tokens)
-//                 .map(|expr| parameters.push(expr))
-//         })?;
-
-//         Ok(tokens.ranged(
-//             function.range().start..,
-//             Expression::Call(Box::new(FunctionCall {
-//                 function,
-//                 parameters,
-//             })),
-//         ))
-//     }
-// }
 
 trait InfixParselet: Parselet {
     fn parse(
@@ -3438,8 +3589,10 @@ impl PrefixParselet for Pub {
             return Err(keyword_token.map(|_| ParseError::ExpectedDeclaration));
         };
 
+        let pub_symbol = Ranged::new(pub_token.range(), Symbol::pub_symbol().clone());
+
         if keyword == Symbol::fn_symbol() {
-            Fn::parse_function(Some(pub_token), keyword_token, tokens, config)
+            Fn::parse_function(Some(pub_symbol), keyword_token, tokens, config)
         } else if keyword == Symbol::let_symbol() || keyword == Symbol::var_symbol() {
             let start = pub_token.range().start;
             parse_variable(
@@ -3451,6 +3604,8 @@ impl PrefixParselet for Pub {
             )
         } else if keyword == Symbol::mod_symbol() {
             Mod::parse_mod(Some(pub_token), keyword_token, tokens, config)
+        } else if keyword == Symbol::struct_symbol() {
+            Struct::parse_struct(Some(pub_symbol), keyword_token, tokens, config)
         } else {
             return Err(keyword_token.map(|_| ParseError::ExpectedDeclaration));
         }
@@ -3468,11 +3623,21 @@ struct Fn;
 
 impl Fn {
     fn parse_function(
-        publish: Option<Ranged<Token>>,
+        publish: Option<Ranged<Symbol>>,
         r#fn: Ranged<Token>,
         tokens: &mut TokenReader<'_>,
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<ParseError>> {
+        let start = r#fn.range().start;
+        let func = Self::parse_function_definition(publish, r#fn, tokens, config)?;
+        Ok(tokens.ranged(start.., Expression::Function(Box::new(func))))
+    }
+    fn parse_function_definition(
+        publish: Option<Ranged<Symbol>>,
+        r#fn: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<FunctionDefinition, Ranged<ParseError>> {
         let name = if let Some(Token::Identifier(name)) = tokens.peek_token() {
             Some(tokens.next_or_eof()?.map(|_| name))
         } else {
@@ -3490,15 +3655,12 @@ impl Fn {
                 let brace = tokens.next_or_eof()?;
                 let body = parse_match_block_body(brace, tokens, config)?;
 
-                return Ok(tokens.ranged(
-                    r#fn.range().start..,
-                    Expression::Function(Box::new(FunctionDefinition {
-                        publish,
-                        r#fn,
-                        name,
-                        body,
-                    })),
-                ));
+                return Ok(FunctionDefinition {
+                    visibility: publish,
+                    r#fn,
+                    name,
+                    body,
+                });
             }
             _ => tokens
                 .ranged(
@@ -3525,28 +3687,25 @@ impl Fn {
             _ => return Err(body_indicator.map(|_| ParseError::ExpectedFunctionBody)),
         };
 
-        Ok(tokens.ranged(
-            r#fn.range().start..,
-            Expression::Function(Box::new(FunctionDefinition {
-                publish,
-                r#fn,
-                name,
-                body: tokens.ranged(
-                    pattern.range().start..,
-                    Matches {
-                        patterns: Delimited::single(tokens.ranged(
-                            pattern.range().start..,
-                            MatchPattern {
-                                pattern,
-                                arrow,
-                                body,
-                            },
-                        )),
-                        open_close: None,
-                    },
-                ),
-            })),
-        ))
+        Ok(FunctionDefinition {
+            visibility: publish,
+            r#fn,
+            name,
+            body: tokens.ranged(
+                pattern.range().start..,
+                Matches {
+                    patterns: Delimited::single(tokens.ranged(
+                        pattern.range().start..,
+                        MatchPattern {
+                            pattern,
+                            arrow,
+                            body,
+                        },
+                    )),
+                    open_close: None,
+                },
+            ),
+        })
     }
 }
 
@@ -3576,6 +3735,111 @@ impl PrefixParselet for Fn {
         config: &ParserConfig<'_>,
     ) -> Result<Ranged<Expression>, Ranged<ParseError>> {
         Self::parse_function(None, token, tokens, config)
+    }
+}
+
+struct Struct;
+
+impl Parselet for Struct {
+    fn token(&self) -> Option<Token> {
+        None
+    }
+
+    fn matches(&self, token: &Token, tokens: &mut TokenReader<'_>) -> bool {
+        matches!(token, Token::Identifier(ident) if ident == Symbol::struct_symbol())
+            && tokens
+                .peek_token()
+                .map_or(false, |t| matches!(t, Token::Identifier(_)))
+    }
+}
+
+impl PrefixParselet for Struct {
+    fn parse_prefix(
+        &self,
+        token: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<ParseError>> {
+        Self::parse_struct(None, token, tokens, config)
+    }
+}
+
+impl Struct {
+    fn parse_struct(
+        visibility: Option<Ranged<Symbol>>,
+        r#struct: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<ParseError>> {
+        let name_token = tokens.next(ParseError::ExpectedName)?;
+        let Token::Identifier(name) = name_token.0 else {
+            return Err(name_token.map(|_| ParseError::ExpectedName));
+        };
+
+        let brace = tokens.next(ParseError::ExpectedModuleBody)?;
+        let members = if brace.0 == Token::Open(Paired::Brace) {
+            let mut members = Delimited::build_empty();
+            let (_, close) = parse_paired(Paired::Brace, ';', tokens, |delimiter, tokens| {
+                if let Some(delimiter) = delimiter {
+                    members.set_delimiter(delimiter);
+                }
+                let start = tokens.last_index;
+                let member = Self::parse_member(tokens, config)?;
+                members.push(tokens.ranged(start.., member));
+                Ok(())
+            })?;
+            Some(Enclosed {
+                open: brace,
+                close,
+                enclosed: members.finish(),
+            })
+        } else {
+            None
+        };
+
+        Ok(tokens.ranged(
+            r#struct.range().start..,
+            Expression::Structure(Box::new(StructureDefinition {
+                visibility,
+                r#struct,
+                members,
+                name: Ranged::new(name_token.1, name),
+            })),
+        ))
+    }
+
+    fn parse_member(
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<StructureMember, Ranged<ParseError>> {
+        let mut token = tokens.next(ParseError::ExpectedStructureMember)?;
+        let mut visibility = None;
+        match &token.0 {
+            Token::Identifier(ident) if ident == Symbol::pub_symbol() => {
+                let Token::Identifier(ident) = token.0 else {
+                    unreachable!("just matched")
+                };
+                visibility = Some(Ranged::new(token.1, ident));
+                token = tokens.next(ParseError::ExpectedStructureMember)?;
+            }
+            _ => {}
+        }
+
+        match token.0 {
+            Token::Identifier(r#fn) if &r#fn == Symbol::fn_symbol() => {
+                Ok(StructureMember::Function(Fn::parse_function_definition(
+                    visibility,
+                    Ranged::new(token.1, Token::Identifier(r#fn)),
+                    tokens,
+                    config,
+                )?))
+            }
+            Token::Identifier(name) => Ok(StructureMember::Field {
+                visibility,
+                name: Ranged::new(token.1, name),
+            }),
+            _ => Err(Ranged::new(token.1, ParseError::ExpectedStructureMember)),
+        }
     }
 }
 
@@ -4380,6 +4644,7 @@ fn parselets() -> Parselets {
         Mod,
         Pub,
         Fn,
+        Struct,
         Var,
         If,
         True,
@@ -4395,6 +4660,7 @@ fn parselets() -> Parselets {
         Match,
         Try,
         Throw,
+        New,
     ]);
     parser.push_prefix(parselets![Term]);
     parser

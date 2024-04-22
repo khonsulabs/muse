@@ -185,7 +185,8 @@ impl Validator for Muse {
             Ok(_) => Ok(ValidationResult::Valid(None)),
             Err(Ranged(
                 muse::compiler::syntax::ParseError::UnexpectedEof
-                | muse::compiler::syntax::ParseError::MissingEnd(_),
+                | muse::compiler::syntax::ParseError::MissingEnd(_)
+                | muse::compiler::syntax::ParseError::MissingEndOr(_, _),
                 _,
             )) => Ok(ValidationResult::Incomplete),
             Err(err) => {

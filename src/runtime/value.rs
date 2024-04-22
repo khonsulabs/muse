@@ -1597,6 +1597,15 @@ where
     }
 }
 
+impl<T> Trace for Rooted<T>
+where
+    T: CustomType + Trace,
+{
+    const MAY_CONTAIN_REFERENCES: bool = false;
+
+    fn trace(&self, _tracer: &mut refuse::Tracer) {}
+}
+
 impl<T: CustomType + Trace> AsRef<T> for Rooted<T> {
     fn as_ref(&self) -> &T {
         &self.0 .0
@@ -1620,6 +1629,15 @@ impl<T: CustomType + Trace> Clone for Rooted<T> {
 impl From<AnyDynamic> for AnyRef {
     fn from(value: AnyDynamic) -> Self {
         value.0
+    }
+}
+
+impl<T> Debug for Rooted<T>
+where
+    T: Debug + CustomType + Trace,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Debug::fmt(&**self, f)
     }
 }
 
@@ -3586,7 +3604,7 @@ pub type ToStringFn =
 /// A virtual function table for a [`Type`].
 pub struct TypeVtable {
     construct: ConstructFn,
-    call: CallFn,
+    pub(crate) call: CallFn,
     invoke: InvokeFn,
     hash: HashFn,
     bitwise_not: UnaryFn,
