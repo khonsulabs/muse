@@ -9,12 +9,14 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(not(feature = "dispatched"))]
 use super::LoadedOp;
-use super::{Arity, Code, CodeData, Function, LoadedSource, Register};
+use super::{Arity, Code, CodeData, Fault, Function, LoadedSource, Register, VmContext};
 use crate::compiler::syntax::token::RegexLiteral;
 use crate::compiler::syntax::{BitwiseKind, CompareKind, Literal, SourceRange};
 use crate::compiler::{BitcodeModule, SourceMap, UnaryKind};
+use crate::runtime::regex::MuseRegex;
 use crate::runtime::symbol::{IntoOptionSymbol, Symbol};
-use crate::runtime::types::BitcodeType;
+use crate::runtime::types::{BitcodeEnum, BitcodeStruct};
+use crate::runtime::value::Value;
 use crate::vm::Stack;
 
 /// A value or a source of a value.
@@ -37,14 +39,48 @@ pub enum ValueOrSource {
     Regex(RegexLiteral),
     /// A function declaration. When loaded, it becomes a [`Function`].
     Function(BitcodeFunction),
-    /// A type definition.
-    Type(BitcodeType),
+    /// A struct definition.
+    Struct(BitcodeStruct),
+    /// An enum definition.
+    Enum(BitcodeEnum),
     /// A virtual machine register.
     Register(Register),
     /// A location on the stack.
     Stack(Stack),
     /// A label representing an instruction offset.
     Label(Label),
+}
+
+impl ValueOrSource {
+    /// Returns this source loaded as a [`Value`].
+    ///
+    /// # Errors
+    ///
+    /// This function does not support loading [`Label`]s.
+    pub fn load(&self, vm: &VmContext<'_, '_>) -> Result<Value, Fault> {
+        match self {
+            ValueOrSource::Nil => Ok(Value::Nil),
+            ValueOrSource::Bool(v) => Ok(Value::Bool(*v)),
+            ValueOrSource::Int(v) => Ok(Value::Int(*v)),
+            ValueOrSource::UInt(v) => Ok(Value::UInt(*v)),
+            ValueOrSource::Float(v) => Ok(Value::Float(*v)),
+            ValueOrSource::Symbol(v) => Ok(Value::Symbol(v.downgrade())),
+            ValueOrSource::Regex(v) => MuseRegex::load(v, vm.guard()),
+            ValueOrSource::Function(v) => Ok(Value::dynamic(v.to_function(vm.guard()), vm.guard())),
+            ValueOrSource::Struct(v) => Ok(Value::dynamic(
+                v.load(vm.guard(), vm.current_module()),
+                vm.guard(),
+            )),
+            ValueOrSource::Enum(v) => Ok(Value::dynamic(v.load(vm)?, vm.guard())),
+            ValueOrSource::Register(v) => Ok(vm[*v]),
+            ValueOrSource::Stack(v) => vm
+                .current_frame()
+                .get(v.0)
+                .copied()
+                .ok_or(Fault::OutOfBounds),
+            ValueOrSource::Label(_) => Err(Fault::InvalidLabel),
+        }
+    }
 }
 
 impl From<()> for ValueOrSource {
@@ -97,7 +133,8 @@ impl_from!(ValueOrSource, Label, Label);
 impl_from!(ValueOrSource, bool, Bool);
 impl_from!(ValueOrSource, BitcodeFunction, Function);
 impl_from!(ValueOrSource, RegexLiteral, Regex);
-impl_from!(ValueOrSource, BitcodeType, Type);
+impl_from!(ValueOrSource, BitcodeStruct, Struct);
+impl_from!(ValueOrSource, BitcodeEnum, Enum);
 
 /// A destination for an operation.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -796,7 +833,8 @@ pub(super) fn trusted_loaded_source_to_value(
         LoadedSource::Label(loaded) => ValueOrSource::Label(*loaded),
         LoadedSource::Regex(loaded) => ValueOrSource::Regex(code.regexes[*loaded].literal.clone()),
         LoadedSource::Function(loaded) => ValueOrSource::Function(code.functions[*loaded].clone()),
-        LoadedSource::Type(loaded) => ValueOrSource::Type(code.types[*loaded].clone()),
+        LoadedSource::Struct(loaded) => ValueOrSource::Struct(code.structs[*loaded].clone()),
+        LoadedSource::Enum(loaded) => ValueOrSource::Enum(code.enums[*loaded].clone()),
     }
 }
 

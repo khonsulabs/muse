@@ -15,7 +15,7 @@ private_in_module: {
         };
         foo.a
     "#,
-    output: Fault(Exception(Exception { value: Symbol("undefined"), backtrace: [SourceRange { source_id: SourceId(None), start: 62, length: 5 }] })),
+    output: Fault(Exception(Exception { value: Symbol("forbidden"), backtrace: [SourceRange { source_id: SourceId(None), start: 62, length: 5 }] })),
 }
 
 publish_fn_from_module: {
@@ -35,7 +35,7 @@ private_fn_in_module: {
         };
         foo.a()
     "#,
-    output: Fault(Exception(Exception { value: Symbol("undefined"), backtrace: [SourceRange { source_id: SourceId(None), start: 62, length: 7 }] })),
+    output: Fault(Exception(Exception { value: Symbol("forbidden"), backtrace: [SourceRange { source_id: SourceId(None), start: 62, length: 7 }] })),
 }
 
 super_private: {
@@ -49,7 +49,7 @@ super_private: {
     output: Fault(
         Exception(
             Exception {
-                value: Symbol("undefined"),
+                value: Symbol("forbidden"),
                 backtrace: [
                     SourceRange { source_id: SourceId(None), start: 94, length: 10 },
                     SourceRange { source_id: SourceId(None), start: 66, length: 7 }
@@ -115,7 +115,7 @@ child_mod_private: {
         };
         foo.bar.a
     "#,
-    output: Fault(Exception(Exception { value: Symbol("undefined"), backtrace: [SourceRange { source_id: SourceId(None), start: 106, length: 7 }] })),
+    output: Fault(Exception(Exception { value: Symbol("forbidden"), backtrace: [SourceRange { source_id: SourceId(None), start: 106, length: 7 }] })),
 }
 
 sigil_root: {

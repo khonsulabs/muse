@@ -568,6 +568,17 @@ where
     }
 }
 
+impl<T> TokenizeInto for Option<T>
+where
+    T: TokenizeInto,
+{
+    fn tokenize_into(&self, tokens: &mut VecDeque<Ranged<Token>>) {
+        if let Some(inner) = self {
+            inner.tokenize_into(tokens);
+        }
+    }
+}
+
 /// Converts a value into a series of [`Token`]s with the provided enclosing
 /// range.
 pub trait TokenizeRanged {
@@ -641,6 +652,8 @@ pub enum Expression {
     Structure(Box<StructureDefinition>),
     /// A structure literal.
     StructureLiteral(Box<NewStruct>),
+    /// An enum definition.
+    Enum(Box<EnumDefinition>),
     /// A variable declaration.
     SingleMatch(Box<SingleMatch>),
     /// A macro invocation.
@@ -735,6 +748,7 @@ impl TokenizeRanged for Expression {
             Expression::Module(it) => it.tokenize_into(tokens),
             Expression::Structure(it) => it.tokenize_into(tokens),
             Expression::StructureLiteral(it) => it.tokenize_into(tokens),
+            Expression::Enum(it) => it.tokenize_into(tokens),
             Expression::Function(it) => it.tokenize_into(tokens),
             Expression::SingleMatch(it) => it.tokenize_into(tokens),
             Expression::Macro(it) => it.tokenize_into(tokens),
@@ -1316,6 +1330,41 @@ impl TokenizeInto for StructureMember {
     }
 }
 
+/// A custom enum type definition.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumDefinition {
+    /// The visibility keyword, if specified.
+    pub visibility: Option<Ranged<Symbol>>,
+    /// The enum keyword.
+    pub r#enum: Ranged<Token>,
+    /// The name of the enum.
+    pub name: Ranged<Symbol>,
+    /// The variants of the enum, if present.
+    pub variants: Enclosed<Delimited<Ranged<EnumVariant>>>,
+}
+
+impl TokenizeInto for EnumDefinition {
+    fn tokenize_into(&self, tokens: &mut VecDeque<Ranged<Token>>) {
+        self.visibility.tokenize_into(tokens);
+        tokens.push_back(self.r#enum.clone());
+        self.name.tokenize_into(tokens);
+        self.variants.tokenize_into(tokens);
+    }
+}
+
+/// A custom enum type definition.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumVariant {
+    /// The name of the variant.
+    pub name: Ranged<Symbol>,
+}
+
+impl TokenizeInto for EnumVariant {
+    fn tokenize_into(&self, tokens: &mut VecDeque<Ranged<Token>>) {
+        self.name.tokenize_into(tokens);
+    }
+}
+
 /// The syntax components of a function call.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionCall {
@@ -1775,6 +1824,10 @@ pub enum ParseError {
     ExpectedModuleBody,
     /// Expected a function body.
     ExpectedFunctionBody,
+    /// Expected an enum body.
+    ExpectedEnumBody,
+    /// Expected an enum variant.
+    ExpectedEnumVariant,
     /// Expected the `in` keyword.
     ExpectedIn,
     /// Expected function parameters.
@@ -1819,6 +1872,8 @@ impl crate::ErrorKind for ParseError {
             ParseError::ExpectedBlock => "expected block",
             ParseError::ExpectedModuleBody => "expected module body",
             ParseError::ExpectedFunctionBody => "expected function body",
+            ParseError::ExpectedEnumBody => "expected enum body",
+            ParseError::ExpectedEnumVariant => "expected enum variant",
             ParseError::ExpectedStructureMember => "expected structure member",
             ParseError::ExpectedIn => "expected in",
             ParseError::ExpectedFunctionParameters => "expected function parameters",
@@ -1858,6 +1913,8 @@ impl Display for ParseError {
             ParseError::ExpectedBlock => f.write_str("expected a block"),
             ParseError::ExpectedModuleBody => f.write_str("expected a module body"),
             ParseError::ExpectedFunctionBody => f.write_str("expected function body"),
+            ParseError::ExpectedEnumBody => f.write_str("expected enum body"),
+            ParseError::ExpectedEnumVariant => f.write_str("expected enum variant"),
             ParseError::ExpectedStructureMember => f.write_str("expected structure member"),
             ParseError::ExpectedIn => f.write_str("expected \"in\""),
             ParseError::ExpectedFunctionParameters => f.write_str("expected function parameters"),
@@ -3776,8 +3833,8 @@ impl Struct {
             return Err(name_token.map(|_| ParseError::ExpectedName));
         };
 
-        let brace = tokens.next(ParseError::ExpectedModuleBody)?;
-        let members = if brace.0 == Token::Open(Paired::Brace) {
+        let members = if tokens.peek_token() == Some(Token::Open(Paired::Brace)) {
+            let brace = tokens.next_or_eof()?;
             let mut members = Delimited::build_empty();
             let (_, close) = parse_paired(Paired::Brace, ';', tokens, |delimiter, tokens| {
                 if let Some(delimiter) = delimiter {
@@ -3840,6 +3897,85 @@ impl Struct {
             }),
             _ => Err(Ranged::new(token.1, ParseError::ExpectedStructureMember)),
         }
+    }
+}
+
+struct Enum;
+
+impl Parselet for Enum {
+    fn token(&self) -> Option<Token> {
+        None
+    }
+
+    fn matches(&self, token: &Token, tokens: &mut TokenReader<'_>) -> bool {
+        matches!(token, Token::Identifier(ident) if ident == Symbol::enum_symbol())
+            && tokens
+                .peek_token()
+                .map_or(false, |t| matches!(t, Token::Identifier(_)))
+    }
+}
+
+impl PrefixParselet for Enum {
+    fn parse_prefix(
+        &self,
+        token: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<ParseError>> {
+        Self::parse_enum(None, token, tokens, config)
+    }
+}
+
+impl Enum {
+    fn parse_enum(
+        visibility: Option<Ranged<Symbol>>,
+        r#enum: Ranged<Token>,
+        tokens: &mut TokenReader<'_>,
+        config: &ParserConfig<'_>,
+    ) -> Result<Ranged<Expression>, Ranged<ParseError>> {
+        let name_token = tokens.next(ParseError::ExpectedName)?;
+        let Token::Identifier(name) = name_token.0 else {
+            return Err(name_token.map(|_| ParseError::ExpectedName));
+        };
+
+        let brace = tokens.next(ParseError::ExpectedEnumBody)?;
+        if brace.0 != Token::Open(Paired::Brace) {
+            return Err(brace.map(|_| ParseError::ExpectedEnumBody));
+        }
+        let mut members = Delimited::build_empty();
+        let (_, close) = parse_paired(Paired::Brace, ';', tokens, |delimiter, tokens| {
+            if let Some(delimiter) = delimiter {
+                members.set_delimiter(delimiter);
+            }
+            let start = tokens.last_index;
+            let member = Self::parse_variant(tokens, config)?;
+            members.push(tokens.ranged(start.., member));
+            Ok(())
+        })?;
+        let variants = Enclosed {
+            open: brace,
+            close,
+            enclosed: members.finish(),
+        };
+
+        Ok(tokens.ranged(
+            r#enum.range().start..,
+            Expression::Enum(Box::new(EnumDefinition {
+                visibility,
+                r#enum,
+                variants,
+                name: Ranged::new(name_token.1, name),
+            })),
+        ))
+    }
+
+    fn parse_variant(
+        tokens: &mut TokenReader<'_>,
+        _config: &ParserConfig<'_>,
+    ) -> Result<EnumVariant, Ranged<ParseError>> {
+        let name = tokens.next_identifier(ParseError::ExpectedEnumVariant)?;
+
+        Ok(EnumVariant { name })
     }
 }
 
@@ -4645,6 +4781,7 @@ fn parselets() -> Parselets {
         Pub,
         Fn,
         Struct,
+        Enum,
         Var,
         If,
         True,

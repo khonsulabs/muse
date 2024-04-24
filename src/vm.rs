@@ -41,9 +41,8 @@ use crate::compiler::syntax::{BitwiseKind, CompareKind, SourceCode, SourceRange}
 use crate::compiler::{BitcodeModule, BlockDeclaration, Compiler, SourceMap, UnaryKind};
 use crate::runtime::exception::Exception;
 use crate::runtime::regex::MuseRegex;
-use crate::runtime::string::MuseString;
 use crate::runtime::symbol::{IntoOptionSymbol, Symbol, SymbolRef};
-use crate::runtime::types::BitcodeType;
+use crate::runtime::types::{BitcodeEnum, BitcodeStruct};
 #[cfg(not(feature = "dispatched"))]
 use crate::runtime::value::ContextOrGuard;
 use crate::runtime::value::{
@@ -69,6 +68,12 @@ macro_rules! try_all {
 
 #[cfg(feature = "dispatched")]
 mod dispatched;
+
+/// The ID of a module loaded in a virtual machine.
+///
+/// Module IDs are not compatible between different virtual machine instances.
+#[derive(Default, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub struct ModuleId(usize);
 
 /// A virtual machine that executes compiled Muse [`Code`].
 #[derive(Clone)]
@@ -386,6 +391,11 @@ impl VmState {
     pub fn registers_mut(&mut self) -> &mut [Value; 256] {
         &mut self.registers
     }
+
+    /// Returns the id of the module that owns the code currently executing.
+    pub fn current_module(&self) -> ModuleId {
+        self.frames[self.current_frame].module
+    }
 }
 
 impl Index<Register> for VmState {
@@ -454,12 +464,18 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
 
     /// Returns the access to allow the caller of the current function.
     pub fn caller_access_level(&self, module: &Dynamic<Module>) -> Access {
-        let current_module = &self.modules[self.frames[self.current_frame].module];
+        let current_module = &self.modules[self.frames[self.current_frame].module.0];
         if current_module == module {
             Access::Private
         } else {
             Access::Public
         }
+    }
+
+    /// Returns the access to allow the caller of the current function.
+    pub(crate) fn caller_access_level_by_index(&self, module: ModuleId) -> Access {
+        let module = self.modules[module.0];
+        self.caller_access_level(&module)
     }
 
     fn budget_and_yield(&mut self) -> Result<(), Fault> {
@@ -609,7 +625,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
     ) -> Result<Value, ExecutionError> {
         let arity = params.load(self)?;
 
-        let mut module_dynamic = self.modules[self.frames[self.current_frame].module]
+        let mut module_dynamic = self.modules[self.frames[self.current_frame].module.0]
             .as_rooted(self.guard)
             .expect("module missing");
         let mut module_declarations = module_dynamic.declarations();
@@ -758,7 +774,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         &mut self,
         body: &Code,
         function: &Rooted<Function>,
-        module: usize,
+        module: ModuleId,
     ) -> Result<Value, Fault> {
         let body_index = self.push_code(body, Some(function));
         self.enter_frame(Some(body_index))?;
@@ -832,7 +848,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         mutable: bool,
         access: Access,
     ) -> Result<Option<Value>, Fault> {
-        Ok(self.modules[self.frames[self.current_frame].module]
+        Ok(self.modules[self.frames[self.current_frame].module.0]
             .load(self.guard)
             .ok_or(Fault::ValueFreed)?
             .declarations()
@@ -856,7 +872,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
             return Ok(None);
         };
 
-        function.module = Some(0);
+        function.module = Some(ModuleId(0));
         self.declare_inner(name, Value::dynamic(function, &self), true, Access::Public)
     }
 
@@ -885,7 +901,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
                         let value = if decl.access >= self.caller_access_level(&module_dynamic) {
                             decl.value
                         } else {
-                            return Err(Fault::UnknownSymbol); // TODO accessd error
+                            return Err(Fault::Forbidden);
                         };
 
                         let Some(inner) = value.as_dynamic::<Module>() else {
@@ -917,7 +933,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
                 .ok_or(Fault::OutOfBounds)
         } else {
             let module =
-                self.modules[self.frames[self.current_frame].module].try_load(self.guard)?;
+                self.modules[self.frames[self.current_frame].module.0].try_load(self.guard)?;
             if let Some(value) = module
                 .declarations()
                 .get(&name.downgrade())
@@ -947,7 +963,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
                 Err(Fault::NotMutable)
             }
         } else {
-            let module = &vm.modules[vm.frames[vm.current_frame].module];
+            let module = &vm.modules[vm.frames[vm.current_frame].module.0];
             if let Some(decl) = module.try_load(self.guard)?.declarations().get_mut(name) {
                 if decl.mutable {
                     let name = name.try_load(self.guard()).expect("missing symbol");
@@ -1404,12 +1420,12 @@ impl VmContext<'_, '_> {
             let vm = &mut *self.vm;
             vm.modules.push(Dynamic::new(
                 Module {
-                    parent: Some(vm.modules[vm.frames[executing_frame].module]),
+                    parent: Some(vm.modules[vm.frames[executing_frame].module.0]),
                     ..Module::default()
                 },
                 &*self.guard,
             ));
-            vm.frames[vm.current_frame].module = module_index.get();
+            vm.frames[vm.current_frame].module = ModuleId(module_index.get());
             vm.frames[executing_frame].loading_module = Some(module_index);
             let _init_result = self.resume_async_inner(self.current_frame)?;
             self.frames[executing_frame].loading_module = None;
@@ -1728,10 +1744,10 @@ impl VmContext<'_, '_> {
                     )
                 })
                 .ok_or(Fault::InvalidOpcode),
-            LoadedSource::Type(v) => self.code[code_index]
+            LoadedSource::Struct(v) => self.code[code_index]
                 .code
                 .data
-                .types
+                .structs
                 .get(v)
                 .map(|ty| {
                     Value::dynamic(
@@ -1740,6 +1756,16 @@ impl VmContext<'_, '_> {
                     )
                 })
                 .ok_or(Fault::InvalidOpcode),
+            LoadedSource::Enum(v) => {
+                let ty = self.code[code_index]
+                    .code
+                    .data
+                    .enums
+                    .get(v)
+                    .ok_or(Fault::InvalidOpcode)?;
+                let ty = ty.load(self)?;
+                Ok(Value::dynamic(ty, &self))
+            }
         }
     }
 
@@ -1853,7 +1879,7 @@ struct Frame {
     instruction: usize,
     code: Option<CodeIndex>,
     variables: Map<SymbolRef, BlockDeclaration>,
-    module: usize,
+    module: ModuleId,
     loading_module: Option<NonZeroUsize>,
     exception_handler: Option<NonZeroUsize>,
 }
@@ -1863,7 +1889,7 @@ impl Frame {
         self.variables.clear();
         self.instruction = usize::MAX;
         self.code = None;
-        self.module = 0;
+        self.module = ModuleId(0);
         self.loading_module = None;
         self.exception_handler = None;
     }
@@ -1908,6 +1934,8 @@ pub enum Fault {
     Exception(Value),
     /// The execution frame has changed.
     FrameChanged,
+    /// A declaration was found, but it is not accessible by the currently executing code.
+    Forbidden,
     /// A symbol could not be resolved to a declaration or function.
     UnknownSymbol,
     /// A function was invoked with an unsupported number of arguments.
@@ -1968,6 +1996,7 @@ impl Fault {
     pub fn as_exception(&self, vm: &mut VmContext<'_, '_>) -> Value {
         let exception = match self {
             Fault::UnknownSymbol => Symbol::from("undefined").into(),
+            Fault::Forbidden => Symbol::from("forbidden").into(),
             Fault::IncorrectNumberOfArguments => Symbol::from("args").into(),
             Fault::OperationOnNil => Symbol::from("nil").into(),
             Fault::ValueFreed => Symbol::from("out-of-scope").into(),
@@ -2009,7 +2038,7 @@ impl Fault {
 /// A Muse function ready for execution.
 #[derive(Debug, Clone)]
 pub struct Function {
-    module: Option<usize>,
+    module: Option<ModuleId>,
     name: Option<Symbol>,
     bodies: Map<Arity, Code>,
     varg_bodies: Map<Arity, Code>,
@@ -2027,7 +2056,7 @@ impl Function {
         }
     }
 
-    pub(crate) fn in_module(mut self, module: usize) -> Self {
+    pub(crate) fn in_module(mut self, module: ModuleId) -> Self {
         self.module = Some(module);
         self
     }
@@ -2154,7 +2183,8 @@ struct CodeData {
     symbols: Vec<Symbol>,
     known_symbols: AHashMap<Symbol, usize>,
     functions: Vec<BitcodeFunction>,
-    types: Vec<BitcodeType>,
+    structs: Vec<BitcodeStruct>,
+    enums: Vec<BitcodeEnum>,
     modules: Vec<BitcodeModule>,
     map: SourceMap,
 }
@@ -2304,9 +2334,15 @@ impl CodeData {
         index
     }
 
-    fn push_type(&mut self, ty: BitcodeType) -> usize {
-        let index = self.types.len();
-        self.types.push(ty);
+    fn push_struct(&mut self, ty: BitcodeStruct) -> usize {
+        let index = self.structs.len();
+        self.structs.push(ty);
+        index
+    }
+
+    fn push_enum(&mut self, ty: BitcodeEnum) -> usize {
+        let index = self.structs.len();
+        self.enums.push(ty);
         index
     }
 
@@ -2350,9 +2386,13 @@ impl CodeData {
                 let function = self.push_function(function.clone());
                 LoadedSource::Function(function)
             }
-            ValueOrSource::Type(ty) => {
-                let ty = self.push_type(ty.clone());
-                LoadedSource::Type(ty)
+            ValueOrSource::Struct(ty) => {
+                let ty = self.push_struct(ty.clone());
+                LoadedSource::Struct(ty)
+            }
+            ValueOrSource::Enum(ty) => {
+                let ty = self.push_enum(ty.clone());
+                LoadedSource::Enum(ty)
             }
         }
     }
@@ -2492,7 +2532,8 @@ impl CustomType for Module {
                                         {
                                             Ok(std::mem::replace(&mut decl.value, value))
                                         }
-                                        Some(_) => Err(Fault::NotMutable),
+                                        Some(decl) if !decl.mutable => Err(Fault::NotMutable),
+                                        Some(_) => Err(Fault::Forbidden),
                                         None => Err(Fault::UnknownSymbol),
                                     }
                                 })
@@ -2505,7 +2546,7 @@ impl CustomType for Module {
                                     if decl.access >= vm.caller_access_level(&this.downgrade()) {
                                         Ok(decl.value)
                                     } else {
-                                        Err(Fault::UnknownSymbol)
+                                        Err(Fault::Forbidden)
                                     }
                                 })
                         });
@@ -2516,7 +2557,7 @@ impl CustomType for Module {
                             drop(declarations);
                             possible_invoke.call(vm, arity)
                         } else {
-                            Err(Fault::UnknownSymbol)
+                            Err(Fault::Forbidden)
                         }
                     } else {
                         drop(declarations);
@@ -2702,7 +2743,8 @@ enum LoadedSource {
     Symbol(usize),
     Register(Register),
     Function(usize),
-    Type(usize),
+    Struct(usize),
+    Enum(usize),
     Stack(Stack),
     Label(Label),
     Regex(usize),
@@ -2713,14 +2755,11 @@ struct PrecompiledRegex {
     literal: RegexLiteral,
     result: Result<Value, Fault>,
 }
+
 fn precompiled_regex(regex: &RegexLiteral, guard: &CollectionGuard) -> PrecompiledRegex {
     PrecompiledRegex {
         literal: regex.clone(),
-        result: MuseRegex::new(regex)
-            .map(|r| Value::dynamic(r, guard))
-            .map_err(|err| {
-                Fault::Exception(Value::dynamic(MuseString::from(err.to_string()), guard))
-            }),
+        result: MuseRegex::load(regex, guard),
     }
 }
 

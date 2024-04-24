@@ -1,18 +1,49 @@
 $case(
     basic_struct: r#"
-        struct Foo {
-            field;
-            pub fn bar {
-                [] => 1,
-                [self] => self.field,
+        mod module {
+            pub struct Foo {
+                field;
+                pub fn new(value) {
+                    new Foo {
+                        field: value,
+                    }
+                };
+                pub fn bar {
+                    [] => 1,
+                    [self] => self.private(),
+                };
+                fn private(self) => self.field;
             };
         };
 
-        $assert(Foo.bar() == 1);
+        $assert(module.Foo.bar() == 1);
 
-        let instance = new Foo {
-            field: 42,
-        };
+        let instance = module.Foo.new(42);
         $assert(instance.bar() == 42);
+
+        $assert(try {
+            instance.field
+        } catch :forbidden {
+            0
+        } == 0);
+        
+        $assert(try {
+            instance.private()
+        } catch :forbidden {
+            0
+        } == 0);
+    "#
+);
+
+$case(
+    basic_enum: r#"
+        enum Foo {
+            A;
+            B;
+        };
+
+        $assert(Foo.A == Foo.A);
+        $assert(Foo.A != Foo.B);
+        $assert(Foo.B == Foo.B);
     "#
 );

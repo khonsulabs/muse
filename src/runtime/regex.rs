@@ -46,6 +46,15 @@ impl MuseRegex {
         })
     }
 
+    /// Compilex the regex literal and returns it loaded for the runtime.
+    pub fn load(literal: &RegexLiteral, guard: &CollectionGuard<'_>) -> Result<Value, Fault> {
+        MuseRegex::new(literal)
+            .map(|r| Value::dynamic(r, guard))
+            .map_err(|err| {
+                Fault::Exception(Value::dynamic(MuseString::from(err.to_string()), guard))
+            })
+    }
+
     /// Returns the literal used to compile this regular expression.
     #[must_use]
     pub const fn literal(&self) -> &RegexLiteral {

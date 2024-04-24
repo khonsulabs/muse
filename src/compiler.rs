@@ -22,7 +22,8 @@ use syntax::{
 };
 
 use crate::runtime::symbol::Symbol;
-use crate::runtime::types::BitcodeType;
+use crate::runtime::types::{self, BitcodeEnum, BitcodeStruct};
+
 use crate::vm::bitcode::{
     Access, Accessable, BinaryKind, BitcodeBlock, BitcodeFunction, FaultKind, Label, Op,
     OpDestination, ValueOrSource,
@@ -295,6 +296,7 @@ impl Compiler {
                     }
                 }
             }
+            Expression::Enum(_e) => {}
             Expression::SingleMatch(e) => {
                 self.expand_macros(&mut e.value);
                 if let Some(guard) = &mut e.pattern.guard {
@@ -809,24 +811,31 @@ impl<'a> Scope<'a> {
                                         },
                                     );
                                 } else {
-                                    todo!("struct functions can't be anonymous")
+                                    self.compiler.errors.push(Ranged::new(
+                                        expr.range(),
+                                        Error::StructFunctionRequiresName,
+                                    ))
                                 }
                             }
                         }
                     }
                 }
 
-                let ty = BitcodeType {
+                let ty = BitcodeStruct {
                     name: e.name.0.clone(),
                     functions,
                     fields,
                 };
 
-                // TODO struct access
+                let access = if e.visibility.is_some() {
+                    Access::Public
+                } else {
+                    Access::Private
+                };
                 if self.is_module_root() {
                     self.compiler
                         .code
-                        .declare(e.name.0.clone(), false, Access::Public, ty, dest);
+                        .declare(e.name.0.clone(), false, access, ty, dest);
                 } else {
                     let stack = self.new_temporary();
                     self.compiler.code.copy(ty, stack);
@@ -863,6 +872,38 @@ impl<'a> Scope<'a> {
 
                 self.compiler.code.call(kind, arity * 2);
                 self.compiler.code.copy(Register(0), dest);
+            }
+            Expression::Enum(e) => {
+                let mut variants = Vec::new();
+                let mut value = 0;
+
+                for variant in &e.variants.enclosed {
+                    variants.push(types::EnumVariant {
+                        name: variant.name.0.clone(),
+                        value: ValueOrSource::UInt(value),
+                    });
+                    value += 1;
+                }
+
+                let ty = BitcodeEnum {
+                    name: e.name.0.clone(),
+                    variants,
+                };
+
+                let access = if e.visibility.is_some() {
+                    Access::Public
+                } else {
+                    Access::Private
+                };
+                if self.is_module_root() {
+                    self.compiler
+                        .code
+                        .declare(e.name.0.clone(), false, access, ty, dest);
+                } else {
+                    let stack = self.new_temporary();
+                    self.compiler.code.copy(ty, stack);
+                    self.declare_local(e.name.0.clone(), false, stack, dest);
+                }
             }
             Expression::Module(module) => {
                 let block = &module.contents.0;
@@ -2015,6 +2056,7 @@ impl<'a> Scope<'a> {
             | Expression::RootModule
             | Expression::Structure(_)
             | Expression::StructureLiteral(_)
+            | Expression::Enum(_)
             | Expression::FormatString(_) => Err(expr.1),
             Expression::Macro(_) | Expression::InfixMacro(_) => {
                 unreachable!("macros should be expanded already")
@@ -2269,6 +2311,7 @@ impl<'a> Scope<'a> {
             | Expression::RootModule
             | Expression::Return(_)
             | Expression::StructureLiteral(_)
+            | Expression::Enum(_)
             | Expression::FormatString(_) => {
                 ValueOrSource::Stack(self.compile_expression_into_temporary(source))
             }
@@ -2463,6 +2506,8 @@ pub enum Error {
     UsizeTooLarge,
     /// A public function requires a name.
     PublicFunctionRequiresName,
+    /// A function in a structure requires a name.
+    StructFunctionRequiresName,
     /// A label is not valid.
     InvalidLabel,
     /// Public declarations can only exist within a module's scope.
@@ -2492,6 +2537,7 @@ impl crate::ErrorKind for Error {
             Error::TooManyArguments => "too many arguments",
             Error::UsizeTooLarge => "usize too large",
             Error::PublicFunctionRequiresName => "public function must have a name",
+            Error::StructFunctionRequiresName => "functions in structs must have a name",
             Error::InvalidLabel => "invalid label",
             Error::PubOnlyInModules => "pub only in modules",
             Error::ExpectedBlock => "expected block",
@@ -2516,6 +2562,9 @@ impl Display for Error {
                 f.write_str("integer too large for the architecture's index type")
             }
             Error::PublicFunctionRequiresName => f.write_str("public function must have a name"),
+            Error::StructFunctionRequiresName => {
+                f.write_str("functions in structs must have a name")
+            }
             Error::InvalidLabel => f.write_str("invalid label"),
             Error::PubOnlyInModules => {
                 f.write_str("declarations may only be published within modules")
