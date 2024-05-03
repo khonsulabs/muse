@@ -3720,6 +3720,7 @@ where
 {
     /// Returns an empty function table.
     #[must_use]
+    #[allow(clippy::new_without_default)]
     pub const fn new() -> Self {
         Self {
             functions: Map::new(),

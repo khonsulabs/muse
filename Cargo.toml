@@ -36,8 +36,8 @@ rustyline = { version = "14.0.0", optional = true, default-features = false, fea
 ] }
 serde = { version = "1.0.195", features = ["derive", "rc"] }
 unicode-ident = "1.0.12"
-refuse = "0.0.2"
-refuse-pool = "0.0.2"
+refuse = "0.0.3"
+refuse-pool = "0.0.3"
 parking_lot = "0.12.1"
 
 [dev-dependencies]
@@ -46,7 +46,7 @@ pollster = "0.3.0"
 flume = "0.11.0"
 
 [lints.clippy]
-pedantic = "warn"
+pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
@@ -71,3 +71,4 @@ lto = true
 # [patch.crates-io]
 # refuse = { path = "../refuse" }
 # refuse-pool = { path = "../refuse/refuse-pool" }
+# refuse-macros = { path = "../refuse/refuse-macros" }

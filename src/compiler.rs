@@ -21,16 +21,14 @@ use syntax::{
     PatternKind, Ranged, SingleMatch, SourceCode, SourceRange, TryExpression, UnaryExpression,
 };
 
+use self::syntax::StructureMember;
 use crate::runtime::symbol::Symbol;
 use crate::runtime::types::{self, BitcodeEnum, BitcodeStruct};
-
 use crate::vm::bitcode::{
     Access, Accessable, BinaryKind, BitcodeBlock, BitcodeFunction, FaultKind, Label, Op,
     OpDestination, ValueOrSource,
 };
 use crate::vm::{Code, Register, Stack};
-
-use self::syntax::StructureMember;
 
 /// A Muse compiler instance.
 #[derive(Debug)]
@@ -807,14 +805,14 @@ impl<'a> Scope<'a> {
                                                 Access::Private
                                             },
                                             accessable: self
-                                                .compile_bitcode_function(&f, member.range()),
+                                                .compile_bitcode_function(f, member.range()),
                                         },
                                     );
                                 } else {
                                     self.compiler.errors.push(Ranged::new(
                                         expr.range(),
                                         Error::StructFunctionRequiresName,
-                                    ))
+                                    ));
                                 }
                             }
                         }
@@ -845,7 +843,7 @@ impl<'a> Scope<'a> {
             Expression::StructureLiteral(lit) => {
                 let kind = self.compile_source(&lit.name);
                 let length = lit.fields.as_ref().map_or(0, |e| e.enclosed.len());
-                let arity = if let Some(arity @ 0..=127) = u8::try_from(length).ok() {
+                let arity = if let Ok(arity @ 0..=127) = u8::try_from(length) {
                     arity
                 } else {
                     self.compiler
@@ -875,14 +873,12 @@ impl<'a> Scope<'a> {
             }
             Expression::Enum(e) => {
                 let mut variants = Vec::new();
-                let mut value = 0;
 
-                for variant in &e.variants.enclosed {
+                for (variant, value) in e.variants.enclosed.iter().zip(0..) {
                     variants.push(types::EnumVariant {
                         name: variant.name.0.clone(),
                         value: ValueOrSource::UInt(value),
                     });
-                    value += 1;
                 }
 
                 let ty = BitcodeEnum {
@@ -1009,6 +1005,7 @@ impl<'a> Scope<'a> {
             Literal::Regex(regex) => self.compiler.code.copy(regex.clone(), dest),
         }
     }
+
     #[allow(clippy::too_many_lines)]
     fn compile_bitcode_function(
         &mut self,

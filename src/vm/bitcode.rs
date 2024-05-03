@@ -169,21 +169,12 @@ pub enum Access {
 }
 
 /// A type that has an `access` field.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Ord, PartialOrd)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Ord, PartialOrd, Trace)]
 pub struct Accessable<T> {
     /// The access of the item.
     pub access: Access,
     /// The item having its access controlled.
     pub accessable: T,
-}
-
-// TODO this should be derivable, but there's an error.
-impl<T: Trace> Trace for Accessable<T> {
-    const MAY_CONTAIN_REFERENCES: bool = T::MAY_CONTAIN_REFERENCES;
-
-    fn trace(&self, tracer: &mut refuse::Tracer) {
-        self.accessable.trace(tracer);
-    }
 }
 
 /// A virtual machine operation.

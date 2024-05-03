@@ -280,7 +280,7 @@ impl CustomType for MuseWidget {
                     if name == &Symbol::from("open") && arity == 0 {
                         let widget = this.make_widget();
                         Ok(widget
-                            .open(&muse_app()?)
+                            .open(&mut muse_app()?)
                             .unwrap()
                             .map(|handle| Value::dynamic(OpenWindow(handle), vm))
                             .unwrap_or_default())

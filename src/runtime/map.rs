@@ -71,6 +71,12 @@ impl Trace for Map {
     }
 }
 
+impl Default for Map {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Map {
     /// Returns an empty map.
     #[must_use]

@@ -4,15 +4,10 @@ use kempt::Map;
 use refuse::{CollectionGuard, ContainsNoRefs, Trace};
 use serde::{Deserialize, Serialize};
 
-use crate::vm::{
-    bitcode::{Access, Accessable, BitcodeFunction, ValueOrSource},
-    Arity, Fault, Function, ModuleId, Register, VmContext,
-};
-
-use super::{
-    symbol::{Symbol, SymbolRef},
-    value::{CustomType, Rooted, Type, TypeRef, Value},
-};
+use super::symbol::{Symbol, SymbolRef};
+use super::value::{CustomType, Rooted, Type, TypeRef, Value};
+use crate::vm::bitcode::{Access, Accessable, BitcodeFunction, ValueOrSource};
+use crate::vm::{Arity, Fault, Function, ModuleId, Register, VmContext};
 
 /// An IR Muse-defined struct.
 #[derive(PartialEq, Clone, Debug, Serialize, Deserialize)]
@@ -159,6 +154,7 @@ pub struct RuntimeStruct {
 
 impl RuntimeStruct {
     /// Converts this type back into a [`BitcodeStruct`].
+    #[must_use]
     pub fn to_bitcode_type(&self, guard: &CollectionGuard<'_>) -> BitcodeStruct {
         BitcodeStruct {
             name: self.loaded.name.clone(),
@@ -278,24 +274,12 @@ impl CustomType for RuntimeEnum {
 }
 
 /// A variant of an enum.
-#[derive(PartialEq, Clone, Debug, Serialize, Deserialize)]
+#[derive(PartialEq, Clone, Debug, Serialize, Deserialize, Trace)]
 pub struct EnumVariant<T> {
     /// The name of the variant.
     pub name: Symbol,
     /// The value of the variant.
     pub value: T,
-}
-
-// TODO generic support in refuse
-impl<T> Trace for EnumVariant<T>
-where
-    T: Trace,
-{
-    const MAY_CONTAIN_REFERENCES: bool = T::MAY_CONTAIN_REFERENCES;
-
-    fn trace(&self, tracer: &mut refuse::Tracer) {
-        self.value.trace(tracer);
-    }
 }
 
 #[derive(Debug, Trace)]

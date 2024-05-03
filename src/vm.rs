@@ -13,7 +13,7 @@
 //! | [`BitcodeModule`] | [`Module`] | A module definition. |
 
 use std::cmp::Ordering;
-use std::fmt::{Debug, Write};
+use std::fmt::Debug;
 use std::future::Future;
 use std::hash::Hash;
 use std::num::{NonZeroUsize, TryFromIntError};
@@ -383,16 +383,19 @@ impl VmState {
     }
 
     /// Returns a slice of the registers.
+    #[must_use]
     pub const fn registers(&self) -> &[Value; 256] {
         &self.registers
     }
 
     /// Returns exclusive access to the registers.
+    #[must_use]
     pub fn registers_mut(&mut self) -> &mut [Value; 256] {
         &mut self.registers
     }
 
     /// Returns the id of the module that owns the code currently executing.
+    #[must_use]
     pub fn current_module(&self) -> ModuleId {
         self.frames[self.current_frame].module
     }
@@ -463,6 +466,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
     }
 
     /// Returns the access to allow the caller of the current function.
+    #[must_use]
     pub fn caller_access_level(&self, module: &Dynamic<Module>) -> Access {
         let current_module = &self.modules[self.frames[self.current_frame].module.0];
         if current_module == module {
@@ -855,9 +859,9 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
             .insert(
                 name.into(),
                 ModuleDeclaration {
+                    access,
                     mutable,
                     value,
-                    access,
                 },
             )
             .map(|d| d.value.value))
@@ -1697,7 +1701,7 @@ impl VmContext<'_, '_> {
             .data
             .symbols
             .get(symbol)
-            .map(|s| s.downgrade())
+            .map(Symbol::downgrade)
             .ok_or(Fault::InvalidOpcode)
     }
 
@@ -2405,21 +2409,6 @@ impl CodeData {
             }
             other => other,
         }
-    }
-}
-
-struct InstructionFormatter<'a>(&'a [u64]);
-
-impl Debug for InstructionFormatter<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut i = f.debug_list();
-        let mut hex = String::new();
-        for op in self.0 {
-            hex.clear();
-            write!(&mut hex, "{op:x}")?;
-            i.entry(&hex);
-        }
-        i.finish()
     }
 }
 
