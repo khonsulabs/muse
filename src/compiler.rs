@@ -1057,6 +1057,7 @@ impl<'a> Scope<'a> {
                 let parameters = match &body.pattern.kind.0 {
                     PatternKind::Any(None) | PatternKind::AnyRemaining => None,
                     PatternKind::Any(_)
+                    | PatternKind::Compare(_)
                     | PatternKind::Literal(_)
                     | PatternKind::Or(_, _, _)
                     | PatternKind::DestructureMap(_) => Some(PatternKinds::Slice(
@@ -1294,6 +1295,13 @@ impl<'a> Scope<'a> {
                 Refutability::Irrefutable
             }
             PatternKind::AnyRemaining => Refutability::Irrefutable,
+            PatternKind::Compare(comparison) => {
+                let expr = self.compile_source(&comparison.expr);
+                self.compiler
+                    .code
+                    .compare(comparison.kind.0.inverse(), source, expr, doesnt_match);
+                Refutability::Refutable
+            }
             PatternKind::Literal(literal) => self.compile_literal_binding(
                 literal,
                 pattern.range(),
@@ -1488,6 +1496,7 @@ impl<'a> Scope<'a> {
                     match &matches.pattern.kind.0 {
                         PatternKind::Any(None) | PatternKind::AnyRemaining => {}
                         PatternKind::Any(_)
+                        | PatternKind::Compare(_)
                         | PatternKind::Literal(_)
                         | PatternKind::Or(_, _, _)
                         | PatternKind::DestructureMap(_) => {
@@ -1519,6 +1528,7 @@ impl<'a> Scope<'a> {
                     let parameters = match &matches.pattern.kind.0 {
                         PatternKind::Any(None) | PatternKind::AnyRemaining => None,
                         PatternKind::Any(_)
+                        | PatternKind::Compare(_)
                         | PatternKind::Literal(_)
                         | PatternKind::Or(_, _, _)
                         | PatternKind::DestructureMap(_) => Some(PatternKinds::Slice(

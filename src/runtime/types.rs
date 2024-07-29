@@ -210,7 +210,22 @@ pub struct BitcodeEnum {
 
 impl BitcodeEnum {
     pub(crate) fn load(&self, vm: &VmContext<'_, '_>) -> Result<RuntimeEnum, Fault> {
-        let instance = Type::new(self.name.clone()).seal(vm.guard());
+        let instance = Type::new(self.name.clone())
+            .with_total_cmp(|fallback| {
+                move |this, vm, rhs| {
+                    if let (Some(lhs), Some(rhs)) = (
+                        this.downcast_ref::<VariantInstance>(vm.guard()),
+                        rhs.as_downcast_ref::<VariantInstance>(vm.guard()),
+                    ) {
+                        let lhs = lhs.value;
+                        let rhs = rhs.value;
+                        lhs.total_cmp(vm, &rhs)
+                    } else {
+                        fallback(this, vm, rhs)
+                    }
+                }
+            })
+            .seal(vm.guard());
 
         let mut variants = Vec::with_capacity(self.variants.len());
         let mut variants_by_name = Map::with_capacity(self.variants.len());

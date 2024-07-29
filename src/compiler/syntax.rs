@@ -1555,6 +1555,59 @@ pub enum CompareKind {
     GreaterThanOrEqual,
 }
 
+impl CompareKind {
+    /// Returns the inverse comparison operation.
+    pub const fn inverse(self) -> Self {
+        match self {
+            Self::LessThanOrEqual => Self::GreaterThan,
+            Self::LessThan => Self::GreaterThanOrEqual,
+            Self::Equal => Self::NotEqual,
+            Self::NotEqual => Self::Equal,
+            Self::GreaterThan => Self::LessThanOrEqual,
+            Self::GreaterThanOrEqual => Self::LessThan,
+        }
+    }
+}
+
+impl TokenizeRanged for CompareKind {
+    fn tokenize_ranged(&self, range: SourceRange, tokens: &mut VecDeque<Ranged<Token>>) {
+        tokens.push_back(Ranged::new(
+            range,
+            match self {
+                CompareKind::LessThanOrEqual => Token::LessThanOrEqual,
+                CompareKind::LessThan => Token::Char('<'),
+                CompareKind::Equal => Token::Char('='),
+                CompareKind::NotEqual => Token::NotEqual,
+                CompareKind::GreaterThan => Token::Char('>'),
+                CompareKind::GreaterThanOrEqual => Token::GreaterThanOrEqual,
+            },
+        ));
+    }
+}
+
+#[test]
+fn comparison_inverse() {
+    fn test_invert(kind: CompareKind) {
+        let inverse = kind.inverse();
+        assert_ne!(kind, inverse, "inverse of {kind:?} returned same value");
+        let reverted = inverse.inverse();
+        assert_eq!(
+            kind, reverted,
+            "inverse of {inverse:?} returned something other than {kind:?}"
+        );
+    }
+    for kind in [
+        CompareKind::LessThanOrEqual,
+        CompareKind::LessThan,
+        CompareKind::Equal,
+        CompareKind::NotEqual,
+        CompareKind::GreaterThan,
+        CompareKind::GreaterThanOrEqual,
+    ] {
+        test_invert(kind);
+    }
+}
+
 /// Binary bitwise expression kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum BitwiseKind {
@@ -3705,7 +3758,7 @@ impl Fn {
             Some(Token::Open(Paired::Paren)) => {
                 let start = tokens.next_or_eof()?;
 
-                parse_tuple_destructure_pattern(start, Paired::Paren, tokens)?.into()
+                parse_tuple_destructure_pattern(start, Paired::Paren, tokens, config)?.into()
             }
             Some(Token::Open(Paired::Brace)) => {
                 // Pattern/overloaded function.
@@ -4025,6 +4078,7 @@ impl MatchPattern {
         match &self.pattern.kind.0 {
             PatternKind::Any(None) | PatternKind::AnyRemaining => Some((0, true)),
             PatternKind::Any(_)
+            | PatternKind::Compare(_)
             | PatternKind::Literal(_)
             | PatternKind::Or(_, _, _)
             | PatternKind::DestructureMap(_) => Some((1, false)),
@@ -4093,6 +4147,19 @@ where
     }
 }
 
+/// A comparision pattern for comparing against a non-literal value.
+///
+/// Literal values are unambiguous, but named values like enums lead to
+/// ambiguity as to whether the programmer wants a new variable with a given
+/// name or if it should be matched against.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PatternComparison {
+    /// The kind of comparison to perform.
+    pub kind: Ranged<CompareKind>,
+    /// The expression to evaluate to compare against.
+    pub expr: Box<Ranged<Expression>>,
+}
+
 /// The syntax components of a portion of a pattern match.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PatternKind {
@@ -4100,6 +4167,8 @@ pub enum PatternKind {
     Any(Option<Symbol>),
     /// Match any remaining expressions.
     AnyRemaining,
+    /// A comparison pattern.
+    Compare(PatternComparison),
     /// Match a literal value.
     Literal(Literal),
     /// Match by destructuring the value as a tuple.
@@ -4120,6 +4189,10 @@ impl TokenizeRanged for PatternKind {
             PatternKind::Any(None) => tokens.push_back(Ranged::new(range, Token::Char('_'))),
             PatternKind::Any(Some(name)) => {
                 tokens.push_back(Ranged::new(range, Token::Identifier(name.clone())));
+            }
+            PatternKind::Compare(cmp) => {
+                cmp.kind.tokenize_into(tokens);
+                cmp.expr.tokenize_into(tokens);
             }
             PatternKind::AnyRemaining => tokens.push_back(Ranged::new(range, Token::Ellipses)),
             PatternKind::Literal(literal) => literal.tokenize_ranged(range, tokens),
@@ -4199,7 +4272,7 @@ fn parse_pattern(
     tokens: &mut TokenReader<'_>,
     config: &ParserConfig<'_>,
 ) -> Result<Option<Ranged<Pattern>>, Ranged<ParseError>> {
-    let Some(kind) = parse_pattern_kind(tokens)? else {
+    let Some(kind) = parse_pattern_kind(tokens, config)? else {
         return Ok(None);
     };
 
@@ -4217,10 +4290,23 @@ fn parse_pattern(
         tokens.ranged(kind.range().start.., Pattern { kind, guard }),
     ))
 }
+fn parse_pattern_compare(
+    kind: Ranged<CompareKind>,
+    tokens: &mut TokenReader<'_>,
+    config: &ParserConfig<'_>,
+) -> Result<Ranged<PatternKind>, Ranged<ParseError>> {
+    tokens.next_or_eof()?;
+    let expr = Box::new(config.parse_expression(tokens)?);
+    Ok(Ranged::new(
+        kind.range().with_end(expr.range().end()),
+        PatternKind::Compare(PatternComparison { kind, expr }),
+    ))
+}
 
 #[allow(clippy::too_many_lines)]
 fn parse_pattern_kind(
     tokens: &mut TokenReader<'_>,
+    config: &ParserConfig<'_>,
 ) -> Result<Option<Ranged<PatternKind>>, Ranged<ParseError>> {
     let Some(indicator) = tokens.peek() else {
         return Ok(None);
@@ -4230,6 +4316,28 @@ fn parse_pattern_kind(
             tokens.next_or_eof()?;
             indicator.map(|_| PatternKind::Any(None))
         }
+        Token::LessThanOrEqual => parse_pattern_compare(
+            indicator.map(|_| CompareKind::LessThanOrEqual),
+            tokens,
+            config,
+        )?,
+        Token::Char('<') => {
+            parse_pattern_compare(indicator.map(|_| CompareKind::LessThan), tokens, config)?
+        }
+        Token::Char('=') => {
+            parse_pattern_compare(indicator.map(|_| CompareKind::Equal), tokens, config)?
+        }
+        Token::NotEqual => {
+            parse_pattern_compare(indicator.map(|_| CompareKind::NotEqual), tokens, config)?
+        }
+        Token::Char('>') => {
+            parse_pattern_compare(indicator.map(|_| CompareKind::GreaterThan), tokens, config)?
+        }
+        Token::GreaterThanOrEqual => parse_pattern_compare(
+            indicator.map(|_| CompareKind::GreaterThanOrEqual),
+            tokens,
+            config,
+        )?,
         Token::Ellipses => {
             tokens.next_or_eof()?;
             indicator.map(|_| PatternKind::AnyRemaining)
@@ -4301,19 +4409,19 @@ fn parse_pattern_kind(
         }
         Token::Open(Paired::Bracket) => {
             tokens.next_or_eof()?;
-            parse_tuple_destructure_pattern(indicator, Paired::Bracket, tokens)?
+            parse_tuple_destructure_pattern(indicator, Paired::Bracket, tokens, config)?
         }
         Token::Open(Paired::Brace) => {
             tokens.next_or_eof()?;
 
-            parse_map_destructure_pattern(indicator, tokens)?
+            parse_map_destructure_pattern(indicator, tokens, config)?
         }
         _ => return Ok(None),
     };
 
     while tokens.peek_token() == Some(Token::Char('|')) {
         let or = tokens.next_or_eof()?;
-        let Some(rhs) = parse_pattern_kind(tokens)? else {
+        let Some(rhs) = parse_pattern_kind(tokens, config)? else {
             return Err(tokens.ranged(tokens.last_index.., ParseError::ExpectedPattern));
         };
         pattern = tokens.ranged(
@@ -4329,9 +4437,10 @@ fn parse_tuple_destructure_pattern(
     open: Ranged<Token>,
     kind: Paired,
     tokens: &mut TokenReader<'_>,
+    config: &ParserConfig<'_>,
 ) -> Result<Ranged<PatternKind>, Ranged<ParseError>> {
     let mut patterns = Delimited::<_, Ranged<Token>>::build_empty();
-    while let Some(pattern) = parse_pattern_kind(tokens)? {
+    while let Some(pattern) = parse_pattern_kind(tokens, config)? {
         patterns.push(pattern);
 
         if tokens.peek_token() == Some(Token::Char(',')) {
@@ -4366,6 +4475,7 @@ fn parse_tuple_destructure_pattern(
 fn parse_map_destructure_pattern(
     open: Ranged<Token>,
     tokens: &mut TokenReader<'_>,
+    config: &ParserConfig<'_>,
 ) -> Result<Ranged<PatternKind>, Ranged<ParseError>> {
     let mut entries = Delimited::<_, Ranged<Token>>::build_empty();
 
@@ -4394,7 +4504,7 @@ fn parse_map_destructure_pattern(
                 return Err(colon.map(|_| ParseError::ExpectedColon));
             }
 
-            let Some(value) = parse_pattern_kind(tokens)? else {
+            let Some(value) = parse_pattern_kind(tokens, config)? else {
                 return Err(tokens.ranged(tokens.last_index.., ParseError::ExpectedPattern));
             };
             entries.push(tokens.ranged(key.range().start.., EntryPattern { key, colon, value }));

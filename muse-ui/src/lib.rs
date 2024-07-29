@@ -166,7 +166,10 @@ impl CustomType for DynamicValue {
                     this.0
                         .map_ref(|value| value.deep_clone(guard))
                         .map(|value| {
-                            muse::runtime::value::AnyDynamic::new(Self(Dynamic::new(value)), guard)
+                            muse::runtime::value::AnyDynamic::new(
+                                DynamicValue(Dynamic::new(value)),
+                                guard,
+                            )
                         })
                 }
             })

@@ -47,3 +47,28 @@ $case(
         $assert(Foo.B == Foo.B);
     "#
 );
+
+$case(
+    enum_match: r#"
+        enum Foo {
+            A;
+            B;
+        };
+
+        let test = Foo.A;
+
+        match test {
+            =Foo.A => {},
+        };
+        $assert(match Foo.B {
+            =Foo.A => false,
+            =Foo.B => true,
+        });
+        match test {
+            !=Foo.B => {},
+        };
+        match test {
+            <Foo.B => {},
+        };
+    "#
+);
