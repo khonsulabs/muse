@@ -11,12 +11,13 @@ use super::bitcode::{
     OpDestination, ValueOrSource,
 };
 use super::{
-    precompiled_regex, CodeData, Function, LoadedOp, Module, PrecompiledRegex, Register, Stack,
-    VmContext,
+    precompiled_regex, CodeData, Function, LoadedOp, Module, ModuleId, PrecompiledRegex, Register,
+    Stack, VmContext,
 };
 use crate::compiler::syntax::{BitwiseKind, CompareKind};
 use crate::compiler::{BitcodeModule, UnaryKind};
 use crate::runtime::symbol::Symbol;
+use crate::runtime::types::{BitcodeEnum, BitcodeStruct};
 use crate::runtime::value::{ContextOrGuard, Dynamic, Value};
 use crate::vm::{Fault, SourceRange};
 
@@ -942,27 +943,7 @@ impl Source for Value {
     }
 
     fn as_source(&self, guard: &CollectionGuard<'_>) -> ValueOrSource {
-        match self {
-            Value::Nil => ValueOrSource::Nil,
-            Value::Bool(value) => ValueOrSource::Bool(*value),
-            Value::Int(value) => ValueOrSource::Int(*value),
-            Value::UInt(value) => ValueOrSource::UInt(*value),
-            Value::Float(value) => ValueOrSource::Float(*value),
-            Value::Symbol(value) => value
-                .upgrade(guard)
-                .map_or(ValueOrSource::Nil, ValueOrSource::Symbol),
-            Value::Dynamic(value) => {
-                if let Some(func) = value.downcast_ref::<Function>(guard) {
-                    ValueOrSource::Function(BitcodeFunction::from_function(func, guard))
-                } else if let Some(func) = value.downcast_ref::<DeclaredType>(guard) {
-                    ValueOrSource::Type(func.to_bitcode_type(guard))
-                } else {
-                    // All dynamics generated into a Source must be known by
-                    // Muse
-                    unreachable!("unexpected dynamic")
-                }
-            }
-        }
+        self.as_source(guard)
     }
 }
 
@@ -1110,6 +1091,30 @@ impl Source for PrecompiledRegex {
         ValueOrSource::Regex(self.literal.clone())
     }
 }
+
+impl Source for BitcodeEnum {
+    fn load(&self, vm: &VmContext<'_, '_>) -> Result<Value, Fault> {
+        Ok(Value::dynamic(self.load(vm)?, vm.guard()))
+    }
+
+    fn as_source(&self, _guard: &CollectionGuard<'_>) -> ValueOrSource {
+        ValueOrSource::Enum(self.clone())
+    }
+}
+
+impl Source for BitcodeStruct {
+    fn load(&self, vm: &VmContext<'_, '_>) -> Result<Value, Fault> {
+        Ok(Value::dynamic(
+            self.load(vm.guard(), vm.current_module()),
+            vm.guard(),
+        ))
+    }
+
+    fn as_source(&self, _guard: &CollectionGuard<'_>) -> ValueOrSource {
+        ValueOrSource::Struct(self.clone())
+    }
+}
+
 impl Source for Label {
     fn load(&self, vm: &VmContext<'_, '_>) -> Result<Value, Fault> {
         let instruction = vm
@@ -1162,6 +1167,8 @@ macro_rules! decode_source {
             ValueOrSource::Register(source) => $next_fn($source, $code, $guard $(, $($arg)*)?, *source),
             ValueOrSource::Stack(source) => $next_fn($source, $code, $guard $(, $($arg)*)?, *source),
             ValueOrSource::Label(source) => $next_fn($source, $code, $guard $(, $($arg)*)?, *source),
+            ValueOrSource::Struct(source) => $next_fn($source, $code, $guard $(, $($arg)*)?, source.clone()),
+            ValueOrSource::Enum(source) => $next_fn($source, $code, $guard $(, $($arg)*)?, source.clone()),
         }
     }};
 }
@@ -1521,7 +1528,7 @@ where
             let module_index =
                 NonZeroUsize::new(context.modules.len()).expect("always at least one");
             let vm = &mut *context.vm;
-            let parent = vm.modules[vm.frames[executing_frame].module];
+            let parent = vm.modules[vm.frames[executing_frame].module.0];
             vm.modules.push(Dynamic::new(
                 Module {
                     parent: Some(parent),
@@ -1529,7 +1536,7 @@ where
                 },
                 &mut *context.guard,
             ));
-            vm.frames[vm.current_frame].module = module_index.get();
+            vm.frames[vm.current_frame].module = ModuleId(module_index.get());
             vm.frames[executing_frame].loading_module = Some(module_index);
             let _init_result = context.resume_async_inner(context.current_frame)?;
             context.vm.frames[executing_frame].loading_module = None;

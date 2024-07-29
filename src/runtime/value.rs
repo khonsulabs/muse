@@ -22,6 +22,9 @@ use crate::runtime::string::MuseString;
 use crate::runtime::symbol::{Symbol, SymbolList, SymbolRef};
 use crate::vm::{Arity, ExecutionError, Fault, VmContext};
 
+#[cfg(feature = "dispatched")]
+use crate::vm::bitcode::{BitcodeFunction, ValueOrSource};
+
 /// A Muse virtual machine value.
 #[derive(Default, Clone, Copy, Debug)]
 pub enum Value {
@@ -1074,6 +1077,36 @@ impl Value {
             f.write_str(s)
         } else {
             todo!("display unformattable value")
+        }
+    }
+
+    #[cfg(feature = "dispatched")]
+    pub(crate) fn as_source(&self, guard: &CollectionGuard<'_>) -> ValueOrSource {
+        use crate::runtime::types::{RuntimeEnum, RuntimeStruct};
+        use crate::vm::Function;
+
+        match self {
+            Value::Nil => ValueOrSource::Nil,
+            Value::Bool(value) => ValueOrSource::Bool(*value),
+            Value::Int(value) => ValueOrSource::Int(*value),
+            Value::UInt(value) => ValueOrSource::UInt(*value),
+            Value::Float(value) => ValueOrSource::Float(*value),
+            Value::Symbol(value) => value
+                .upgrade(guard)
+                .map_or(ValueOrSource::Nil, ValueOrSource::Symbol),
+            Value::Dynamic(value) => {
+                if let Some(func) = value.downcast_ref::<Function>(guard) {
+                    ValueOrSource::Function(BitcodeFunction::from_function(func, guard))
+                } else if let Some(func) = value.downcast_ref::<RuntimeStruct>(guard) {
+                    ValueOrSource::Struct(func.to_bitcode_type(guard))
+                } else if let Some(func) = value.downcast_ref::<RuntimeEnum>(guard) {
+                    ValueOrSource::Enum(func.to_bitcode_type(guard))
+                } else {
+                    // All dynamics generated into a Source must be known by
+                    // Muse
+                    unreachable!("unexpected dynamic")
+                }
+            }
         }
     }
 }

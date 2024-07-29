@@ -145,7 +145,7 @@ impl Accessable<BitcodeFunction> {
 }
 
 /// A loaded Muse-defined type.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RuntimeStruct {
     loaded: TypeRef,
     functions: Map<Symbol, Accessable<Rooted<Function>>>,
@@ -275,11 +275,28 @@ impl BitcodeEnum {
 }
 
 /// A Muse enum definition.
-#[derive(Debug, Trace)]
+#[derive(Debug, Trace, Clone)]
 pub struct RuntimeEnum {
     ty: TypeRef,
     variants: Vec<EnumVariant<Value>>,
     variants_by_name: Map<Symbol, usize>,
+}
+
+impl RuntimeEnum {
+    #[cfg(feature = "dispatched")]
+    pub(crate) fn to_bitcode_type(&self, guard: &CollectionGuard) -> BitcodeEnum {
+        BitcodeEnum {
+            name: self.ty.name.clone(),
+            variants: self
+                .variants
+                .iter()
+                .map(|v| EnumVariant {
+                    name: v.name.clone(),
+                    value: v.value.as_source(guard),
+                })
+                .collect(),
+        }
+    }
 }
 
 impl CustomType for RuntimeEnum {
