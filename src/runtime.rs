@@ -3,6 +3,7 @@
 pub mod exception;
 pub mod list;
 pub mod map;
+pub mod reactor;
 pub mod regex;
 pub mod string;
 pub mod symbol;

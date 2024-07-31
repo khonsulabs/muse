@@ -22,8 +22,9 @@ use crate::runtime::string::MuseString;
 use crate::runtime::symbol::{Symbol, SymbolList, SymbolRef};
 use crate::vm::{Arity, ExecutionError, Fault, VmContext};
 
-#[cfg(feature = "dispatched")]
+use crate::runtime::types::{RuntimeEnum, RuntimeStruct};
 use crate::vm::bitcode::{BitcodeFunction, ValueOrSource};
+use crate::vm::Function;
 
 /// A Muse virtual machine value.
 #[derive(Default, Clone, Copy, Debug)]
@@ -1080,11 +1081,7 @@ impl Value {
         }
     }
 
-    #[cfg(feature = "dispatched")]
     pub(crate) fn as_source(&self, guard: &CollectionGuard<'_>) -> ValueOrSource {
-        use crate::runtime::types::{RuntimeEnum, RuntimeStruct};
-        use crate::vm::Function;
-
         match self {
             Value::Nil => ValueOrSource::Nil,
             Value::Bool(value) => ValueOrSource::Bool(*value),
@@ -1275,7 +1272,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1287,7 +1284,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1299,7 +1296,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1311,7 +1308,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1323,7 +1320,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1335,7 +1332,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1347,7 +1344,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1359,7 +1356,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1371,7 +1368,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1383,7 +1380,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1395,7 +1392,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1407,7 +1404,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1419,7 +1416,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1439,7 +1436,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1451,7 +1448,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1463,7 +1460,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1475,7 +1472,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1487,7 +1484,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1499,7 +1496,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1511,7 +1508,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1523,7 +1520,7 @@ impl AnyDynamic {
         (self
             .0
             .load_mapped::<dyn CustomType>(vm.as_ref())
-            .ok_or(Fault::ValueFreed)?
+            .ok_or(ValueFreed)?
             .muse_type()
             .clone()
             .vtable
@@ -1545,7 +1542,7 @@ impl AnyDynamic {
             _ => (self
                 .0
                 .load_mapped::<dyn CustomType>(vm.as_ref())
-                .ok_or(Fault::ValueFreed)?
+                .ok_or(ValueFreed)?
                 .muse_type()
                 .clone()
                 .vtable
@@ -1560,7 +1557,7 @@ impl AnyDynamic {
             _ => (self
                 .0
                 .load_mapped::<dyn CustomType>(vm.as_ref())
-                .ok_or(Fault::ValueFreed)?
+                .ok_or(ValueFreed)?
                 .muse_type()
                 .clone()
                 .vtable

@@ -132,6 +132,19 @@ impl Vm {
         Ok(self.execute(&code, guard)?)
     }
 
+    pub fn prepare(&self, code: &Code, guard: &mut CollectionGuard) -> Result<(), ExecutionError> {
+        self.context(guard).prepare(code)
+    }
+
+    pub fn prepare_call(
+        &self,
+        function: &Rooted<Function>,
+        arity: Arity,
+        guard: &mut CollectionGuard,
+    ) -> Result<(), ExecutionError> {
+        self.context(guard).prepare_call(function, arity)
+    }
+
     /// Executes `code` and returns the result.
     pub fn execute(
         &self,
@@ -170,6 +183,22 @@ impl Vm {
         self.context(guard).resume()
     }
 
+    pub fn resume_until(
+        &mut self,
+        instant: Instant,
+        guard: &mut CollectionGuard,
+    ) -> Result<Value, ExecutionError> {
+        self.context(guard).resume_until(instant)
+    }
+
+    pub fn resume_for(
+        &mut self,
+        duration: Duration,
+        guard: &mut CollectionGuard,
+    ) -> Result<Value, ExecutionError> {
+        self.context(guard).resume_for(duration)
+    }
+
     /// Returns a future that executes `code` asynchronously.
     pub fn execute_async<'context, 'guard>(
         &'context self,
@@ -187,8 +216,24 @@ impl Vm {
     pub fn resume_async<'context, 'guard>(
         &'context self,
         guard: &'context mut CollectionGuard<'guard>,
-    ) -> Result<ExecuteAsync<'context, 'guard>, ExecutionError> {
+    ) -> ExecuteAsync<'context, 'guard> {
         self.context(guard).resume_async()
+    }
+
+    pub fn resume_for_async<'context, 'guard>(
+        &'context self,
+        duration: Duration,
+        guard: &'context mut CollectionGuard<'guard>,
+    ) -> ExecuteAsync<'context, 'guard> {
+        self.context(guard).resume_for_async(duration)
+    }
+
+    pub fn resume_until_async<'context, 'guard>(
+        &'context self,
+        instant: Instant,
+        guard: &'context mut CollectionGuard<'guard>,
+    ) -> ExecuteAsync<'context, 'guard> {
+        self.context(guard).resume_until_async(instant)
     }
 
     /// Increases the current budget by `amount`.
@@ -518,6 +563,11 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
             })
     }
 
+    pub fn prepare(&mut self, code: &Code) -> Result<(), ExecutionError> {
+        let code = self.push_code(code, None);
+        self.prepare_owned(code)
+    }
+
     /// Executes `code` and returns the result.
     pub fn execute(&mut self, code: &Code) -> Result<Value, ExecutionError> {
         let code = self.push_code(code, None);
@@ -569,6 +619,15 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         }
     }
 
+    pub fn resume_until(&mut self, instant: Instant) -> Result<Value, ExecutionError> {
+        self.execute_until = Some(instant);
+        self.resume()
+    }
+
+    pub fn resume_for(&mut self, duration: Duration) -> Result<Value, ExecutionError> {
+        self.resume_until(Instant::now() + duration)
+    }
+
     fn prepare_owned(&mut self, code: CodeIndex) -> Result<(), ExecutionError> {
         let vm = self.vm();
         vm.frames[vm.current_frame].code = Some(code);
@@ -601,8 +660,17 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
     /// This should only be called if an [`ExecutionError::Waiting`],
     /// [`ExecutionError::NoBudget`], or [`ExecutionError::Timeout`] was
     /// returned when executing code.
-    pub fn resume_async(self) -> Result<ExecuteAsync<'context, 'guard>, ExecutionError> {
-        Ok(ExecuteAsync(self))
+    pub fn resume_async(self) -> ExecuteAsync<'context, 'guard> {
+        ExecuteAsync(self)
+    }
+
+    pub fn resume_for_async(self, duration: Duration) -> ExecuteAsync<'context, 'guard> {
+        self.resume_until_async(Instant::now() + duration)
+    }
+
+    pub fn resume_until_async(mut self, instant: Instant) -> ExecuteAsync<'context, 'guard> {
+        self.execute_until = Some(instant);
+        self.resume_async()
     }
 
     /// Increases the current budget by `amount`.
@@ -611,6 +679,20 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
     /// enables budgeting.
     pub fn increase_budget(&mut self, amount: usize) {
         self.budget.allocate(amount);
+    }
+
+    pub fn prepare_call(
+        &mut self,
+        function: &Rooted<Function>,
+        arity: Arity,
+    ) -> Result<(), ExecutionError> {
+        let Some(body) = function.body(arity) else {
+            return Err(ExecutionError::Exception(
+                Fault::IncorrectNumberOfArguments.as_exception(self),
+            ));
+        };
+        let code = self.push_code(body, Some(function));
+        self.prepare_owned(code)
     }
 
     /// Invokes a public function at path `name` with the given parameters.
@@ -2083,6 +2165,10 @@ impl Function {
     #[must_use]
     pub const fn name(&self) -> &Option<Symbol> {
         &self.name
+    }
+
+    pub fn body(&self, arity: Arity) -> Option<&Code> {
+        self.bodies.get(&arity)
     }
 }
 
