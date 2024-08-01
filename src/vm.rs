@@ -308,6 +308,18 @@ impl Vm {
     }
 }
 
+impl Debug for Vm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("Vm");
+        if let Some(memory) = self.memory.0.try_lock() {
+            s.field("stack_frames", &memory.frames.len())
+                .field("budget", &memory.budget);
+        }
+
+        s.finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone)]
 struct RegisteredCode {
     code: Code,
