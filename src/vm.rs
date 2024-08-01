@@ -132,10 +132,20 @@ impl Vm {
         Ok(self.execute(&code, guard)?)
     }
 
+    /// Prepares to execute `code`.
+    ///
+    /// This function does not actually execute any code. A call to
+    /// [`resume`](Self::resume)/[`resume_async`](Self::resume_async) is needed
+    /// to begin executing the function call.
     pub fn prepare(&self, code: &Code, guard: &mut CollectionGuard) -> Result<(), ExecutionError> {
         self.context(guard).prepare(code)
     }
 
+    /// Prepares to execute the function body with `arity` arguments.
+    ///
+    /// This function does not actually execute any code. A call to
+    /// [`resume`](Self::resume)/[`resume_async`](Self::resume_async) is needed
+    /// to begin executing the function call.
     pub fn prepare_call(
         &self,
         function: &Rooted<Function>,
@@ -183,6 +193,11 @@ impl Vm {
         self.context(guard).resume()
     }
 
+    /// Resumes executing the currently executing code until `instant`.
+    ///
+    /// This should only be called if an [`ExecutionError::Waiting`],
+    /// [`ExecutionError::NoBudget`], or [`ExecutionError::Timeout`] was
+    /// returned when executing code.
     pub fn resume_until(
         &mut self,
         instant: Instant,
@@ -191,6 +206,12 @@ impl Vm {
         self.context(guard).resume_until(instant)
     }
 
+    /// Resumes executing the currently executing code until `duration` as
+    /// elapsed.
+    ///
+    /// This should only be called if an [`ExecutionError::Waiting`],
+    /// [`ExecutionError::NoBudget`], or [`ExecutionError::Timeout`] was
+    /// returned when executing code.
     pub fn resume_for(
         &mut self,
         duration: Duration,
@@ -220,6 +241,12 @@ impl Vm {
         self.context(guard).resume_async()
     }
 
+    /// Resumes executing the currently executing code until `duration` as
+    /// elapsed.
+    ///
+    /// This should only be called if an [`ExecutionError::Waiting`],
+    /// [`ExecutionError::NoBudget`], or [`ExecutionError::Timeout`] was
+    /// returned when executing code.
     pub fn resume_for_async<'context, 'guard>(
         &'context self,
         duration: Duration,
@@ -228,6 +255,11 @@ impl Vm {
         self.context(guard).resume_for_async(duration)
     }
 
+    /// Resumes executing the currently executing code until `instant`.
+    ///
+    /// This should only be called if an [`ExecutionError::Waiting`],
+    /// [`ExecutionError::NoBudget`], or [`ExecutionError::Timeout`] was
+    /// returned when executing code.
     pub fn resume_until_async<'context, 'guard>(
         &'context self,
         instant: Instant,
@@ -350,6 +382,18 @@ impl Vm {
         guard: &mut CollectionGuard<'_>,
     ) -> Result<Option<Value>, Fault> {
         VmContext::new(self, guard).declare_function(function)
+    }
+}
+
+impl Debug for Vm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("Vm");
+        if let Some(memory) = self.memory.0.try_lock() {
+            s.field("stack_frames", &memory.frames.len())
+                .field("budget", &memory.budget);
+        }
+
+        s.finish_non_exhaustive()
     }
 }
 
@@ -510,6 +554,38 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         &mut self.vm
     }
 
+    /// Returns a new virtual machine with the same modules and registered code.
+    ///
+    /// All registers, stack values, and stack frames will be empty on the new
+    /// Vm.
+    pub fn cloned_vm(&self) -> Vm {
+        let parker = Parker::new();
+        let unparker = parker.unparker().clone();
+        Vm {
+            memory: Root::new(
+                VmMemory(Mutex::new(VmState {
+                    registers: array::from_fn(|_| Value::Nil),
+                    stack: Vec::new(),
+                    max_stack: self.vm.max_stack,
+                    frames: vec![Frame::default()],
+                    current_frame: 0,
+                    has_anonymous_frame: false,
+                    max_depth: self.vm.max_depth,
+                    counter: self.vm.steps_per_charge,
+                    steps_per_charge: self.vm.steps_per_charge,
+                    budget: Budget::default(),
+                    execute_until: None,
+                    modules: self.vm.modules.clone(),
+                    waker: Waker::from(Arc::new(VmWaker(unparker))),
+                    parker,
+                    code: self.vm.code.clone(),
+                    code_map: self.vm.code_map.clone(),
+                })),
+                self.guard(),
+            ),
+        }
+    }
+
     /// Returns the access to allow the caller of the current function.
     #[must_use]
     pub fn caller_access_level(&self, module: &Dynamic<Module>) -> Access {
@@ -563,6 +639,11 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
             })
     }
 
+    /// Prepares to execute `code`.
+    ///
+    /// This function does not actually execute any code. A call to
+    /// [`resume`](Self::resume)/[`resume_async`](Self::resume_async) is needed
+    /// to begin executing the function call.
     pub fn prepare(&mut self, code: &Code) -> Result<(), ExecutionError> {
         let code = self.push_code(code, None);
         self.prepare_owned(code)
@@ -619,11 +700,22 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         }
     }
 
+    /// Resumes executing the currently executing code until `instant`.
+    ///
+    /// This should only be called if an [`ExecutionError::Waiting`],
+    /// [`ExecutionError::NoBudget`], or [`ExecutionError::Timeout`] was
+    /// returned when executing code.
     pub fn resume_until(&mut self, instant: Instant) -> Result<Value, ExecutionError> {
         self.execute_until = Some(instant);
         self.resume()
     }
 
+    /// Resumes executing the currently executing code until `duration` as
+    /// elapsed.
+    ///
+    /// This should only be called if an [`ExecutionError::Waiting`],
+    /// [`ExecutionError::NoBudget`], or [`ExecutionError::Timeout`] was
+    /// returned when executing code.
     pub fn resume_for(&mut self, duration: Duration) -> Result<Value, ExecutionError> {
         self.resume_until(Instant::now() + duration)
     }
@@ -664,10 +756,21 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         ExecuteAsync(self)
     }
 
+    /// Resumes executing the currently executing code until `duration` as
+    /// elapsed.
+    ///
+    /// This should only be called if an [`ExecutionError::Waiting`],
+    /// [`ExecutionError::NoBudget`], or [`ExecutionError::Timeout`] was
+    /// returned when executing code.
     pub fn resume_for_async(self, duration: Duration) -> ExecuteAsync<'context, 'guard> {
         self.resume_until_async(Instant::now() + duration)
     }
 
+    /// Resumes executing the currently executing code until `instant`.
+    ///
+    /// This should only be called if an [`ExecutionError::Waiting`],
+    /// [`ExecutionError::NoBudget`], or [`ExecutionError::Timeout`] was
+    /// returned when executing code.
     pub fn resume_until_async(mut self, instant: Instant) -> ExecuteAsync<'context, 'guard> {
         self.execute_until = Some(instant);
         self.resume_async()
@@ -681,6 +784,11 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         self.budget.allocate(amount);
     }
 
+    /// Prepares to execute the function body with `arity` arguments.
+    ///
+    /// This function does not actually execute any code. A call to
+    /// [`resume`](Self::resume)/[`resume_async`](Self::resume_async) is needed
+    /// to begin executing the function call.
     pub fn prepare_call(
         &mut self,
         function: &Rooted<Function>,
@@ -2167,6 +2275,8 @@ impl Function {
         &self.name
     }
 
+    /// Returns the code of the body for a given number of arguments, if
+    /// present.
     pub fn body(&self, arity: Arity) -> Option<&Code> {
         self.bodies.get(&arity)
     }

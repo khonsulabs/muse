@@ -283,6 +283,7 @@ pub struct RuntimeEnum {
 }
 
 impl RuntimeEnum {
+    #[cfg(feature = "dispatched")]
     pub(crate) fn to_bitcode_type(&self, guard: &CollectionGuard) -> BitcodeEnum {
         BitcodeEnum {
             name: self.ty.name.clone(),

@@ -89,6 +89,12 @@ impl From<()> for ValueOrSource {
     }
 }
 
+impl From<Arity> for ValueOrSource {
+    fn from(value: Arity) -> Self {
+        Self::from(value.0)
+    }
+}
+
 impl TryFrom<Literal> for ValueOrSource {
     type Error = Symbol;
 

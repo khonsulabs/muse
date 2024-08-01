@@ -22,8 +22,11 @@ use crate::runtime::string::MuseString;
 use crate::runtime::symbol::{Symbol, SymbolList, SymbolRef};
 use crate::vm::{Arity, ExecutionError, Fault, VmContext};
 
+#[cfg(feature = "dispatched")]
 use crate::runtime::types::{RuntimeEnum, RuntimeStruct};
+#[cfg(feature = "dispatched")]
 use crate::vm::bitcode::{BitcodeFunction, ValueOrSource};
+#[cfg(feature = "dispatched")]
 use crate::vm::Function;
 
 /// A Muse virtual machine value.
@@ -1081,6 +1084,7 @@ impl Value {
         }
     }
 
+    #[cfg(feature = "dispatched")]
     pub(crate) fn as_source(&self, guard: &CollectionGuard<'_>) -> ValueOrSource {
         match self {
             Value::Nil => ValueOrSource::Nil,
