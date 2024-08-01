@@ -2323,7 +2323,8 @@ impl<'a> Scope<'a> {
                 ValueOrSource::Stack(self.compile_expression_into_temporary(source))
             }
             Expression::Macro(_) | Expression::InfixMacro(_) => {
-                unreachable!("macros should be expanded already")
+                // unreachable!("macros should be expanded already")
+                ValueOrSource::Nil
             }
         }
     }

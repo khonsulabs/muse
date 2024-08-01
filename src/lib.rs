@@ -20,6 +20,8 @@ mod tests;
 
 use compiler::syntax::Ranged;
 pub use refuse;
+use refuse::Trace;
+use vm::ExecutionError;
 
 /// Summarizes an error's kind.
 pub trait ErrorKind {
@@ -45,5 +47,15 @@ impl From<Vec<Ranged<compiler::Error>>> for Error {
 impl From<vm::ExecutionError> for Error {
     fn from(value: vm::ExecutionError) -> Self {
         Self::Execution(value)
+    }
+}
+
+impl Trace for Error {
+    const MAY_CONTAIN_REFERENCES: bool = true;
+
+    fn trace(&self, tracer: &mut refuse::Tracer) {
+        if let Error::Execution(ExecutionError::Exception(exc)) = self {
+            exc.trace(tracer);
+        }
     }
 }

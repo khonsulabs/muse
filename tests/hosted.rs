@@ -11,6 +11,7 @@ use muse::runtime::exception::Exception;
 use muse::runtime::symbol::Symbol;
 use muse::runtime::value::{CustomType, RustFunction, RustType, Value};
 use muse::vm::{ExecutionError, Fault, Register, Vm, VmContext};
+use muse::Error;
 use refuse::{CollectionGuard, Trace};
 
 fn main() {
@@ -105,13 +106,26 @@ fn run_test_cases(path: &Path, filter: &str) {
                         .try_upgrade(vm.guard())?;
 
                     vm.while_unlocked(|guard| {
-                        let code = Compiler::compile(&*code, guard).unwrap();
+                        let code = match Compiler::compile(&*code, guard) {
+                            Ok(code) => code,
+                            Err(err) => {
+                                return Err(Fault::Exception(Value::dynamic(
+                                    TestError {
+                                        err: Error::Compilation(err),
+                                        name,
+                                        offset,
+                                        source,
+                                    },
+                                    guard,
+                                )))
+                            }
+                        };
                         let sandbox = Vm::new(guard);
                         match sandbox.execute(&code, guard) {
                             Ok(result) => Ok(result),
                             Err(err) => Err(Fault::Exception(Value::dynamic(
                                 TestError {
-                                    err,
+                                    err: Error::Execution(err),
                                     name,
                                     offset,
                                     source,
@@ -153,43 +167,56 @@ fn run_test_cases(path: &Path, filter: &str) {
                 .expect("expected name to be a symbol");
             eprintln!("error in {name} @ {path}:{line_number}");
 
-            let ExecutionError::Exception(inner_exception) = &exc.err else {
-                unreachable!("expected inner error to be exception")
-            };
-
-            if let Some(inner_exception) = inner_exception.as_rooted::<Exception>(context.guard()) {
-                eprintln!("exception: {exc:?}", exc = inner_exception.value());
-                let Some(source) = exc
-                    .source
-                    .to_string(&mut context)
-                    .ok()
-                    .and_then(|source| source.upgrade(context.guard()))
-                else {
-                    unreachable!("source was not a string")
-                };
-                let mut line_offset = 0;
-                let line_ends = source
-                    .lines()
-                    .map(|line| {
-                        line_offset += line.len();
-                        line_offset
-                    })
-                    .collect::<Vec<_>>();
-                for frame in inner_exception.backtrace() {
-                    let Some(range) = frame.source_range() else {
-                        continue;
-                    };
-                    let frame_line = line_number
-                        + line_ends
-                            .iter()
-                            .copied()
-                            .enumerate()
-                            .find_map(|(index, offset)| (range.start < offset).then_some(index))
-                            .unwrap_or(line_ends.len());
-                    eprintln!("in {path}:{frame_line}");
+            match &exc.err {
+                Error::Compilation(err) => {
+                    for err in err {
+                        eprintln!("{} @ {}..{}", err.0, err.range().start, err.range().end());
+                    }
                 }
-            } else {
-                eprintln!("exception: {inner_exception:?}");
+                Error::Execution(err) => {
+                    let ExecutionError::Exception(inner_exception) = &err else {
+                        unreachable!("expected inner error to be exception")
+                    };
+
+                    if let Some(inner_exception) =
+                        inner_exception.as_rooted::<Exception>(context.guard())
+                    {
+                        eprintln!("exception: {exc:?}", exc = inner_exception.value());
+                        let Some(source) = exc
+                            .source
+                            .to_string(&mut context)
+                            .ok()
+                            .and_then(|source| source.upgrade(context.guard()))
+                        else {
+                            unreachable!("source was not a string")
+                        };
+                        let mut line_offset = 0;
+                        let line_ends = source
+                            .lines()
+                            .map(|line| {
+                                line_offset += line.len();
+                                line_offset
+                            })
+                            .collect::<Vec<_>>();
+                        for frame in inner_exception.backtrace() {
+                            let Some(range) = frame.source_range() else {
+                                continue;
+                            };
+                            let frame_line = line_number
+                                + line_ends
+                                    .iter()
+                                    .copied()
+                                    .enumerate()
+                                    .find_map(|(index, offset)| {
+                                        (range.start < offset).then_some(index)
+                                    })
+                                    .unwrap_or(line_ends.len());
+                            eprintln!("in {path}:{frame_line}");
+                        }
+                    } else {
+                        eprintln!("exception: {inner_exception:?}");
+                    }
+                }
             }
 
             exit(-1);
@@ -200,7 +227,7 @@ fn run_test_cases(path: &Path, filter: &str) {
 
 #[derive(Debug, Trace)]
 struct TestError {
-    err: ExecutionError,
+    err: Error,
     name: Value,
     offset: Value,
     source: Value,

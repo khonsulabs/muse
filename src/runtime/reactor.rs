@@ -13,11 +13,12 @@ use std::{
     },
     task::{Context, Poll, Wake, Waker},
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use alot::{LotId, Lots};
-use flume::{Receiver, Sender, TryRecvError};
+use crossbeam_utils::sync::{Parker, Unparker};
+use flume::{Receiver, SendError, Sender, TryRecvError};
 use kempt::{Map, Set};
 use parking_lot::{Condvar, Mutex};
 use refuse::{CollectionGuard, Trace};
@@ -98,39 +99,166 @@ where
             .unwrap_or_else(|| String::from("muse-reactor"));
 
         let mut threads = Vec::with_capacity(self.threads);
-        let shutdown = Arc::new(AtomicBool::new(false));
+        let shared = Arc::new(SharedReactorData {
+            shutdown: AtomicBool::new(false),
+        });
 
-        let reactor = Reactor {
-            receiver,
-            shutdown: shutdown.clone(),
-            vm_source: self.vm_source.unwrap_or_else(|| Arc::new(())),
-            handle: ReactorHandle {
-                data: Arc::new(HandleData {
-                    sender,
-                    shutdown,
-                    threads: Mutex::new(Vec::new()),
-                    next_task_id: AtomicUsize::new(0),
-                }),
-            },
+        let vm_source = self.vm_source.unwrap_or_else(|| Arc::new(()));
+
+        let handle = ReactorHandle {
+            data: Arc::new(HandleData {
+                sender,
+                shared,
+                threads: Arc::default(),
+                next_task_id: AtomicUsize::new(0),
+            }),
         };
 
-        for _ in 0..self.threads {
-            let reactor = reactor.clone();
-            threads.push(
-                thread::Builder::new()
+        for num in 0..self.threads {
+            let (spawn_send, spawn_recv) = flume::unbounded();
+            let parker = Parker::new();
+            let data = Arc::new(PerThreadData::new(parker.unparker().clone()));
+            let reactor = Reactor {
+                receiver: spawn_recv,
+                vm_source: vm_source.clone(),
+                handle: handle.clone(),
+            };
+            threads.push(PerThread {
+                num,
+                data: data.clone(),
+                spawner: spawn_send,
+                handle: thread::Builder::new()
                     .name(thread_name.clone())
-                    .spawn(move || reactor.run())
+                    .spawn(move || reactor.run(num, data, parker))
                     .expect("error spawning thread"),
-            );
+            });
         }
 
-        reactor.handle
+        *handle.data.threads.lock() = threads;
+
+        thread::Builder::new()
+            .name(String::from("dispatcher"))
+            .spawn({
+                let handle = handle.clone();
+                move || Dispatcher::new(receiver, handle).run()
+            })
+            .expect("error spawning dispatcher");
+
+        handle
+    }
+}
+
+struct DispatcherThread<Work> {
+    spawner: Sender<Command<Work>>,
+    load: usize,
+    unparker: Unparker,
+    num: usize,
+}
+
+struct Dispatcher<Work> {
+    spawns: Receiver<Command<Work>>,
+    handle: ReactorHandle<Work>,
+    threads: VecDeque<DispatcherThread<Work>>,
+    next_rebalance: Instant,
+}
+
+impl<Work> Dispatcher<Work> {
+    const REBALANCE_DELAY: Duration = Duration::from_millis(30);
+
+    fn new(spawns: Receiver<Command<Work>>, handle: ReactorHandle<Work>) -> Self {
+        let mut this = Self {
+            spawns,
+            handle,
+            threads: VecDeque::new(),
+            next_rebalance: Instant::now(),
+        };
+        this.cache_thread_loads(this.next_rebalance);
+        this
+    }
+
+    fn cache_thread_loads(&mut self, now: Instant) {
+        let threads = self.handle.data.threads.lock();
+        self.threads.clear();
+        for t in &*threads {
+            self.threads.push_back(DispatcherThread {
+                num: t.num,
+                spawner: t.spawner.clone(),
+                load: t.spawner.len() * 2
+                    + t.data.executing.load(Ordering::Relaxed)
+                    + t.data.total.load(Ordering::Relaxed),
+                unparker: t.data.unparker.clone(),
+            });
+        }
+        for i in 0..self.threads.len() {
+            for j in i + 1..self.threads.len() {
+                if self.threads[j].load < self.threads[i].load {
+                    self.threads.swap(i, j);
+                }
+            }
+        }
+        self.next_rebalance = now + Self::REBALANCE_DELAY;
+    }
+
+    fn run(mut self) {
+        while let Ok(mut work) = self.spawns.recv() {
+            // We loop in case a thread dies.
+            loop {
+                let Some(thread) = self.threads.front_mut() else {
+                    return;
+                };
+
+                match thread.spawner.send(work) {
+                    Ok(()) => {
+                        thread.unparker.unpark();
+                        thread.load += 1;
+                        let new_load = thread.load;
+                        println!("Spawned on {} - new load {new_load}", thread.num);
+                        if let Some(next_load) = self
+                            .threads
+                            .get(1)
+                            .and_then(|next| (next.load < new_load).then_some(next.load))
+                        {
+                            // The next thread has a load lower than the current
+                            // thread after this spawn. We need to find a new
+                            // place for this thread. To avoid moving the buffer
+                            // too much we are going to scan to find the right
+                            // location.
+                            //
+                            // First, find the next highest load after the new
+                            // "front" load `next_load`.
+                            match self.threads.iter().enumerate().skip(2).find_map(
+                                |(index, thread)| (next_load < thread.load).then_some(index),
+                            ) {
+                                Some(insert_at) => {
+                                    let current =
+                                        self.threads.pop_front().expect("already checked");
+                                    self.threads.insert(insert_at, current);
+                                }
+                                None => {
+                                    // Move to the end.
+                                    self.threads.rotate_left(1);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    Err(SendError(returned_work)) => {
+                        work = returned_work;
+                        self.threads.remove(0);
+                    }
+                }
+
+                let now = Instant::now();
+                if now > self.next_rebalance {
+                    self.cache_thread_loads(now);
+                }
+            }
+        }
     }
 }
 
 pub struct Reactor<Work = NoWork> {
     receiver: Receiver<Command<Work>>,
-    shutdown: Arc<AtomicBool>,
     vm_source: Arc<dyn NewVm<Work>>,
     handle: ReactorHandle<Work>,
 }
@@ -145,9 +273,9 @@ impl<Work> Reactor<Work>
 where
     Work: WorkUnit,
 {
-    fn run(self) {
-        let mut tasks = ReactorTasks::default();
-        while !self.shutdown.load(Ordering::Relaxed) {
+    fn run(self, thread_num: usize, data: Arc<PerThreadData>, parker: Parker) {
+        let mut tasks = ReactorTasks::new(data);
+        while !self.handle.data.shared.shutdown.load(Ordering::Relaxed) {
             tasks.wake_woken();
             let mut guard = CollectionGuard::acquire();
             for _ in 0..tasks.executing.len() {
@@ -202,29 +330,35 @@ where
                 Err(TryRecvError::Empty) => {}
                 Err(_) => break,
             }
+
+            if tasks.executing.is_empty() {
+                let woken = tasks.woken.tasks.lock();
+                if woken.is_empty() {
+                    drop(woken);
+                    println!("Parking {thread_num}");
+                    guard.while_unlocked(|| parker.park());
+                    println!("Unparked {thread_num}");
+                }
+            }
         }
     }
 }
 
-impl<Work> Clone for Reactor<Work> {
-    fn clone(&self) -> Self {
-        Self {
-            receiver: self.receiver.clone(),
-            shutdown: self.shutdown.clone(),
-            vm_source: self.vm_source.clone(),
-            handle: self.handle.clone(),
-        }
-    }
+struct WokenTasks {
+    tasks: Mutex<Set<usize>>,
+    data: Arc<PerThreadData>,
 }
 
 struct ReactorTaskWaker {
     task: usize,
-    woken: Arc<Mutex<Set<usize>>>,
+    woken: Arc<WokenTasks>,
 }
 
 impl Wake for ReactorTaskWaker {
     fn wake(self: Arc<Self>) {
-        self.woken.lock().insert(self.task);
+        if self.woken.tasks.lock().insert(self.task) {
+            self.woken.data.unparker.unpark();
+        }
     }
 }
 
@@ -322,15 +456,25 @@ struct ReactorTask {
     result: ResultHandle,
 }
 
-#[derive(Default)]
 struct ReactorTasks {
     all: Lots<ReactorTask>,
     executing: VecDeque<LotId>,
     registered: Map<usize, LotId>,
-    woken: Arc<Mutex<Set<usize>>>,
+    woken: Arc<WokenTasks>,
 }
 
 impl ReactorTasks {
+    fn new(data: Arc<PerThreadData>) -> Self {
+        Self {
+            all: Lots::default(),
+            executing: VecDeque::default(),
+            registered: Map::default(),
+            woken: Arc::new(WokenTasks {
+                tasks: Mutex::default(),
+                data,
+            }),
+        }
+    }
     fn push(&mut self, global_id: usize, vm: Vm, result: ResultHandle) -> LotId {
         let id = self.all.push(ReactorTask {
             vm,
@@ -356,7 +500,7 @@ impl ReactorTasks {
     }
 
     fn wake_woken(&mut self) {
-        let mut woken = self.woken.lock();
+        let mut woken = self.woken.tasks.lock();
         for woken in woken.drain() {
             let Some(id) = self.registered.get(&woken).copied() else {
                 continue;
@@ -454,14 +598,18 @@ impl<Work> ReactorHandle<Work> {
     pub fn shutdown(&self) -> Result<(), Box<dyn Any + Send + 'static>> {
         if self
             .data
+            .shared
             .shutdown
             .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed)
             .is_ok()
         {
             let mut threads = self.data.threads.lock();
 
+            for thread in &*threads {
+                thread.data.unparker.unpark();
+            }
             while let Some(thread) = threads.pop() {
-                thread.join()?;
+                thread.handle.join()?;
             }
         }
 
@@ -478,10 +626,40 @@ impl<Work> Clone for ReactorHandle<Work> {
 }
 
 #[derive(Debug)]
+struct SharedReactorData {
+    shutdown: AtomicBool,
+}
+
+#[derive(Debug)]
+struct PerThread<Work> {
+    num: usize,
+    spawner: Sender<Command<Work>>,
+    handle: JoinHandle<()>,
+    data: Arc<PerThreadData>,
+}
+
+#[derive(Debug)]
+struct PerThreadData {
+    unparker: Unparker,
+    executing: AtomicUsize,
+    total: AtomicUsize,
+}
+
+impl PerThreadData {
+    fn new(unparker: Unparker) -> Self {
+        Self {
+            unparker,
+            executing: AtomicUsize::new(0),
+            total: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct HandleData<Work> {
     sender: Sender<Command<Work>>,
-    threads: Mutex<Vec<JoinHandle<()>>>,
-    shutdown: Arc<AtomicBool>,
+    threads: Arc<Mutex<Vec<PerThread<Work>>>>,
+    shared: Arc<SharedReactorData>,
     next_task_id: AtomicUsize,
 }
 
@@ -651,10 +829,10 @@ fn spawning() {
                     },
                 };
 
-                recurse_spawn(5)
+                recurse_spawn(100)
             ",
         )
         .unwrap();
     let result = task.join().unwrap();
-    assert_eq!(result, Value::Int(5 + 4 + 3 + 2 + 1));
+    assert_eq!(result, Value::Int((0..=100).sum()));
 }
