@@ -488,6 +488,11 @@ impl VmState {
     pub fn current_module(&self) -> ModuleId {
         self.frames[self.current_frame].module
     }
+
+    /// Returns the root module for this virtual machine.
+    pub fn root_module(&self) -> Dynamic<Module> {
+        self.modules[0]
+    }
 }
 
 impl Index<Register> for VmState {
@@ -2630,35 +2635,33 @@ pub struct Module {
 }
 
 impl Module {
+    /// Returns a new module whose `super` is `parent`.
+    pub const fn new(parent: Option<Dynamic<Module>>) -> Self {
+        Self {
+            parent,
+            declarations: Mutex::new(Map::new()),
+        }
+    }
+
     /// Returns a new module with the built-in `core` module loaded.
     #[must_use]
     pub fn with_core(guard: &CollectionGuard) -> Dynamic<Self> {
         let module = Dynamic::new(Self::default(), guard);
 
-        let core = Self {
-            parent: Some(module),
-            ..Self::core()
-        };
+        let core = Self::core(Some(module));
 
-        module
-            .load(guard)
-            .expect("guard held")
-            .declarations()
-            .insert(
-                SymbolRef::from("core"),
-                ModuleDeclaration {
-                    mutable: false,
-                    value: Value::dynamic(core, guard),
-                    access: Access::Public,
-                },
-            );
+        module.load(guard).expect("guard held").declare(
+            "core",
+            Access::Public,
+            Value::dynamic(core, guard),
+        );
 
         module
     }
 
     /// Returns the default `core` module.
-    pub fn core() -> Self {
-        let core = Self::default();
+    pub fn core(parent: Option<Dynamic<Module>>) -> Self {
+        let core = Self::new(parent);
 
         let mut declarations = core.declarations();
         declarations.insert(
@@ -2692,6 +2695,30 @@ impl Module {
 
     fn declarations(&self) -> MutexGuard<'_, Map<SymbolRef, ModuleDeclaration>> {
         self.declarations.lock()
+    }
+
+    /// Declares a new read-only variable in this module.
+    pub fn declare(&self, name: impl Into<SymbolRef>, access: Access, value: Value) {
+        self.declarations().insert(
+            name.into(),
+            ModuleDeclaration {
+                access,
+                mutable: false,
+                value,
+            },
+        );
+    }
+
+    /// Declares a new mutable variable in this module.
+    pub fn declare_mut(&self, name: impl Into<SymbolRef>, access: Access, value: Value) {
+        self.declarations().insert(
+            name.into(),
+            ModuleDeclaration {
+                access,
+                mutable: true,
+                value,
+            },
+        );
     }
 }
 

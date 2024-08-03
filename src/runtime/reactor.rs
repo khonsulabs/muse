@@ -26,10 +26,16 @@ use refuse::{CollectionGuard, Trace};
 use crate::{
     compiler::{self, syntax::Ranged, Compiler},
     runtime::value::RustType,
-    vm::{Code, ExecutionError, Fault, Vm},
+    vm::{
+        bitcode::Access, Arity, Code, ExecutionError, Fault, Function, Module, Register, Vm,
+        VmContext,
+    },
 };
 
-use super::value::{CustomType, Value};
+use super::{
+    list::List,
+    value::{CustomType, Dynamic, Rooted, RootedValue, RustFunction, Value},
+};
 
 pub struct Builder<Work> {
     vm_source: Option<Arc<dyn NewVm<Work>>>,
@@ -114,7 +120,7 @@ where
             }),
         };
 
-        for num in 0..self.threads {
+        for _ in 0..self.threads {
             let (spawn_send, spawn_recv) = flume::unbounded();
             let parker = Parker::new();
             let data = Arc::new(PerThreadData::new(parker.unparker().clone()));
@@ -124,12 +130,11 @@ where
                 handle: handle.clone(),
             };
             threads.push(PerThread {
-                num,
                 data: data.clone(),
                 spawner: spawn_send,
                 handle: thread::Builder::new()
                     .name(thread_name.clone())
-                    .spawn(move || reactor.run(num, data, parker))
+                    .spawn(move || reactor.run(data, parker))
                     .expect("error spawning thread"),
             });
         }
@@ -149,14 +154,13 @@ where
 }
 
 struct DispatcherThread<Work> {
-    spawner: Sender<Command<Work>>,
+    spawner: Sender<Spawn<Work>>,
     load: usize,
     unparker: Unparker,
-    num: usize,
 }
 
 struct Dispatcher<Work> {
-    spawns: Receiver<Command<Work>>,
+    spawns: Receiver<Spawn<Work>>,
     handle: ReactorHandle<Work>,
     threads: VecDeque<DispatcherThread<Work>>,
     next_rebalance: Instant,
@@ -165,7 +169,7 @@ struct Dispatcher<Work> {
 impl<Work> Dispatcher<Work> {
     const REBALANCE_DELAY: Duration = Duration::from_millis(30);
 
-    fn new(spawns: Receiver<Command<Work>>, handle: ReactorHandle<Work>) -> Self {
+    fn new(spawns: Receiver<Spawn<Work>>, handle: ReactorHandle<Work>) -> Self {
         let mut this = Self {
             spawns,
             handle,
@@ -181,7 +185,6 @@ impl<Work> Dispatcher<Work> {
         self.threads.clear();
         for t in &*threads {
             self.threads.push_back(DispatcherThread {
-                num: t.num,
                 spawner: t.spawner.clone(),
                 load: t.spawner.len() * 2
                     + t.data.executing.load(Ordering::Relaxed)
@@ -212,7 +215,6 @@ impl<Work> Dispatcher<Work> {
                         thread.unparker.unpark();
                         thread.load += 1;
                         let new_load = thread.load;
-                        println!("Spawned on {} - new load {new_load}", thread.num);
                         if let Some(next_load) = self
                             .threads
                             .get(1)
@@ -258,14 +260,18 @@ impl<Work> Dispatcher<Work> {
 }
 
 pub struct Reactor<Work = NoWork> {
-    receiver: Receiver<Command<Work>>,
+    receiver: Receiver<Spawn<Work>>,
     vm_source: Arc<dyn NewVm<Work>>,
     handle: ReactorHandle<Work>,
 }
 
 impl Reactor<NoWork> {
     pub fn new() -> ReactorHandle<NoWork> {
-        Builder::new().finish()
+        Self::build().finish()
+    }
+
+    pub fn build() -> Builder<NoWork> {
+        Builder::new()
     }
 }
 
@@ -273,7 +279,7 @@ impl<Work> Reactor<Work>
 where
     Work: WorkUnit,
 {
-    fn run(self, thread_num: usize, data: Arc<PerThreadData>, parker: Parker) {
+    fn run(self, data: Arc<PerThreadData>, parker: Parker) {
         let mut tasks = ReactorTasks::new(data);
         while !self.handle.data.shared.shutdown.load(Ordering::Relaxed) {
             tasks.wake_woken();
@@ -314,11 +320,15 @@ where
 
             match self.receiver.try_recv() {
                 Ok(command) => {
-                    let vm = match command.kind {
+                    let vm = match command.what {
                         Spawnable::Spawn(vm) => Ok(vm),
                         Spawnable::SpawnSource(source) => {
                             self.vm_source
                                 .compile_and_prepare(&source, &mut guard, &self.handle)
+                        }
+                        Spawnable::SpawnCall(code, args) => {
+                            self.vm_source
+                                .prepare_call(code, args, &mut guard, &self.handle)
                         }
                         Spawnable::SpawnWork(work) => {
                             work.initialize(self.vm_source.as_ref(), &mut guard, &self.handle)
@@ -335,9 +345,7 @@ where
                 let woken = tasks.woken.tasks.lock();
                 if woken.is_empty() {
                     drop(woken);
-                    println!("Parking {thread_num}");
                     guard.while_unlocked(|| parker.park());
-                    println!("Unparked {thread_num}");
                 }
             }
         }
@@ -569,9 +577,53 @@ pub struct ReactorHandle<Work = NoWork> {
     data: Arc<HandleData<Work>>,
 }
 
-impl<Work> ReactorHandle<Work> {
+impl<Work> ReactorHandle<Work>
+where
+    Work: WorkUnit,
+{
+    pub fn runtime_module_in(
+        &self,
+        parent: Dynamic<Module>,
+        guard: &CollectionGuard<'_>,
+    ) -> Rooted<Module> {
+        let reactor = self.clone();
+        let module = Rooted::new(Module::new(Some(parent)), guard);
+        module.declare(
+            "spawn_call",
+            Access::Public,
+            Value::dynamic(
+                RustFunction::new(move |ctx: &mut VmContext<'_, '_>, arity: Arity| {
+                    if arity == 2 {
+                        let vm = ctx.cloned_vm();
+                        vm.set_register(Register(0), ctx[Register(0)]);
+                        let f = ctx[Register(0)].as_rooted::<Function>(ctx.guard()).unwrap();
+                        let args = ctx[Register(1)]
+                            .as_downcast_ref::<List>(ctx.guard())
+                            .unwrap()
+                            .to_vec()
+                            .into_iter()
+                            .map(|v| v.upgrade(ctx.guard()).ok_or(Fault::ValueFreed))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        if let Some(code) =
+                            f.body(Arity::try_from(args.len()).map_err(|_| Fault::InvalidArity)?)
+                        {
+                            let task = reactor.spawn_call(code.clone(), args).unwrap();
+                            Ok(Value::dynamic(task, ctx.guard()))
+                        } else {
+                            Err(Fault::InvalidArity)
+                        }
+                    } else {
+                        Err(Fault::InvalidArity)
+                    }
+                }),
+                guard,
+            ),
+        );
+        module
+    }
+
     fn spawn_spawnable(&self, spawnable: Spawnable<Work>) -> Result<TaskHandle, ReactorShutdown> {
-        let command = Command::new(&self.data.next_task_id, spawnable);
+        let command = Spawn::new(&self.data.next_task_id, spawnable);
         let handle = TaskHandle {
             result: command.result.clone(),
             global_id: command.id,
@@ -589,6 +641,14 @@ impl<Work> ReactorHandle<Work> {
 
     pub fn spawn_source(&self, source: impl Into<String>) -> Result<TaskHandle, ReactorShutdown> {
         self.spawn_spawnable(Spawnable::SpawnSource(source.into()))
+    }
+
+    pub fn spawn_call(
+        &self,
+        code: Code,
+        args: Vec<RootedValue>,
+    ) -> Result<TaskHandle, ReactorShutdown> {
+        self.spawn_spawnable(Spawnable::SpawnCall(code, args))
     }
 
     pub fn spawn_work(&self, work: Work) -> Result<TaskHandle, ReactorShutdown> {
@@ -632,8 +692,7 @@ struct SharedReactorData {
 
 #[derive(Debug)]
 struct PerThread<Work> {
-    num: usize,
-    spawner: Sender<Command<Work>>,
+    spawner: Sender<Spawn<Work>>,
     handle: JoinHandle<()>,
     data: Arc<PerThreadData>,
 }
@@ -657,25 +716,25 @@ impl PerThreadData {
 
 #[derive(Debug)]
 struct HandleData<Work> {
-    sender: Sender<Command<Work>>,
+    sender: Sender<Spawn<Work>>,
     threads: Arc<Mutex<Vec<PerThread<Work>>>>,
     shared: Arc<SharedReactorData>,
     next_task_id: AtomicUsize,
 }
 
-struct Command<Work> {
+struct Spawn<Work> {
     id: usize,
-    kind: Spawnable<Work>,
+    what: Spawnable<Work>,
     result: ResultHandle,
 }
 
-impl<Work> Command<Work> {
+impl<Work> Spawn<Work> {
     fn new(ids: &AtomicUsize, kind: Spawnable<Work>) -> Self {
         let result = ResultHandle::default();
 
         Self {
             id: ids.fetch_add(1, Ordering::Acquire),
-            kind,
+            what: kind,
             result,
         }
     }
@@ -684,6 +743,7 @@ impl<Work> Command<Work> {
 enum Spawnable<Work> {
     Spawn(Vm),
     SpawnSource(String),
+    SpawnCall(Code, Vec<RootedValue>),
     SpawnWork(Work),
 }
 
@@ -707,6 +767,7 @@ impl From<Vec<Ranged<compiler::Error>>> for PrepareError {
 
 pub trait NewVm<Work>: Send + Sync + 'static {
     fn new_vm(&self, guard: &mut CollectionGuard<'_>, reactor: &ReactorHandle<Work>) -> Vm;
+
     fn compile_and_prepare(
         &self,
         source: &str,
@@ -716,6 +777,24 @@ pub trait NewVm<Work>: Send + Sync + 'static {
         let code = Compiler::default().with(source).build(guard)?;
         let vm = self.new_vm(guard, reactor);
         vm.prepare(&code, guard)?;
+        Ok(vm)
+    }
+
+    fn prepare_call(
+        &self,
+        code: Code,
+        args: Vec<RootedValue>,
+        guard: &mut CollectionGuard<'_>,
+        reactor: &ReactorHandle<Work>,
+    ) -> Result<Vm, PrepareError> {
+        let vm = self.new_vm(guard, reactor);
+        let mut ctx = vm.context(guard);
+        for (arg, reg) in args.into_iter().zip(0..=255) {
+            ctx[Register(reg)] = arg.downgrade();
+        }
+        ctx.prepare(&code)?;
+        drop(ctx);
+
         Ok(vm)
     }
 }
@@ -731,8 +810,14 @@ where
 }
 
 impl<Work: WorkUnit> NewVm<Work> for () {
-    fn new_vm(&self, guard: &mut CollectionGuard<'_>, _reactor: &ReactorHandle<Work>) -> Vm {
-        Vm::new(guard)
+    fn new_vm(&self, guard: &mut CollectionGuard<'_>, reactor: &ReactorHandle<Work>) -> Vm {
+        let locked_vm = Vm::new(guard);
+        let mut vm = locked_vm.context(guard);
+        let reactor_module = reactor.runtime_module_in(vm.root_module(), vm.guard());
+        vm.declare("task", Value::Dynamic(reactor_module.as_any_dynamic()))
+            .unwrap();
+        drop(vm);
+        locked_vm
     }
 }
 
@@ -781,55 +866,21 @@ fn works() {
 
 #[test]
 fn spawning() {
-    use crate::runtime::value::RustFunction;
-    use crate::vm::{Arity, Function, Register, VmContext};
-
-    fn add_spawn_function(vm: Vm, guard: &mut CollectionGuard<'_>, reactor: &ReactorHandle) -> Vm {
-        let reactor = reactor.clone();
-        vm.declare(
-            "spawn",
-            Value::dynamic(
-                RustFunction::new(move |ctx: &mut VmContext<'_, '_>, arity: Arity| {
-                    if arity == 2 {
-                        println!("Spawn called with {:?}", ctx[Register(0)]);
-                        let vm = ctx.cloned_vm();
-                        vm.set_register(Register(0), ctx[Register(0)]);
-                        let f = ctx[Register(1)].as_rooted::<Function>(ctx.guard()).unwrap();
-                        vm.prepare_call(&f, Arity(1), &mut CollectionGuard::acquire())
-                            .unwrap();
-                        Ok(Value::dynamic(reactor.spawn(vm).unwrap(), ctx.guard()))
-                    } else {
-                        Err(Fault::InvalidArity)
-                    }
-                }),
-                &guard,
-            ),
-            guard,
-        )
-        .unwrap();
-        vm
-    }
-
-    let reactor = Builder::new()
-        .new_vm(|guard: &mut CollectionGuard<'_>, reactor: &ReactorHandle| {
-            let vm = Vm::new(guard);
-            add_spawn_function(vm, guard, reactor)
-        })
-        .finish();
+    let reactor = Reactor::new();
     let task = reactor
         .spawn_source(
             r"
-                fn recurse_spawn {
-                    0 => 0,
-                    n => {
-                        let task = spawn(n, fn(n) {
-                            recurse_spawn(n - 1)
-                        });
-                        task() + n
-                    },
+                let func = fn(n, func) {
+                    match n {
+                        0 => 0,
+                        n => {
+                            let task = task.spawn_call(func, [n - 1, func]);
+                            task() + n
+                        }
+                    }
                 };
 
-                recurse_spawn(100)
+                func(100, func)
             ",
         )
         .unwrap();

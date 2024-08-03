@@ -50,6 +50,19 @@ pub enum Value {
 }
 
 impl Value {
+    /// Returns this value with any garbage collected values upgraded to root
+    /// references.
+    pub fn upgrade(&self, guard: &CollectionGuard<'_>) -> Option<RootedValue> {
+        match self {
+            Value::Nil => Some(RootedValue::Nil),
+            Value::Bool(v) => Some(RootedValue::Bool(*v)),
+            Value::Int(v) => Some(RootedValue::Int(*v)),
+            Value::UInt(v) => Some(RootedValue::UInt(*v)),
+            Value::Float(v) => Some(RootedValue::Float(*v)),
+            Value::Symbol(v) => v.upgrade(guard).map(RootedValue::Symbol),
+            Value::Dynamic(v) => v.upgrade(guard).map(RootedValue::Dynamic),
+        }
+    }
     /// Moves `value` into the virtual machine.
     pub fn dynamic<'guard, T>(value: T, guard: impl AsRef<CollectionGuard<'guard>>) -> Self
     where
@@ -1194,6 +1207,11 @@ impl AnyDynamic {
         Self(Ref::new(Custom(value), guard).as_any())
     }
 
+    /// Returns this dynamic upgraded to a root reference.
+    pub fn upgrade(&self, guard: &CollectionGuard<'_>) -> Option<AnyDynamicRoot> {
+        self.0.upgrade(guard).map(AnyDynamicRoot)
+    }
+
     /// Upgrades this reference to a [`Dynamic<T>`].
     ///
     /// This function does no type checking. If `T` is the incorrect type,
@@ -1591,11 +1609,35 @@ impl Debug for AnyDynamic {
         Debug::fmt(value, f)
     }
 }
+
 impl Trace for AnyDynamic {
     const MAY_CONTAIN_REFERENCES: bool = true;
 
     fn trace(&self, tracer: &mut refuse::Tracer) {
         self.0.trace(tracer);
+    }
+}
+
+/// A strong reference to a [`Rooted<T>`].
+#[derive(Clone)]
+pub struct AnyDynamicRoot(pub(crate) AnyRoot);
+
+impl ContainsNoRefs for AnyDynamicRoot {}
+
+impl Debug for AnyDynamicRoot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let guard = CollectionGuard::acquire();
+        let Some(value) = self.0.as_any().load_mapped::<dyn CustomType>(&guard) else {
+            return f.write_str("<Deallocated>");
+        };
+        Debug::fmt(value, f)
+    }
+}
+
+impl AnyDynamicRoot {
+    /// Returns a weak reference to this dynamic.
+    pub const fn downgrade(&self) -> AnyDynamic {
+        AnyDynamic(self.0.as_any())
     }
 }
 
@@ -1626,8 +1668,8 @@ where
 
     /// Returns this value as a typeless root reference.
     #[must_use]
-    pub fn into_any_root(self) -> AnyRoot {
-        self.0.into_any_root()
+    pub fn into_any_root(self) -> AnyDynamicRoot {
+        AnyDynamicRoot(self.0.into_any_root())
     }
 }
 
@@ -4042,4 +4084,39 @@ fn functions() {
         unreachable!()
     };
     assert_eq!(i, 1);
+}
+
+/// A Muse virtual machine value that holds strong references.
+#[derive(Default, Clone, Debug)]
+pub enum RootedValue {
+    /// A value representing nothing.
+    #[default]
+    Nil,
+    /// A boolean value.
+    Bool(bool),
+    /// A signed 64-bit integer.
+    Int(i64),
+    /// An unsigned 64-bit integer.
+    UInt(u64),
+    /// A double-preceision floating point number.
+    Float(f64),
+    /// A symbol.
+    Symbol(Symbol),
+    /// A dynamically allocated, garbage collected type.
+    Dynamic(AnyDynamicRoot),
+}
+
+impl RootedValue {
+    /// Returns this value with weak references to any garbage collected data.
+    pub fn downgrade(&self) -> Value {
+        match self {
+            RootedValue::Nil => Value::Nil,
+            RootedValue::Bool(v) => Value::Bool(*v),
+            RootedValue::Int(v) => Value::Int(*v),
+            RootedValue::UInt(v) => Value::UInt(*v),
+            RootedValue::Float(v) => Value::Float(*v),
+            RootedValue::Symbol(v) => Value::Symbol(v.downgrade()),
+            RootedValue::Dynamic(v) => Value::Dynamic(v.downgrade()),
+        }
+    }
 }
