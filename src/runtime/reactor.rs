@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 use std::{
     any::Any,
+    cell::Cell,
     collections::VecDeque,
     fmt::Debug,
     future::Future,
@@ -8,7 +9,7 @@ use std::{
     num::NonZeroUsize,
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     task::{Context, Poll, Wake, Waker},
@@ -21,7 +22,7 @@ use crossbeam_utils::sync::{Parker, Unparker};
 use flume::{Receiver, SendError, Sender, TryRecvError};
 use kempt::{Map, Set};
 use parking_lot::{Condvar, Mutex};
-use refuse::{CollectionGuard, Trace};
+use refuse::{CollectionGuard, ContainsNoRefs, Trace};
 
 use crate::{
     compiler::{self, syntax::Ranged, Compiler},
@@ -117,17 +118,20 @@ where
                 shared,
                 threads: Arc::default(),
                 next_task_id: AtomicUsize::new(0),
+                next_budget_pool_id: AtomicUsize::new(1),
             }),
         };
 
-        for _ in 0..self.threads {
+        for id in 0..self.threads {
             let (spawn_send, spawn_recv) = flume::unbounded();
             let parker = Parker::new();
             let data = Arc::new(PerThreadData::new(parker.unparker().clone()));
             let reactor = Reactor {
+                id,
                 receiver: spawn_recv,
                 vm_source: vm_source.clone(),
                 handle: handle.clone(),
+                budgets: Map::new(),
             };
             threads.push(PerThread {
                 data: data.clone(),
@@ -153,14 +157,19 @@ where
     }
 }
 
+enum ThreadCommand<Work> {
+    Spawn(Spawn<Work>),
+    NewBudgetPool(ReactorBudgetPool),
+}
+
 struct DispatcherThread<Work> {
-    spawner: Sender<Spawn<Work>>,
+    spawner: Sender<ThreadCommand<Work>>,
     load: usize,
     unparker: Unparker,
 }
 
 struct Dispatcher<Work> {
-    spawns: Receiver<Spawn<Work>>,
+    commands: Receiver<Command<Work>>,
     handle: ReactorHandle<Work>,
     threads: VecDeque<DispatcherThread<Work>>,
     next_rebalance: Instant,
@@ -169,9 +178,9 @@ struct Dispatcher<Work> {
 impl<Work> Dispatcher<Work> {
     const REBALANCE_DELAY: Duration = Duration::from_millis(30);
 
-    fn new(spawns: Receiver<Spawn<Work>>, handle: ReactorHandle<Work>) -> Self {
+    fn new(commands: Receiver<Command<Work>>, handle: ReactorHandle<Work>) -> Self {
         let mut this = Self {
-            spawns,
+            commands,
             handle,
             threads: VecDeque::new(),
             next_rebalance: Instant::now(),
@@ -203,56 +212,72 @@ impl<Work> Dispatcher<Work> {
     }
 
     fn run(mut self) {
-        while let Ok(mut work) = self.spawns.recv() {
-            // We loop in case a thread dies.
-            loop {
-                let Some(thread) = self.threads.front_mut() else {
-                    return;
-                };
+        while let Ok(command) = self.commands.recv() {
+            match command {
+                Command::NewBudgetPool(pool) => {
+                    self.threads.retain_mut(|th| {
+                        th.spawner
+                            .send(ThreadCommand::NewBudgetPool(pool.clone()))
+                            .is_ok()
+                    });
+                }
+                Command::Spawn(mut spawn) => {
+                    // We loop in case a thread dies.
+                    loop {
+                        let Some(thread) = self.threads.front_mut() else {
+                            return;
+                        };
 
-                match thread.spawner.send(work) {
-                    Ok(()) => {
-                        thread.unparker.unpark();
-                        thread.load += 1;
-                        let new_load = thread.load;
-                        if let Some(next_load) = self
-                            .threads
-                            .get(1)
-                            .and_then(|next| (next.load < new_load).then_some(next.load))
-                        {
-                            // The next thread has a load lower than the current
-                            // thread after this spawn. We need to find a new
-                            // place for this thread. To avoid moving the buffer
-                            // too much we are going to scan to find the right
-                            // location.
-                            //
-                            // First, find the next highest load after the new
-                            // "front" load `next_load`.
-                            match self.threads.iter().enumerate().skip(2).find_map(
-                                |(index, thread)| (next_load < thread.load).then_some(index),
-                            ) {
-                                Some(insert_at) => {
-                                    let current =
-                                        self.threads.pop_front().expect("already checked");
-                                    self.threads.insert(insert_at, current);
+                        match thread.spawner.send(ThreadCommand::Spawn(spawn)) {
+                            Ok(()) => {
+                                thread.unparker.unpark();
+                                thread.load += 1;
+                                let new_load = thread.load;
+                                if let Some(next_load) = self
+                                    .threads
+                                    .get(1)
+                                    .and_then(|next| (next.load < new_load).then_some(next.load))
+                                {
+                                    // The next thread has a load lower than the current
+                                    // thread after this spawn. We need to find a new
+                                    // place for this thread. To avoid moving the buffer
+                                    // too much we are going to scan to find the right
+                                    // location.
+                                    //
+                                    // First, find the next highest load after the new
+                                    // "front" load `next_load`.
+                                    match self.threads.iter().enumerate().skip(2).find_map(
+                                        |(index, thread)| {
+                                            (next_load < thread.load).then_some(index)
+                                        },
+                                    ) {
+                                        Some(insert_at) => {
+                                            let current =
+                                                self.threads.pop_front().expect("already checked");
+                                            self.threads.insert(insert_at, current);
+                                        }
+                                        None => {
+                                            // Move to the end.
+                                            self.threads.rotate_left(1);
+                                        }
+                                    }
                                 }
-                                None => {
-                                    // Move to the end.
-                                    self.threads.rotate_left(1);
-                                }
+                                break;
+                            }
+                            Err(SendError(returned_work)) => {
+                                let ThreadCommand::Spawn(returned_work) = returned_work else {
+                                    unreachable!("just sent")
+                                };
+                                spawn = returned_work;
+                                self.threads.remove(0);
                             }
                         }
-                        break;
-                    }
-                    Err(SendError(returned_work)) => {
-                        work = returned_work;
-                        self.threads.remove(0);
-                    }
-                }
 
-                let now = Instant::now();
-                if now > self.next_rebalance {
-                    self.cache_thread_loads(now);
+                        let now = Instant::now();
+                        if now > self.next_rebalance {
+                            self.cache_thread_loads(now);
+                        }
+                    }
                 }
             }
         }
@@ -260,9 +285,11 @@ impl<Work> Dispatcher<Work> {
 }
 
 pub struct Reactor<Work = NoWork> {
-    receiver: Receiver<Spawn<Work>>,
+    id: usize,
+    receiver: Receiver<ThreadCommand<Work>>,
     vm_source: Arc<dyn NewVm<Work>>,
     handle: ReactorHandle<Work>,
+    budgets: Map<BudgetPool, ThreadBudget>,
 }
 
 impl Reactor<NoWork> {
@@ -275,28 +302,60 @@ impl Reactor<NoWork> {
     }
 }
 
+fn root_result(
+    result: Result<Value, Value>,
+    context: &mut VmContext<'_, '_>,
+) -> Result<RootedValue, RootedValue> {
+    match result {
+        Ok(v) => v.upgrade(context.guard()).ok_or_else(|| {
+            Fault::ValueFreed
+                .as_exception(context)
+                .upgrade(context.guard())
+                .expect("just allocated")
+        }),
+        Err(v) => {
+            if let Some(v) = v.upgrade(context.guard()) {
+                Err(v)
+            } else {
+                Err(Fault::ValueFreed
+                    .as_exception(context)
+                    .upgrade(context.guard())
+                    .expect("just allocated"))
+            }
+        }
+    }
+}
+
 impl<Work> Reactor<Work>
 where
     Work: WorkUnit,
 {
-    fn run(self, data: Arc<PerThreadData>, parker: Parker) {
+    fn run(mut self, data: Arc<PerThreadData>, parker: Parker) {
         let mut tasks = ReactorTasks::new(data);
         while !self.handle.data.shared.shutdown.load(Ordering::Relaxed) {
             tasks.wake_woken();
+            self.wake_exhausted(&mut tasks);
             let mut guard = CollectionGuard::acquire();
             for _ in 0..tasks.executing.len() {
                 let task_id = tasks.executing[0];
                 let task = &mut tasks.all[task_id];
-                let mut future = task
-                    .vm
-                    .resume_for_async(Duration::from_micros(100), &mut guard);
+                let mut vm_context = task.vm.context(&mut guard);
+                let mut future = vm_context.resume_for_async(Duration::from_micros(100));
                 let pinned_future = Pin::new(&mut future);
 
                 let mut context = Context::from_waker(&task.waker);
                 match pinned_future.poll(&mut context) {
                     Poll::Ready(Ok(result)) => {
                         drop(future);
-                        tasks.complete_running_task(Ok(result));
+                        let result = root_result(Ok(result), &mut vm_context);
+                        drop(vm_context);
+                        tasks.complete_running_task(result);
+                    }
+                    Poll::Ready(Err(ExecutionError::Exception(err))) => {
+                        drop(future);
+                        let result = root_result(Err(err), &mut vm_context);
+                        drop(vm_context);
+                        tasks.complete_running_task(result);
                     }
                     Poll::Ready(Err(ExecutionError::Waiting)) | Poll::Pending => {
                         task.executing = false;
@@ -309,33 +368,84 @@ where
                         tasks.executing.rotate_left(1);
                     }
                     Poll::Ready(Err(ExecutionError::NoBudget)) => {
-                        todo!("how do we handle budgeting")
-                    }
-                    Poll::Ready(Err(ExecutionError::Exception(err))) => {
-                        drop(future);
-                        tasks.complete_running_task(Err(err));
+                        if let Some(budget) = task
+                            .budget_pool
+                            .and_then(|pool_id| self.budgets.get_mut(&pool_id))
+                        {
+                            let allocated = budget.allocate();
+                            if allocated > 0 {
+                                // We gathered some budget, give it back to the
+                                // task and keep it executing.
+                                vm_context.increase_budget(allocated);
+                                tasks.executing.rotate_left(1);
+                            } else {
+                                let mut parked_threads =
+                                    budget.pool.0.potentially_parked_threads.lock();
+                                // In the time it took to lock the thread, we
+                                // might have received budget.
+                                let allocated = budget.allocate();
+                                if allocated > 0 {
+                                    vm_context.increase_budget(allocated);
+                                    tasks.executing.rotate_left(1);
+                                } else {
+                                    parked_threads
+                                        .entry(self.id)
+                                        .or_insert_with(|| parker.unparker().clone());
+                                    budget.paused.push_back(task_id);
+                                    tasks.executing.pop_front();
+                                }
+                            }
+                        } else {
+                            drop(future);
+                            let result = root_result(
+                                Err(Fault::NoBudget.as_exception(&mut vm_context)),
+                                &mut vm_context,
+                            );
+                            drop(vm_context);
+                            tasks.complete_running_task(result);
+                        }
                     }
                 }
             }
 
             match self.receiver.try_recv() {
                 Ok(command) => {
-                    let vm = match command.what {
-                        Spawnable::Spawn(vm) => Ok(vm),
-                        Spawnable::SpawnSource(source) => {
-                            self.vm_source
-                                .compile_and_prepare(&source, &mut guard, &self.handle)
+                    match command {
+                        ThreadCommand::Spawn(command) => {
+                            let vm =
+                                match command.what {
+                                    Spawnable::Spawn(vm) => Ok(vm),
+                                    Spawnable::SpawnSource(source) => self
+                                        .vm_source
+                                        .compile_and_prepare(&source, &mut guard, &self.handle),
+                                    Spawnable::SpawnCall(code, args) => self
+                                        .vm_source
+                                        .prepare_call(code, args, &mut guard, &self.handle),
+                                    Spawnable::SpawnWork(work) => work.initialize(
+                                        self.vm_source.as_ref(),
+                                        &mut guard,
+                                        &self.handle,
+                                    ),
+                                }
+                                .unwrap(); // TODO handle error
+                            if let Some(pool) = command.pool {
+                                if let Some(budget) = self.budgets.get_mut(&pool) {
+                                    vm.increase_budget(dbg!(budget.allocate()));
+                                }
+                            }
+                            tasks.push(command.id, command.pool, vm, command.result);
                         }
-                        Spawnable::SpawnCall(code, args) => {
-                            self.vm_source
-                                .prepare_call(code, args, &mut guard, &self.handle)
-                        }
-                        Spawnable::SpawnWork(work) => {
-                            work.initialize(self.vm_source.as_ref(), &mut guard, &self.handle)
+                        ThreadCommand::NewBudgetPool(pool) => {
+                            self.budgets.insert(
+                                pool.0.pool,
+                                ThreadBudget {
+                                    pool,
+                                    exhausted_at: Cell::new(0),
+                                    paused: VecDeque::new(),
+                                },
+                            );
                         }
                     }
-                    .unwrap(); // TODO handle error
-                    tasks.push(command.id, vm, command.result);
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(_) => break,
@@ -349,6 +459,47 @@ where
                 }
             }
         }
+    }
+
+    fn wake_exhausted(&mut self, tasks: &mut ReactorTasks) {
+        for (_, budget) in self.budgets.iter_mut() {
+            let last_updated = budget.pool.0.last_updated.load(Ordering::Relaxed);
+            if budget.exhausted_at.get() != last_updated {
+                budget.exhausted_at.set(last_updated);
+                tasks.executing.extend(budget.paused.drain(..));
+            }
+        }
+    }
+}
+
+struct ThreadBudget {
+    pool: ReactorBudgetPool,
+    exhausted_at: Cell<u64>,
+    paused: VecDeque<LotId>,
+}
+
+impl ThreadBudget {
+    fn allocate(&self) -> usize {
+        let mut allocated = 0;
+        let allocation_amount = self.pool.0.config.allocation_size;
+        let generation = self.pool.0.last_updated.load(Ordering::Relaxed);
+        self.pool
+            .0
+            .budget
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |available| {
+                if let Some(remaining) = available.checked_sub(allocation_amount) {
+                    allocated = allocation_amount;
+                    Some(remaining)
+                } else {
+                    allocated = available;
+                    Some(0)
+                }
+            })
+            .expect("always returned a value");
+        if allocated == 0 {
+            self.exhausted_at.set(generation);
+        }
+        allocated
     }
 }
 
@@ -374,7 +525,7 @@ impl Wake for ReactorTaskWaker {
 struct ResultHandle(Arc<ResultHandleData>);
 
 impl ResultHandle {
-    fn send(&self, result: Result<Value, Value>) {
+    fn send(&self, result: Result<RootedValue, RootedValue>) {
         let mut data = self.0.locked.lock();
         data.result = Some(result);
         for waker in data.wakers.drain(..) {
@@ -384,7 +535,7 @@ impl ResultHandle {
         self.0.sync.notify_all();
     }
 
-    fn recv(&self) -> Result<Value, Value> {
+    fn recv(&self) -> Result<RootedValue, RootedValue> {
         let mut data = self.0.locked.lock();
         loop {
             if let Some(result) = &data.result {
@@ -393,6 +544,10 @@ impl ResultHandle {
                 self.0.sync.wait(&mut data);
             }
         }
+    }
+
+    fn try_recv(&self) -> Option<Result<RootedValue, RootedValue>> {
+        self.0.locked.lock().result.clone()
     }
 
     fn recv_async(&self) -> ResultHandleFuture<'_> {
@@ -412,23 +567,13 @@ impl Debug for ResultHandle {
     }
 }
 
-impl Trace for ResultHandle {
-    const MAY_CONTAIN_REFERENCES: bool = true;
-
-    fn trace(&self, tracer: &mut refuse::Tracer) {
-        let data = self.0.locked.lock();
-        match &data.result {
-            Some(Ok(v) | Err(v)) => v.trace(tracer),
-            _ => {}
-        }
-    }
-}
+impl ContainsNoRefs for ResultHandle {}
 
 #[derive(Debug)]
 struct ResultHandleFuture<'a>(&'a ResultHandle);
 
 impl Future for ResultHandleFuture<'_> {
-    type Output = Result<Value, Value>;
+    type Output = Result<RootedValue, RootedValue>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut data = self.0 .0.locked.lock();
@@ -452,12 +597,13 @@ struct ResultHandleData {
 
 #[derive(Default)]
 struct ResultHandleResult {
-    result: Option<Result<Value, Value>>,
+    result: Option<Result<RootedValue, RootedValue>>,
     wakers: Vec<Waker>,
 }
 
 struct ReactorTask {
     vm: Vm,
+    budget_pool: Option<BudgetPool>,
     waker: Waker,
     global_id: usize,
     executing: bool,
@@ -483,9 +629,16 @@ impl ReactorTasks {
             }),
         }
     }
-    fn push(&mut self, global_id: usize, vm: Vm, result: ResultHandle) -> LotId {
+    fn push(
+        &mut self,
+        global_id: usize,
+        budget_pool: Option<BudgetPool>,
+        vm: Vm,
+        result: ResultHandle,
+    ) -> LotId {
         let id = self.all.push(ReactorTask {
             vm,
+            budget_pool,
             waker: Waker::from(Arc::new(ReactorTaskWaker {
                 task: global_id,
                 woken: self.woken.clone(),
@@ -500,7 +653,7 @@ impl ReactorTasks {
         id
     }
 
-    fn complete_running_task(&mut self, result: Result<Value, Value>) {
+    fn complete_running_task(&mut self, result: Result<RootedValue, RootedValue>) {
         let task_id = self.executing.pop_front().expect("no running task");
         let task = self.all.remove(task_id).expect("task missing");
         let _result = task.result.send(result);
@@ -532,11 +685,15 @@ pub struct TaskHandle {
 }
 
 impl TaskHandle {
-    pub fn join(&self) -> Result<Value, Value> {
+    pub fn join(&self) -> Result<RootedValue, RootedValue> {
         self.result.recv()
     }
 
-    pub async fn join_async(&self) -> Result<Value, Value> {
+    pub fn try_join(&self) -> Option<Result<RootedValue, RootedValue>> {
+        self.result.try_recv()
+    }
+
+    pub async fn join_async(&self) -> Result<RootedValue, RootedValue> {
         self.result.recv_async().await
     }
 }
@@ -550,7 +707,9 @@ impl CustomType for TaskHandle {
                     let mut context = Context::from_waker(&waker);
                     let mut future = this.result.recv_async();
                     match Pin::new(&mut future).poll(&mut context) {
-                        Poll::Ready(result) => result.map_err(Fault::Exception),
+                        Poll::Ready(result) => result
+                            .map(|v| v.downgrade())
+                            .map_err(|e| Fault::Exception(e.downgrade())),
                         Poll::Pending => Err(Fault::Waiting),
                     }
                 }
@@ -622,25 +781,29 @@ where
         module
     }
 
-    fn spawn_spawnable(&self, spawnable: Spawnable<Work>) -> Result<TaskHandle, ReactorShutdown> {
-        let command = Spawn::new(&self.data.next_task_id, spawnable);
+    fn spawn_spawnable(
+        &self,
+        spawnable: Spawnable<Work>,
+        pool: Option<BudgetPool>,
+    ) -> Result<TaskHandle, ReactorShutdown> {
+        let command = Spawn::new(&self.data.next_task_id, spawnable, pool);
         let handle = TaskHandle {
             result: command.result.clone(),
             global_id: command.id,
         };
         self.data
             .sender
-            .send(command)
+            .send(Command::Spawn(command))
             .map_err(|_| ReactorShutdown)?;
         Ok(handle)
     }
 
     pub fn spawn(&self, vm: Vm) -> Result<TaskHandle, ReactorShutdown> {
-        self.spawn_spawnable(Spawnable::Spawn(vm))
+        self.spawn_spawnable(Spawnable::Spawn(vm), None)
     }
 
     pub fn spawn_source(&self, source: impl Into<String>) -> Result<TaskHandle, ReactorShutdown> {
-        self.spawn_spawnable(Spawnable::SpawnSource(source.into()))
+        self.spawn_spawnable(Spawnable::SpawnSource(source.into()), None)
     }
 
     pub fn spawn_call(
@@ -648,11 +811,11 @@ where
         code: Code,
         args: Vec<RootedValue>,
     ) -> Result<TaskHandle, ReactorShutdown> {
-        self.spawn_spawnable(Spawnable::SpawnCall(code, args))
+        self.spawn_spawnable(Spawnable::SpawnCall(code, args), None)
     }
 
     pub fn spawn_work(&self, work: Work) -> Result<TaskHandle, ReactorShutdown> {
-        self.spawn_spawnable(Spawnable::SpawnWork(work))
+        self.spawn_spawnable(Spawnable::SpawnWork(work), None)
     }
 
     pub fn shutdown(&self) -> Result<(), Box<dyn Any + Send + 'static>> {
@@ -675,6 +838,42 @@ where
 
         Ok(())
     }
+
+    pub fn create_budget_pool(
+        &self,
+        config: BudgetPoolConfig,
+    ) -> Result<BudgetPoolHandle<Work>, ReactorShutdown> {
+        loop {
+            let Some(id) = NonZeroUsize::new(
+                self.data
+                    .next_budget_pool_id
+                    .fetch_add(1, Ordering::Relaxed),
+            ) else {
+                continue;
+            };
+            let pool = ReactorBudgetPool(Arc::new(ReactorBudgetPoolData {
+                pool: BudgetPool(id),
+                budget: AtomicUsize::new(config.start),
+                last_updated: AtomicU64::new(0),
+                config,
+                potentially_parked_threads: Mutex::default(),
+            }));
+
+            if self
+                .data
+                .sender
+                .send(Command::NewBudgetPool(pool.clone()))
+                .is_err()
+            {
+                return Err(ReactorShutdown);
+            }
+
+            return Ok(BudgetPoolHandle {
+                pool,
+                reactor: self.clone(),
+            });
+        }
+    }
 }
 
 impl<Work> Clone for ReactorHandle<Work> {
@@ -692,7 +891,7 @@ struct SharedReactorData {
 
 #[derive(Debug)]
 struct PerThread<Work> {
-    spawner: Sender<Spawn<Work>>,
+    spawner: Sender<ThreadCommand<Work>>,
     handle: JoinHandle<()>,
     data: Arc<PerThreadData>,
 }
@@ -716,24 +915,43 @@ impl PerThreadData {
 
 #[derive(Debug)]
 struct HandleData<Work> {
-    sender: Sender<Spawn<Work>>,
+    sender: Sender<Command<Work>>,
     threads: Arc<Mutex<Vec<PerThread<Work>>>>,
     shared: Arc<SharedReactorData>,
     next_task_id: AtomicUsize,
+    next_budget_pool_id: AtomicUsize,
+}
+
+enum Command<Work> {
+    Spawn(Spawn<Work>),
+    NewBudgetPool(ReactorBudgetPool),
+}
+
+#[derive(Clone)]
+struct ReactorBudgetPool(Arc<ReactorBudgetPoolData>);
+
+struct ReactorBudgetPoolData {
+    pool: BudgetPool,
+    budget: AtomicUsize,
+    last_updated: AtomicU64,
+    config: BudgetPoolConfig,
+    potentially_parked_threads: Mutex<Map<usize, Unparker>>,
 }
 
 struct Spawn<Work> {
     id: usize,
+    pool: Option<BudgetPool>,
     what: Spawnable<Work>,
     result: ResultHandle,
 }
 
 impl<Work> Spawn<Work> {
-    fn new(ids: &AtomicUsize, kind: Spawnable<Work>) -> Self {
+    fn new(ids: &AtomicUsize, kind: Spawnable<Work>, pool: Option<BudgetPool>) -> Self {
         let result = ResultHandle::default();
 
         Self {
             id: ids.fetch_add(1, Ordering::Acquire),
+            pool,
             what: kind,
             result,
         }
@@ -856,11 +1074,119 @@ impl WorkUnit for NoWork {
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+pub struct BudgetPool(NonZeroUsize);
+
+pub struct BudgetPoolHandle<Work> {
+    pool: ReactorBudgetPool,
+    reactor: ReactorHandle<Work>,
+}
+
+impl<Work> BudgetPoolHandle<Work>
+where
+    Work: WorkUnit,
+{
+    pub fn spawn(&self, vm: Vm) -> Result<TaskHandle, ReactorShutdown> {
+        self.reactor
+            .spawn_spawnable(Spawnable::Spawn(vm), Some(self.pool.0.pool))
+    }
+
+    pub fn spawn_source(&self, source: impl Into<String>) -> Result<TaskHandle, ReactorShutdown> {
+        self.reactor.spawn_spawnable(
+            Spawnable::SpawnSource(source.into()),
+            Some(self.pool.0.pool),
+        )
+    }
+
+    pub fn spawn_call(
+        &self,
+        code: Code,
+        args: Vec<RootedValue>,
+    ) -> Result<TaskHandle, ReactorShutdown> {
+        self.reactor
+            .spawn_spawnable(Spawnable::SpawnCall(code, args), Some(self.pool.0.pool))
+    }
+
+    pub fn spawn_work(&self, work: Work) -> Result<TaskHandle, ReactorShutdown> {
+        self.reactor
+            .spawn_spawnable(Spawnable::SpawnWork(work), Some(self.pool.0.pool))
+    }
+
+    pub fn increase_budget(&self, amount: usize) -> Result<(), ReactorShutdown> {
+        let mut parked_threads = self.pool.0.potentially_parked_threads.lock();
+        self.pool
+            .0
+            .budget
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |available| {
+                let max = if self.pool.0.config.maximum == 0 {
+                    usize::MAX
+                } else {
+                    self.pool.0.config.maximum
+                };
+                Some(available.saturating_add(amount).min(max))
+            })
+            .expect("always returned a value");
+        self.pool.0.last_updated.fetch_add(1, Ordering::SeqCst);
+        for th in parked_threads.drain() {
+            th.value.unpark();
+        }
+        Ok(())
+    }
+}
+
+impl<Work> Clone for BudgetPoolHandle<Work> {
+    fn clone(&self) -> Self {
+        Self {
+            pool: self.pool.clone(),
+            reactor: self.reactor.clone(),
+        }
+    }
+}
+
+#[non_exhaustive]
+pub struct BudgetPoolConfig {
+    pub maximum: usize,
+    pub allocation_size: usize,
+    pub start: usize,
+}
+
+impl Default for BudgetPoolConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BudgetPoolConfig {
+    pub const fn new() -> Self {
+        Self {
+            maximum: 0,
+            start: 0,
+            allocation_size: 100,
+        }
+    }
+
+    pub const fn starting_with(mut self, start: usize) -> Self {
+        self.start = start;
+        self
+    }
+
+    pub const fn with_maximum(mut self, maximum: usize) -> Self {
+        self.maximum = maximum;
+        self
+    }
+
+    pub const fn with_per_task_allocation(mut self, allocation_size: usize) -> Self {
+        self.allocation_size = allocation_size;
+        self
+    }
+}
+
 #[test]
 fn works() {
     let reactor = Reactor::new();
     let task = reactor.spawn_source("1 + 2").unwrap();
-    let result = task.join().unwrap();
+    // TODO add RootedValue PartialEq
+    let result = task.join().unwrap().downgrade();
     assert_eq!(result, Value::Int(3));
 }
 
@@ -884,6 +1210,33 @@ fn spawning() {
             ",
         )
         .unwrap();
-    let result = task.join().unwrap();
+    let result = task.join().unwrap().downgrade();
+    // TODO add RootedValue PartialEq
     assert_eq!(result, Value::Int((0..=100).sum()));
+}
+
+#[test]
+fn budgeting_basic() {
+    let reactor = Reactor::build()
+        .new_vm(
+            |guard: &mut CollectionGuard<'_>, _reactor: &ReactorHandle<NoWork>| {
+                let vm = Vm::new(guard);
+                vm.set_steps_per_charge(1);
+                vm
+            },
+        )
+        .finish();
+    let pool = reactor.create_budget_pool(BudgetPoolConfig::new()).unwrap();
+    let task = pool.spawn_source("1 + 2").unwrap();
+
+    // Make sure the task doesn't complete
+    thread::sleep(Duration::from_secs(1));
+    assert!(dbg!(task.try_join()).is_none());
+
+    // Give it some budget
+    pool.increase_budget(100).unwrap();
+
+    // TODO add RootedValue PartialEq
+    let result = task.join().unwrap().downgrade();
+    assert_eq!(result, Value::Int(3));
 }

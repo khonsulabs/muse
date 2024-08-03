@@ -225,8 +225,8 @@ impl Vm {
         &'context self,
         code: &Code,
         guard: &'context mut CollectionGuard<'guard>,
-    ) -> Result<ExecuteAsync<'context, 'guard>, ExecutionError> {
-        self.context(guard).execute_async(code)
+    ) -> Result<ExecuteAsync<'static, 'context, 'guard>, ExecutionError> {
+        MaybeOwnedContext::Owned(self.context(guard)).execute_async(code)
     }
 
     /// Resumes executing the current code asynchronously.
@@ -237,8 +237,8 @@ impl Vm {
     pub fn resume_async<'context, 'guard>(
         &'context self,
         guard: &'context mut CollectionGuard<'guard>,
-    ) -> ExecuteAsync<'context, 'guard> {
-        self.context(guard).resume_async()
+    ) -> ExecuteAsync<'static, 'context, 'guard> {
+        MaybeOwnedContext::Owned(self.context(guard)).resume_async()
     }
 
     /// Resumes executing the currently executing code until `duration` as
@@ -251,8 +251,8 @@ impl Vm {
         &'context self,
         duration: Duration,
         guard: &'context mut CollectionGuard<'guard>,
-    ) -> ExecuteAsync<'context, 'guard> {
-        self.context(guard).resume_for_async(duration)
+    ) -> ExecuteAsync<'static, 'context, 'guard> {
+        MaybeOwnedContext::Owned(self.context(guard)).resume_for_async(duration)
     }
 
     /// Resumes executing the currently executing code until `instant`.
@@ -264,8 +264,8 @@ impl Vm {
         &'context self,
         instant: Instant,
         guard: &'context mut CollectionGuard<'guard>,
-    ) -> ExecuteAsync<'context, 'guard> {
-        self.context(guard).resume_until_async(instant)
+    ) -> ExecuteAsync<'static, 'context, 'guard> {
+        MaybeOwnedContext::Owned(self.context(guard)).resume_until_async(instant)
     }
 
     /// Increases the current budget by `amount`.
@@ -742,14 +742,14 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
     }
 
     /// Returns a future that executes `code` asynchronously.
-    pub fn execute_async(
-        mut self,
+    pub fn execute_async<'vm>(
+        &'vm mut self,
         code: &Code,
-    ) -> Result<ExecuteAsync<'context, 'guard>, ExecutionError> {
+    ) -> Result<ExecuteAsync<'vm, 'context, 'guard>, ExecutionError> {
         let code = self.push_code(code, None);
         self.prepare_owned(code)?;
 
-        Ok(ExecuteAsync(self))
+        Ok(ExecuteAsync(MaybeOwnedContext::Borrowed(self)))
     }
 
     /// Resumes executing the current code asynchronously.
@@ -757,8 +757,8 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
     /// This should only be called if an [`ExecutionError::Waiting`],
     /// [`ExecutionError::NoBudget`], or [`ExecutionError::Timeout`] was
     /// returned when executing code.
-    pub fn resume_async(self) -> ExecuteAsync<'context, 'guard> {
-        ExecuteAsync(self)
+    pub fn resume_async<'vm>(&'vm mut self) -> ExecuteAsync<'vm, 'context, 'guard> {
+        ExecuteAsync(MaybeOwnedContext::Borrowed(self))
     }
 
     /// Resumes executing the currently executing code until `duration` as
@@ -767,7 +767,10 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
     /// This should only be called if an [`ExecutionError::Waiting`],
     /// [`ExecutionError::NoBudget`], or [`ExecutionError::Timeout`] was
     /// returned when executing code.
-    pub fn resume_for_async(self, duration: Duration) -> ExecuteAsync<'context, 'guard> {
+    pub fn resume_for_async<'vm>(
+        &'vm mut self,
+        duration: Duration,
+    ) -> ExecuteAsync<'vm, 'context, 'guard> {
         self.resume_until_async(Instant::now() + duration)
     }
 
@@ -776,7 +779,10 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
     /// This should only be called if an [`ExecutionError::Waiting`],
     /// [`ExecutionError::NoBudget`], or [`ExecutionError::Timeout`] was
     /// returned when executing code.
-    pub fn resume_until_async(mut self, instant: Instant) -> ExecuteAsync<'context, 'guard> {
+    pub fn resume_until_async<'vm>(
+        &'vm mut self,
+        instant: Instant,
+    ) -> ExecuteAsync<'vm, 'context, 'guard> {
         self.execute_until = Some(instant);
         self.resume_async()
     }
@@ -2804,30 +2810,88 @@ struct ModuleDeclaration {
     value: Value,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct Budget(Option<NonZeroUsize>);
+#[derive(Clone, Copy, Debug)]
+struct Budget(usize);
 
 impl Budget {
+    const DISABLED: usize = usize::MAX;
     fn allocate(&mut self, amount: usize) {
-        self.0 = match self.0 {
-            Some(budget) => Some(budget.saturating_add(amount)),
-            None => NonZeroUsize::new(amount.saturating_add(1)),
-        };
+        if self.0 == Self::DISABLED {
+            self.0 = amount;
+        } else {
+            self.0 = self.0.saturating_add(amount).min(Self::DISABLED - 1);
+        }
     }
 
     fn charge(&mut self) -> Result<(), Fault> {
-        if let Some(amount) = &mut self.0 {
-            *amount = NonZeroUsize::new(amount.get().saturating_sub(1)).ok_or(Fault::NoBudget)?;
+        if self.0 != Self::DISABLED {
+            self.0 = self.0.checked_sub(1).ok_or(Fault::NoBudget)?;
         }
         Ok(())
     }
 }
 
+impl Default for Budget {
+    fn default() -> Self {
+        Self(Self::DISABLED)
+    }
+}
+
+enum MaybeOwnedContext<'vm, 'context, 'guard> {
+    Owned(VmContext<'context, 'guard>),
+    Borrowed(&'vm mut VmContext<'context, 'guard>),
+}
+
+impl<'vm, 'context, 'guard> MaybeOwnedContext<'vm, 'context, 'guard> {
+    pub fn execute_async(
+        mut self,
+        code: &Code,
+    ) -> Result<ExecuteAsync<'vm, 'context, 'guard>, ExecutionError> {
+        let code = self.push_code(code, None);
+        self.prepare_owned(code)?;
+
+        Ok(ExecuteAsync(self))
+    }
+
+    fn resume_async(self) -> ExecuteAsync<'vm, 'context, 'guard> {
+        ExecuteAsync(self)
+    }
+
+    fn resume_for_async(self, duration: Duration) -> ExecuteAsync<'vm, 'context, 'guard> {
+        self.resume_until_async(Instant::now() + duration)
+    }
+
+    fn resume_until_async(mut self, instant: Instant) -> ExecuteAsync<'vm, 'context, 'guard> {
+        self.execute_until = Some(instant);
+        self.resume_async()
+    }
+}
+
+impl<'context, 'guard> Deref for MaybeOwnedContext<'_, 'context, 'guard> {
+    type Target = VmContext<'context, 'guard>;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            MaybeOwnedContext::Owned(v) => v,
+            MaybeOwnedContext::Borrowed(v) => v,
+        }
+    }
+}
+
+impl<'context, 'guard> DerefMut for MaybeOwnedContext<'_, 'context, 'guard> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            MaybeOwnedContext::Owned(v) => v,
+            MaybeOwnedContext::Borrowed(v) => v,
+        }
+    }
+}
+
 /// An asynchronous code execution.
 #[must_use = "futures must be awaited to be exected"]
-pub struct ExecuteAsync<'context, 'guard>(VmContext<'context, 'guard>);
+pub struct ExecuteAsync<'vm, 'context, 'guard>(MaybeOwnedContext<'vm, 'context, 'guard>);
 
-impl Future for ExecuteAsync<'_, '_> {
+impl Future for ExecuteAsync<'_, '_, '_> {
     type Output = Result<Value, ExecutionError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
