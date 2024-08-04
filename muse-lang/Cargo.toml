@@ -2,7 +2,8 @@
 name = "muse-lang"
 version = "0.1.0"
 edition = "2021"
-
+repository = "https://github.com/khonsulabs/muse"
+license = "MIT OR Apache-2.0"
 
 [features]
 dispatched = []

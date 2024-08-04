@@ -1580,6 +1580,8 @@ dependencies = [
  "dirs",
  "flume",
  "muse-lang",
+ "muse-reactor",
+ "muse-ui",
  "pollster",
  "rsn",
  "rustyline",
@@ -1620,7 +1622,7 @@ name = "muse-ui"
 version = "0.1.0"
 dependencies = [
  "cushy",
- "muse",
+ "muse-lang",
 ]
 
 [[package]]

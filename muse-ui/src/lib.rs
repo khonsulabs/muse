@@ -7,10 +7,12 @@ use cushy::widgets::slider::Slidable;
 use cushy::widgets::{Expand, Slider};
 use cushy::window::WindowHandle;
 use cushy::{App, Application, Open, PendingApp};
-use muse::refuse::{self, CollectionGuard, SimpleType, Trace};
-use muse::runtime::symbol::Symbol;
-use muse::runtime::value::{ContextOrGuard, CustomType, RustFunction, RustType, TypeRef, Value};
-use muse::vm::{Fault, Register, Vm, VmContext};
+use muse_lang::refuse::{self, CollectionGuard, SimpleType, Trace};
+use muse_lang::runtime::symbol::Symbol;
+use muse_lang::runtime::value::{
+    ContextOrGuard, CustomType, RustFunction, RustType, TypeRef, Value,
+};
+use muse_lang::vm::{Fault, Register, Vm, VmContext};
 
 pub fn install(vm: &Vm, guard: &mut CollectionGuard<'_>) {
     vm.declare(
@@ -166,7 +168,7 @@ impl CustomType for DynamicValue {
                     this.0
                         .map_ref(|value| value.deep_clone(guard))
                         .map(|value| {
-                            muse::runtime::value::AnyDynamic::new(
+                            muse_lang::runtime::value::AnyDynamic::new(
                                 DynamicValue(Dynamic::new(value)),
                                 guard,
                             )
