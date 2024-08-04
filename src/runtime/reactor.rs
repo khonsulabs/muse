@@ -332,7 +332,7 @@ where
 {
     fn run(mut self, data: Arc<PerThreadData>, parker: Parker) {
         let mut tasks = ReactorTasks::new(data);
-        while !self.handle.data.shared.shutdown.load(Ordering::Relaxed) {
+        'outer: while !self.handle.data.shared.shutdown.load(Ordering::Relaxed) {
             tasks.wake_woken();
             self.wake_exhausted(&mut tasks);
             let mut guard = CollectionGuard::acquire();
@@ -408,12 +408,12 @@ where
                 }
             }
 
-            match self.receiver.try_recv() {
-                Ok(command) => {
-                    match command {
-                        ThreadCommand::Spawn(command) => {
-                            let vm =
-                                match command.what {
+            loop {
+                match self.receiver.try_recv() {
+                    Ok(command) => {
+                        match command {
+                            ThreadCommand::Spawn(command) => {
+                                let vm = match command.what {
                                     Spawnable::Spawn(vm) => Ok(vm),
                                     Spawnable::SpawnSource(source) => self
                                         .vm_source
@@ -428,27 +428,28 @@ where
                                     ),
                                 }
                                 .unwrap(); // TODO handle error
-                            if let Some(pool) = command.pool {
-                                if let Some(budget) = self.budgets.get_mut(&pool) {
-                                    vm.increase_budget(dbg!(budget.allocate()));
+                                if let Some(pool) = command.pool {
+                                    if let Some(budget) = self.budgets.get_mut(&pool) {
+                                        vm.increase_budget(budget.allocate());
+                                    }
                                 }
+                                tasks.push(command.id, command.pool, vm, command.result);
                             }
-                            tasks.push(command.id, command.pool, vm, command.result);
-                        }
-                        ThreadCommand::NewBudgetPool(pool) => {
-                            self.budgets.insert(
-                                pool.0.pool,
-                                ThreadBudget {
-                                    pool,
-                                    exhausted_at: Cell::new(0),
-                                    paused: VecDeque::new(),
-                                },
-                            );
+                            ThreadCommand::NewBudgetPool(pool) => {
+                                self.budgets.insert(
+                                    pool.0.pool,
+                                    ThreadBudget {
+                                        pool,
+                                        exhausted_at: Cell::new(0),
+                                        paused: VecDeque::new(),
+                                    },
+                                );
+                            }
                         }
                     }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => break 'outer,
                 }
-                Err(TryRecvError::Empty) => {}
-                Err(_) => break,
             }
 
             if tasks.executing.is_empty() {
@@ -1231,7 +1232,7 @@ fn budgeting_basic() {
 
     // Make sure the task doesn't complete
     thread::sleep(Duration::from_secs(1));
-    assert!(dbg!(task.try_join()).is_none());
+    assert!(task.try_join().is_none());
 
     // Give it some budget
     pool.increase_budget(100).unwrap();
