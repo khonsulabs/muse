@@ -1,43 +1,35 @@
 #![allow(missing_docs)]
-use std::{
-    any::Any,
-    cell::Cell,
-    collections::VecDeque,
-    fmt::Debug,
-    future::Future,
-    marker::PhantomData,
-    num::NonZeroUsize,
-    pin::Pin,
-    sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        Arc,
-    },
-    task::{Context, Poll, Wake, Waker},
-    thread::{self, JoinHandle},
-    time::{Duration, Instant},
-};
+use std::any::Any;
+use std::cell::Cell;
+use std::collections::VecDeque;
+use std::fmt::Debug;
+use std::future::Future;
+use std::marker::PhantomData;
+use std::num::NonZeroUsize;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use alot::{LotId, Lots};
 use crossbeam_utils::sync::{Parker, Unparker};
 use flume::{Receiver, SendError, Sender, TryRecvError};
 use kempt::{Map, Set};
+use muse_lang::compiler::syntax::Ranged;
+use muse_lang::compiler::{self, Compiler};
+use muse_lang::runtime::list::List;
+use muse_lang::runtime::symbol::SymbolRef;
+use muse_lang::runtime::value::{
+    CustomType, Dynamic, Rooted, RootedValue, RustFunction, RustType, Value,
+};
+use muse_lang::vm::bitcode::Access;
+use muse_lang::vm::{
+    Arity, Code, ExecutionError, Fault, Function, Module, Register, Vm, VmContext,
+};
 use parking_lot::{Condvar, Mutex, MutexGuard};
 use refuse::{CollectionGuard, ContainsNoRefs, Trace};
-
-use muse_lang::{
-    compiler::{self, syntax::Ranged, Compiler},
-    runtime::value::RustType,
-    vm::{
-        bitcode::Access, Arity, Code, ExecutionError, Fault, Function, Module, Register, Vm,
-        VmContext,
-    },
-};
-
-use muse_lang::runtime::{
-    list::List,
-    symbol::SymbolRef,
-    value::{CustomType, Dynamic, Rooted, RootedValue, RustFunction, Value},
-};
 
 pub struct Builder<Work> {
     vm_source: Option<Arc<dyn NewVm<Work>>>,
@@ -654,6 +646,7 @@ impl ResultDeadline for () {
 
 impl ResultDeadline for Instant {
     type Result = Option<Result<RootedValue, TaskError>>;
+
     fn wait<T>(&self, sync: &Condvar, mutex_guard: &mut MutexGuard<'_, T>) -> bool {
         !sync.wait_until(mutex_guard, *self).timed_out()
     }
@@ -736,6 +729,7 @@ impl ReactorTasks {
             }),
         }
     }
+
     fn push(
         &mut self,
         global_id: usize,

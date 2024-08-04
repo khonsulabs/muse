@@ -2841,6 +2841,7 @@ struct Budget(usize);
 
 impl Budget {
     const DISABLED: usize = usize::MAX;
+
     fn allocate(&mut self, amount: usize) {
         if self.0 == Self::DISABLED {
             self.0 = amount;

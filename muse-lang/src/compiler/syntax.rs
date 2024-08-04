@@ -3742,6 +3742,7 @@ impl Fn {
         let func = Self::parse_function_definition(publish, r#fn, tokens, config)?;
         Ok(tokens.ranged(start.., Expression::Function(Box::new(func))))
     }
+
     fn parse_function_definition(
         publish: Option<Ranged<Symbol>>,
         r#fn: Ranged<Token>,

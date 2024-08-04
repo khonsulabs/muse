@@ -20,14 +20,13 @@ use refuse::{AnyRef, AnyRoot, CollectionGuard, ContainsNoRefs, MapAs, Ref, Root,
 
 use crate::runtime::string::MuseString;
 use crate::runtime::symbol::{Symbol, SymbolList, SymbolRef};
-use crate::vm::{Arity, ExecutionError, Fault, VmContext};
-
 #[cfg(feature = "dispatched")]
 use crate::runtime::types::{RuntimeEnum, RuntimeStruct};
 #[cfg(feature = "dispatched")]
 use crate::vm::bitcode::{BitcodeFunction, ValueOrSource};
 #[cfg(feature = "dispatched")]
 use crate::vm::Function;
+use crate::vm::{Arity, ExecutionError, Fault, VmContext};
 
 /// A Muse virtual machine value.
 #[derive(Default, Clone, Copy, Debug)]
@@ -63,6 +62,7 @@ impl Value {
             Value::Dynamic(v) => v.upgrade(guard).map(RootedValue::Dynamic),
         }
     }
+
     /// Moves `value` into the virtual machine.
     pub fn dynamic<'guard, T>(value: T, guard: impl AsRef<CollectionGuard<'guard>>) -> Self
     where
