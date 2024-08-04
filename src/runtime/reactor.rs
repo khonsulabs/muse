@@ -21,7 +21,7 @@ use alot::{LotId, Lots};
 use crossbeam_utils::sync::{Parker, Unparker};
 use flume::{Receiver, SendError, Sender, TryRecvError};
 use kempt::{Map, Set};
-use parking_lot::{Condvar, Mutex};
+use parking_lot::{Condvar, Mutex, MutexGuard};
 use refuse::{CollectionGuard, ContainsNoRefs, Trace};
 
 use crate::{
@@ -35,6 +35,7 @@ use crate::{
 
 use super::{
     list::List,
+    symbol::SymbolRef,
     value::{CustomType, Dynamic, Rooted, RootedValue, RustFunction, Value},
 };
 
@@ -135,10 +136,10 @@ where
             };
             threads.push(PerThread {
                 data: data.clone(),
-                spawner: spawn_send,
+                spawner: spawn_send.clone(),
                 handle: thread::Builder::new()
                     .name(thread_name.clone())
-                    .spawn(move || reactor.run(data, parker))
+                    .spawn(move || reactor.run(spawn_send, data, parker))
                     .expect("error spawning thread"),
             });
         }
@@ -159,6 +160,7 @@ where
 
 enum ThreadCommand<Work> {
     Spawn(Spawn<Work>),
+    Cancel(usize),
     NewBudgetPool(ReactorBudgetPool),
 }
 
@@ -330,7 +332,16 @@ impl<Work> Reactor<Work>
 where
     Work: WorkUnit,
 {
-    fn run(mut self, data: Arc<PerThreadData>, parker: Parker) {
+    fn run(
+        mut self,
+        sender: Sender<ThreadCommand<Work>>,
+        data: Arc<PerThreadData>,
+        parker: Parker,
+    ) {
+        let canceller = TaskCanceller {
+            canceller: Arc::new(sender),
+            unparker: parker.unparker().clone(),
+        };
         let mut tasks = ReactorTasks::new(data);
         'outer: while !self.handle.data.shared.shutdown.load(Ordering::Relaxed) {
             tasks.wake_woken();
@@ -388,6 +399,7 @@ where
                                     vm_context.increase_budget(allocated);
                                     tasks.executing.rotate_left(1);
                                 } else {
+                                    task.executing = false;
                                     parked_threads
                                         .entry(self.id)
                                         .or_insert_with(|| parker.unparker().clone());
@@ -410,10 +422,10 @@ where
 
             loop {
                 match self.receiver.try_recv() {
-                    Ok(command) => {
-                        match command {
-                            ThreadCommand::Spawn(command) => {
-                                let vm = match command.what {
+                    Ok(command) => match command {
+                        ThreadCommand::Spawn(command) => {
+                            let spawn =
+                                match command.what {
                                     Spawnable::Spawn(vm) => Ok(vm),
                                     Spawnable::SpawnSource(source) => self
                                         .vm_source
@@ -426,27 +438,63 @@ where
                                         &mut guard,
                                         &self.handle,
                                     ),
-                                }
-                                .unwrap(); // TODO handle error
-                                if let Some(pool) = command.pool {
-                                    if let Some(budget) = self.budgets.get_mut(&pool) {
-                                        vm.increase_budget(budget.allocate());
+                                };
+                            match spawn {
+                                Ok(vm) => {
+                                    let mut locked = command.result.0.locked.lock();
+                                    if locked.cancelled {
+                                        continue;
                                     }
+                                    locked.cancellation = Some(canceller.clone());
+                                    drop(locked);
+
+                                    if let Some(pool) = command.pool {
+                                        if let Some(budget) = self.budgets.get_mut(&pool) {
+                                            vm.increase_budget(budget.allocate());
+                                        }
+                                    }
+                                    tasks.push(command.id, command.pool, vm, command.result);
                                 }
-                                tasks.push(command.id, command.pool, vm, command.result);
-                            }
-                            ThreadCommand::NewBudgetPool(pool) => {
-                                self.budgets.insert(
-                                    pool.0.pool,
-                                    ThreadBudget {
-                                        pool,
-                                        exhausted_at: Cell::new(0),
-                                        paused: VecDeque::new(),
-                                    },
-                                );
+                                Err(err) => {
+                                    let err = match err {
+                                        PrepareError::Compilation(errors) => {
+                                            TaskError::Compilation(errors)
+                                        }
+                                        PrepareError::Execution(err) => TaskError::Exception(
+                                            err.as_value().upgrade(&guard).expect("just allocated"),
+                                        ),
+                                    };
+                                    let _result = command.result.send(Err(err));
+                                }
                             }
                         }
-                    }
+                        ThreadCommand::NewBudgetPool(pool) => {
+                            self.budgets.insert(
+                                pool.0.pool,
+                                ThreadBudget {
+                                    pool,
+                                    exhausted_at: Cell::new(0),
+                                    paused: VecDeque::new(),
+                                },
+                            );
+                        }
+                        ThreadCommand::Cancel(global_id) => {
+                            let Some(task_id) = tasks.registered.get(&global_id).copied() else {
+                                continue;
+                            };
+                            let task = tasks.complete_task(task_id, Err(TaskError::Cancelled));
+
+                            if task.executing {
+                                let (index, _) = tasks
+                                    .executing
+                                    .iter()
+                                    .enumerate()
+                                    .find(|(_, id)| task_id == **id)
+                                    .expect("task is executing");
+                                tasks.executing.remove(index);
+                            }
+                        }
+                    },
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => break 'outer,
                 }
@@ -467,7 +515,13 @@ where
             let last_updated = budget.pool.0.last_updated.load(Ordering::Relaxed);
             if budget.exhausted_at.get() != last_updated {
                 budget.exhausted_at.set(last_updated);
-                tasks.executing.extend(budget.paused.drain(..));
+                for task_id in budget.paused.drain(..) {
+                    let Some(task) = tasks.all.get_mut(task_id) else {
+                        continue;
+                    };
+                    task.executing = true;
+                    tasks.executing.push_back(task_id);
+                }
             }
         }
     }
@@ -526,7 +580,7 @@ impl Wake for ReactorTaskWaker {
 struct ResultHandle(Arc<ResultHandleData>);
 
 impl ResultHandle {
-    fn send(&self, result: Result<RootedValue, RootedValue>) {
+    fn send(&self, result: Result<RootedValue, TaskError>) {
         let mut data = self.0.locked.lock();
         data.result = Some(result);
         for waker in data.wakers.drain(..) {
@@ -536,18 +590,21 @@ impl ResultHandle {
         self.0.sync.notify_all();
     }
 
-    fn recv(&self) -> Result<RootedValue, RootedValue> {
+    fn recv<Deadline>(&self, deadline: Deadline) -> Deadline::Result
+    where
+        Deadline: ResultDeadline,
+    {
         let mut data = self.0.locked.lock();
         loop {
             if let Some(result) = &data.result {
-                return result.clone();
-            } else {
-                self.0.sync.wait(&mut data);
+                return deadline.result(result.clone());
+            } else if !deadline.wait(&self.0.sync, &mut data) {
+                return deadline.cancelled_result();
             }
         }
     }
 
-    fn try_recv(&self) -> Option<Result<RootedValue, RootedValue>> {
+    fn try_recv(&self) -> Option<Result<RootedValue, TaskError>> {
         self.0.locked.lock().result.clone()
     }
 
@@ -570,11 +627,51 @@ impl Debug for ResultHandle {
 
 impl ContainsNoRefs for ResultHandle {}
 
+trait ResultDeadline {
+    type Result;
+
+    fn wait<T>(&self, sync: &Condvar, mutex_guard: &mut MutexGuard<'_, T>) -> bool;
+    fn result(&self, result: Result<RootedValue, TaskError>) -> Self::Result;
+    fn cancelled_result(&self) -> Self::Result;
+}
+
+impl ResultDeadline for () {
+    type Result = Result<RootedValue, TaskError>;
+
+    fn wait<T>(&self, sync: &Condvar, mutex_guard: &mut MutexGuard<'_, T>) -> bool {
+        sync.wait(mutex_guard);
+        true
+    }
+
+    fn result(&self, result: Result<RootedValue, TaskError>) -> Self::Result {
+        result
+    }
+
+    fn cancelled_result(&self) -> Self::Result {
+        unreachable!()
+    }
+}
+
+impl ResultDeadline for Instant {
+    type Result = Option<Result<RootedValue, TaskError>>;
+    fn wait<T>(&self, sync: &Condvar, mutex_guard: &mut MutexGuard<'_, T>) -> bool {
+        !sync.wait_until(mutex_guard, *self).timed_out()
+    }
+
+    fn result(&self, result: Result<RootedValue, TaskError>) -> Self::Result {
+        Some(result)
+    }
+
+    fn cancelled_result(&self) -> Self::Result {
+        None
+    }
+}
+
 #[derive(Debug)]
 struct ResultHandleFuture<'a>(&'a ResultHandle);
 
 impl Future for ResultHandleFuture<'_> {
-    type Output = Result<RootedValue, RootedValue>;
+    type Output = Result<RootedValue, TaskError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut data = self.0 .0.locked.lock();
@@ -596,9 +693,18 @@ struct ResultHandleData {
     locked: Mutex<ResultHandleResult>,
 }
 
+#[derive(Debug, Clone)]
+pub enum TaskError {
+    Cancelled,
+    Compilation(Vec<Ranged<compiler::Error>>),
+    Exception(RootedValue),
+}
+
 #[derive(Default)]
 struct ResultHandleResult {
-    result: Option<Result<RootedValue, RootedValue>>,
+    result: Option<Result<RootedValue, TaskError>>,
+    cancelled: bool,
+    cancellation: Option<TaskCanceller>,
     wakers: Vec<Waker>,
 }
 
@@ -656,9 +762,18 @@ impl ReactorTasks {
 
     fn complete_running_task(&mut self, result: Result<RootedValue, RootedValue>) {
         let task_id = self.executing.pop_front().expect("no running task");
+        self.complete_task(task_id, result.map_err(TaskError::Exception));
+    }
+
+    fn complete_task(
+        &mut self,
+        task_id: LotId,
+        result: Result<RootedValue, TaskError>,
+    ) -> ReactorTask {
         let task = self.all.remove(task_id).expect("task missing");
         let _result = task.result.send(result);
         self.registered.remove(&task.global_id);
+        task
     }
 
     fn wake_woken(&mut self) {
@@ -679,6 +794,32 @@ impl ReactorTasks {
     }
 }
 
+#[derive(Clone)]
+struct TaskCanceller {
+    canceller: Arc<dyn Cancel>,
+    unparker: Unparker,
+}
+
+impl TaskCanceller {
+    fn cancel(&self, global_id: usize) {
+        self.canceller.cancel(global_id);
+        self.unparker.unpark();
+    }
+}
+
+trait Cancel: Send + Sync + 'static {
+    fn cancel(&self, id: usize);
+}
+
+impl<Work> Cancel for Sender<ThreadCommand<Work>>
+where
+    Work: WorkUnit,
+{
+    fn cancel(&self, id: usize) {
+        let _result = self.send(ThreadCommand::Cancel(id));
+    }
+}
+
 #[derive(Trace)]
 pub struct TaskHandle {
     global_id: usize,
@@ -686,16 +827,32 @@ pub struct TaskHandle {
 }
 
 impl TaskHandle {
-    pub fn join(&self) -> Result<RootedValue, RootedValue> {
-        self.result.recv()
+    pub fn join(&self) -> Result<RootedValue, TaskError> {
+        self.result.recv(())
     }
 
-    pub fn try_join(&self) -> Option<Result<RootedValue, RootedValue>> {
+    pub fn try_join(&self) -> Option<Result<RootedValue, TaskError>> {
         self.result.try_recv()
     }
 
-    pub async fn join_async(&self) -> Result<RootedValue, RootedValue> {
+    pub fn try_join_until(&self, deadline: Instant) -> Option<Result<RootedValue, TaskError>> {
+        self.result.recv(deadline)
+    }
+
+    pub fn try_join_for(&self, duration: Duration) -> Option<Result<RootedValue, TaskError>> {
+        self.try_join_until(Instant::now() + duration)
+    }
+
+    pub async fn join_async(&self) -> Result<RootedValue, TaskError> {
         self.result.recv_async().await
+    }
+
+    pub fn cancel(&self) {
+        let mut locked = self.result.0.locked.lock();
+        locked.cancelled = true;
+        if let Some(cancellation) = &locked.cancellation {
+            cancellation.cancel(self.global_id);
+        }
     }
 }
 
@@ -708,9 +865,21 @@ impl CustomType for TaskHandle {
                     let mut context = Context::from_waker(&waker);
                     let mut future = this.result.recv_async();
                     match Pin::new(&mut future).poll(&mut context) {
-                        Poll::Ready(result) => result
-                            .map(|v| v.downgrade())
-                            .map_err(|e| Fault::Exception(e.downgrade())),
+                        Poll::Ready(result) => result.map(|v| v.downgrade()).map_err(|e| match e {
+                            TaskError::Cancelled => {
+                                Fault::Exception(Value::Symbol(SymbolRef::from("cancelled")))
+                            }
+                            TaskError::Compilation(errors) => {
+                                let err = errors.first().expect("at least one error");
+                                Fault::Exception(Value::Symbol(SymbolRef::from(format!(
+                                    "{}-{}: {}",
+                                    err.range().start,
+                                    err.range().end(),
+                                    err.0
+                                ))))
+                            }
+                            TaskError::Exception(e) => Fault::Exception(e.downgrade()),
+                        }),
                         Poll::Pending => Err(Fault::Waiting),
                     }
                 }
@@ -756,10 +925,12 @@ where
                     if arity == 2 {
                         let vm = ctx.cloned_vm();
                         vm.set_register(Register(0), ctx[Register(0)]);
-                        let f = ctx[Register(0)].as_rooted::<Function>(ctx.guard()).unwrap();
+                        let f = ctx[Register(0)]
+                            .as_rooted::<Function>(ctx.guard())
+                            .ok_or(Fault::NotAFunction)?;
                         let args = ctx[Register(1)]
                             .as_downcast_ref::<List>(ctx.guard())
-                            .unwrap()
+                            .ok_or(Fault::ExpectedList)?
                             .to_vec()
                             .into_iter()
                             .map(|v| v.upgrade(ctx.guard()).ok_or(Fault::ValueFreed))
@@ -767,7 +938,11 @@ where
                         if let Some(code) =
                             f.body(Arity::try_from(args.len()).map_err(|_| Fault::InvalidArity)?)
                         {
-                            let task = reactor.spawn_call(code.clone(), args).unwrap();
+                            let task = reactor.spawn_call(code.clone(), args).map_err(|_| {
+                                Fault::Exception(Value::Symbol(SymbolRef::from(
+                                    "reactor-is-shut-down",
+                                )))
+                            })?;
                             Ok(Value::dynamic(task, ctx.guard()))
                         } else {
                             Err(Fault::InvalidArity)
@@ -978,6 +1153,12 @@ impl From<ExecutionError> for PrepareError {
     }
 }
 
+impl From<Fault> for PrepareError {
+    fn from(err: Fault) -> Self {
+        Self::Execution(ExecutionError::Exception(err.as_value()))
+    }
+}
+
 impl From<Vec<Ranged<compiler::Error>>> for PrepareError {
     fn from(err: Vec<Ranged<compiler::Error>>) -> Self {
         Self::Compilation(err)
@@ -985,7 +1166,11 @@ impl From<Vec<Ranged<compiler::Error>>> for PrepareError {
 }
 
 pub trait NewVm<Work>: Send + Sync + 'static {
-    fn new_vm(&self, guard: &mut CollectionGuard<'_>, reactor: &ReactorHandle<Work>) -> Vm;
+    fn new_vm(
+        &self,
+        guard: &mut CollectionGuard<'_>,
+        reactor: &ReactorHandle<Work>,
+    ) -> Result<Vm, PrepareError>;
 
     fn compile_and_prepare(
         &self,
@@ -994,7 +1179,7 @@ pub trait NewVm<Work>: Send + Sync + 'static {
         reactor: &ReactorHandle<Work>,
     ) -> Result<Vm, PrepareError> {
         let code = Compiler::default().with(source).build(guard)?;
-        let vm = self.new_vm(guard, reactor);
+        let vm = self.new_vm(guard, reactor)?;
         vm.prepare(&code, guard)?;
         Ok(vm)
     }
@@ -1006,7 +1191,7 @@ pub trait NewVm<Work>: Send + Sync + 'static {
         guard: &mut CollectionGuard<'_>,
         reactor: &ReactorHandle<Work>,
     ) -> Result<Vm, PrepareError> {
-        let vm = self.new_vm(guard, reactor);
+        let vm = self.new_vm(guard, reactor)?;
         let mut ctx = vm.context(guard);
         for (arg, reg) in args.into_iter().zip(0..=255) {
             ctx[Register(reg)] = arg.downgrade();
@@ -1020,23 +1205,33 @@ pub trait NewVm<Work>: Send + Sync + 'static {
 
 impl<F, Work> NewVm<Work> for F
 where
-    F: Fn(&mut CollectionGuard<'_>, &ReactorHandle<Work>) -> Vm + Send + Sync + 'static,
+    F: Fn(&mut CollectionGuard<'_>, &ReactorHandle<Work>) -> Result<Vm, PrepareError>
+        + Send
+        + Sync
+        + 'static,
     Work: WorkUnit,
 {
-    fn new_vm(&self, guard: &mut CollectionGuard<'_>, reactor: &ReactorHandle<Work>) -> Vm {
+    fn new_vm(
+        &self,
+        guard: &mut CollectionGuard<'_>,
+        reactor: &ReactorHandle<Work>,
+    ) -> Result<Vm, PrepareError> {
         self(guard, reactor)
     }
 }
 
 impl<Work: WorkUnit> NewVm<Work> for () {
-    fn new_vm(&self, guard: &mut CollectionGuard<'_>, reactor: &ReactorHandle<Work>) -> Vm {
+    fn new_vm(
+        &self,
+        guard: &mut CollectionGuard<'_>,
+        reactor: &ReactorHandle<Work>,
+    ) -> Result<Vm, PrepareError> {
         let locked_vm = Vm::new(guard);
         let mut vm = locked_vm.context(guard);
         let reactor_module = reactor.runtime_module_in(vm.root_module(), vm.guard());
-        vm.declare("task", Value::Dynamic(reactor_module.as_any_dynamic()))
-            .unwrap();
+        vm.declare("task", Value::Dynamic(reactor_module.as_any_dynamic()))?;
         drop(vm);
-        locked_vm
+        Ok(locked_vm)
     }
 }
 
@@ -1056,7 +1251,7 @@ impl WorkUnit for Code {
         guard: &mut CollectionGuard<'_>,
         reactor: &ReactorHandle<Self>,
     ) -> Result<Vm, PrepareError> {
-        let vm = vms.new_vm(guard, reactor);
+        let vm = vms.new_vm(guard, reactor)?;
         vm.prepare(&self, guard)?;
         Ok(vm)
     }
@@ -1071,7 +1266,7 @@ impl WorkUnit for NoWork {
         guard: &mut CollectionGuard<'_>,
         reactor: &ReactorHandle<Self>,
     ) -> Result<Vm, PrepareError> {
-        Ok(vms.new_vm(guard, reactor))
+        vms.new_vm(guard, reactor)
     }
 }
 
@@ -1223,7 +1418,7 @@ fn budgeting_basic() {
             |guard: &mut CollectionGuard<'_>, _reactor: &ReactorHandle<NoWork>| {
                 let vm = Vm::new(guard);
                 vm.set_steps_per_charge(1);
-                vm
+                Ok(vm)
             },
         )
         .finish();
@@ -1240,4 +1435,43 @@ fn budgeting_basic() {
     // TODO add RootedValue PartialEq
     let result = task.join().unwrap().downgrade();
     assert_eq!(result, Value::Int(3));
+}
+
+#[test]
+fn spawn_err() {
+    let reactor = Reactor::new();
+    let task = reactor.spawn_source("invalid source code").unwrap();
+    match task.join() {
+        Err(TaskError::Compilation(errors)) => assert_eq!(
+            errors,
+            vec![Ranged(
+                compiler::Error::Syntax(crate::compiler::syntax::ParseError::ExpectedEof),
+                compiler::syntax::SourceRange {
+                    source_id: compiler::syntax::SourceId::anonymous(),
+                    start: 8,
+                    length: 6
+                }
+            )]
+        ),
+        other => unreachable!("unexpected result: {other:?}"),
+    };
+}
+
+#[test]
+fn task_cancellation() {
+    let reactor = Reactor::new();
+    // Spawn a task with an infinite loop
+    let task = reactor.spawn_source("loop {}").unwrap();
+    // Wait a bit to make sure it's running.
+    assert!(task.try_join_for(Duration::from_secs(1)).is_none());
+
+    // Cancel the task.
+    println!("Cancelling");
+    task.cancel();
+
+    // Ensure we get a cancellation error.
+    match task.join() {
+        Err(TaskError::Cancelled) => {}
+        other => unreachable!("unexpected result: {other:?}"),
+    }
 }

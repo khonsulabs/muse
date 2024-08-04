@@ -2123,6 +2123,16 @@ impl ExecutionError {
             other => Self::Exception(other.as_exception(vm)),
         }
     }
+
+    /// Returns this error as a [`Value`].
+    pub fn as_value(&self) -> Value {
+        match self {
+            ExecutionError::NoBudget => Value::Symbol(SymbolRef::from("no-budget")),
+            ExecutionError::Waiting => Value::Symbol(SymbolRef::from("waiting")),
+            ExecutionError::Timeout => Value::Symbol(SymbolRef::from("timeout")),
+            ExecutionError::Exception(v) => *v,
+        }
+    }
 }
 
 /// A virtual machine error.
@@ -2180,6 +2190,8 @@ pub enum Fault {
     ExpectedInteger,
     /// An operation expected a string.
     ExpectedString,
+    /// An operation expected a list.
+    ExpectedList,
     /// An invalid value was provided for the [`Arity`] of a function.
     InvalidArity,
     /// An invalid label was encountered.
@@ -2196,10 +2208,9 @@ impl Fault {
         matches!(self, Fault::NoBudget | Fault::Waiting | Fault::Timeout)
     }
 
-    /// Converts this fault into an exception.
-    #[must_use]
-    pub fn as_exception(&self, vm: &mut VmContext<'_, '_>) -> Value {
-        let exception = match self {
+    /// Returns this error as a [`Value`].
+    pub fn as_value(&self) -> Value {
+        match self {
             Fault::UnknownSymbol => Symbol::from("undefined").into(),
             Fault::Forbidden => Symbol::from("forbidden").into(),
             Fault::IncorrectNumberOfArguments => Symbol::from("args").into(),
@@ -2218,6 +2229,7 @@ impl Fault {
             Fault::ExpectedSymbol => Symbol::from("expected_symbol").into(),
             Fault::ExpectedInteger => Symbol::from("expected_integer").into(),
             Fault::ExpectedString => Symbol::from("expected_string").into(),
+            Fault::ExpectedList => Symbol::from("expected_list").into(),
             Fault::InvalidArity => Symbol::from("invalid_arity").into(),
             Fault::InvalidLabel => Symbol::from("invalid_label").into(),
             Fault::InvalidOpcode => Symbol::from("invalid_opcode").into(),
@@ -2227,7 +2239,13 @@ impl Fault {
             Fault::FrameChanged => Symbol::from("frame_changed").into(),
             Fault::Exception(value) => return *value,
             Fault::PatternMismatch => Symbol::from("mismatch").into(),
-        };
+        }
+    }
+
+    /// Converts this fault into an exception.
+    #[must_use]
+    pub fn as_exception(&self, vm: &mut VmContext<'_, '_>) -> Value {
+        let exception = self.as_value();
         Value::dynamic(Exception::new(exception, vm), vm)
     }
 
