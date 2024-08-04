@@ -882,8 +882,10 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         }
     }
 
+    /// Returns a waker that will wake this virtual machine context when waiting
+    /// on async tasks.
     #[must_use]
-    pub(crate) fn waker(&self) -> &Waker {
+    pub fn waker(&self) -> &Waker {
         &self.waker
     }
 

@@ -6,8 +6,8 @@
 //! between function calls. This ends up being a pretty good way to profile the
 //! virtual machine to see overall bottlenecks in code execution.
 
+use muse::refuse::CollectionGuard;
 use muse::vm::Vm;
-use refuse::CollectionGuard;
 
 fn main() {
     let mut guard = CollectionGuard::acquire();

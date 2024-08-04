@@ -7,12 +7,12 @@ use std::process::exit;
 use muse::compiler::syntax::token::{Paired, Token};
 use muse::compiler::syntax::Ranged;
 use muse::compiler::Compiler;
+use muse::refuse::{self, CollectionGuard, Trace};
 use muse::runtime::exception::Exception;
 use muse::runtime::symbol::Symbol;
 use muse::runtime::value::{CustomType, RustFunction, RustType, Value};
 use muse::vm::{ExecutionError, Fault, Register, Vm, VmContext};
 use muse::Error;
-use refuse::{CollectionGuard, Trace};
 
 fn main() {
     let filter = std::env::args().nth(1).unwrap_or_default();

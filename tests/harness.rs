@@ -7,6 +7,7 @@ use std::process::exit;
 use muse::compiler::syntax::token::RegexLiteral;
 use muse::compiler::syntax::{Ranged, SourceRange};
 use muse::compiler::{Compiler, Error};
+use muse::refuse::CollectionGuard;
 use muse::runtime::exception::Exception;
 use muse::runtime::list::List;
 use muse::runtime::map::Map;
@@ -15,7 +16,6 @@ use muse::runtime::string::MuseString;
 use muse::runtime::symbol::Symbol;
 use muse::runtime::value::Value;
 use muse::vm::{Code, ExecutionError, StackFrame, Vm};
-use refuse::CollectionGuard;
 use serde::de::Visitor;
 use serde::Deserialize;
 

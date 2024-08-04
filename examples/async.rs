@@ -1,10 +1,10 @@
 //! An example showing how to use Muse in async.
 
 use muse::compiler::Compiler;
+use muse::refuse::CollectionGuard;
 use muse::runtime::symbol::Symbol;
 use muse::runtime::value::{AsyncFunction, Value};
 use muse::vm::{Arity, Fault, Register, Vm, VmContext};
-use refuse::CollectionGuard;
 
 fn main() {
     let (input_sender, input_receiver) = flume::unbounded();

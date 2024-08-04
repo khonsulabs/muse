@@ -1,0 +1,13 @@
+[package]
+name = "muse-reactor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+muse-lang = { workspace = true }
+alot = { workspace = true }
+flume = { version = "0.11.0" }
+crossbeam-utils = { workspace = true }
+kempt = { workspace = true }
+parking_lot = { workspace = true }
+refuse = { workspace = true }

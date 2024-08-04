@@ -1576,22 +1576,43 @@ dependencies = [
 name = "muse"
 version = "0.1.0"
 dependencies = [
- "ahash",
- "alot",
  "ariadne",
- "crossbeam-utils",
  "dirs",
  "flume",
- "kempt",
- "parking_lot",
+ "muse-lang",
  "pollster",
- "refuse",
- "refuse-pool",
- "regex",
  "rsn",
  "rustyline",
  "serde",
+]
+
+[[package]]
+name = "muse-lang"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "alot",
+ "crossbeam-utils",
+ "kempt",
+ "parking_lot",
+ "refuse",
+ "refuse-pool",
+ "regex",
+ "serde",
  "unicode-ident",
+]
+
+[[package]]
+name = "muse-reactor"
+version = "0.1.0"
+dependencies = [
+ "alot",
+ "crossbeam-utils",
+ "flume",
+ "kempt",
+ "muse-lang",
+ "parking_lot",
+ "refuse",
 ]
 
 [[package]]

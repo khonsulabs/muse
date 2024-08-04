@@ -1,0 +1,20 @@
+[package]
+name = "muse-lang"
+version = "0.1.0"
+edition = "2021"
+
+
+[features]
+dispatched = []
+
+[dependencies]
+serde = { workspace = true }
+refuse = { workspace = true }
+refuse-pool = { workspace = true }
+alot = { workspace = true }
+crossbeam-utils = { workspace = true }
+kempt = { workspace = true }
+parking_lot = { workspace = true }
+ahash = "0.8.7"
+regex = "1.10.3"
+unicode-ident = "1.0.12"

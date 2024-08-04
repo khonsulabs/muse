@@ -4,8 +4,8 @@
 //! private function will result in an error.
 
 use muse::compiler::syntax::Sources;
+use muse::refuse::CollectionGuard;
 use muse::vm::Vm;
-use refuse::CollectionGuard;
 
 fn main() {
     let mut guard = CollectionGuard::acquire();

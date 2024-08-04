@@ -7,10 +7,10 @@
 //! virtual machine to see overall bottlenecks in code execution.
 
 use muse::compiler::syntax::CompareKind::LessThanOrEqual;
+use muse::refuse::CollectionGuard;
 use muse::runtime::symbol::Symbol;
 use muse::vm::bitcode::BitcodeBlock;
 use muse::vm::{Function, Register as R, Vm, VmContext};
-use refuse::CollectionGuard;
 
 fn main() {
     let mut guard = CollectionGuard::acquire();

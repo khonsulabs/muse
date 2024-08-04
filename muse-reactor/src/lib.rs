@@ -24,7 +24,7 @@ use kempt::{Map, Set};
 use parking_lot::{Condvar, Mutex, MutexGuard};
 use refuse::{CollectionGuard, ContainsNoRefs, Trace};
 
-use crate::{
+use muse_lang::{
     compiler::{self, syntax::Ranged, Compiler},
     runtime::value::RustType,
     vm::{
@@ -33,7 +33,7 @@ use crate::{
     },
 };
 
-use super::{
+use muse_lang::runtime::{
     list::List,
     symbol::SymbolRef,
     value::{CustomType, Dynamic, Rooted, RootedValue, RustFunction, Value},
@@ -857,7 +857,7 @@ impl TaskHandle {
 }
 
 impl CustomType for TaskHandle {
-    fn muse_type(&self) -> &super::value::TypeRef {
+    fn muse_type(&self) -> &muse_lang::runtime::value::TypeRef {
         static TYPE: RustType<TaskHandle> = RustType::new("TaskHandle", |t| {
             t.with_call(|_| {
                 |this, vm, _arity| {
