@@ -68,6 +68,9 @@ harness = false
 name = "hosted"
 harness = false
 
+[package.metadata.docs.rs]
+all-features = true
+
 [profile.release]
 debug = true
 lto = true

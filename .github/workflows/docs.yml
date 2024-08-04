@@ -8,11 +8,13 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
 
       - name: Generate Docs
         run: |
-          cargo doc --no-deps --all-features --workspace
+           cargo +nightly doc --no-deps --all-features --workspace
+        env:
+          RUSTDOCFLAGS: "--cfg docsrs"
 
       - name: Deploy
         uses: khonsulabs/sync-to-dossier@main
