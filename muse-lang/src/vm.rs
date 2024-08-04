@@ -2210,45 +2210,51 @@ impl Fault {
         matches!(self, Fault::NoBudget | Fault::Waiting | Fault::Timeout)
     }
 
-    /// Returns this error as a [`Value`].
-    pub fn as_value(&self) -> Value {
+    /// Returns this error as a [`Symbol`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the contained exception as `Err` if this fault is an exception.
+    pub fn as_symbol(&self) -> Result<Symbol, Value> {
         match self {
-            Fault::UnknownSymbol => Symbol::from("undefined").into(),
-            Fault::Forbidden => Symbol::from("forbidden").into(),
-            Fault::IncorrectNumberOfArguments => Symbol::from("args").into(),
-            Fault::OperationOnNil => Symbol::from("nil").into(),
-            Fault::ValueFreed => Symbol::from("out-of-scope").into(),
-            Fault::NotAFunction => Symbol::from("not_invokable").into(),
-            Fault::NotAModule => Symbol::from("not_a_module").into(),
-            Fault::StackOverflow => Symbol::from("overflow").into(),
-            Fault::StackUnderflow => Symbol::from("underflow").into(),
-            Fault::UnsupportedOperation => Symbol::from("unsupported").into(),
-            Fault::OutOfMemory => Symbol::from("out_of_memory").into(),
-            Fault::OutOfBounds => Symbol::from("out_of_bounds").into(),
-            Fault::NotMutable => Symbol::from("immutable").into(),
-            Fault::DivideByZero => Symbol::from("divided_by_zero").into(),
-            Fault::InvalidInstructionAddress => Symbol::from("invalid_instruction").into(),
-            Fault::ExpectedSymbol => Symbol::from("expected_symbol").into(),
-            Fault::ExpectedInteger => Symbol::from("expected_integer").into(),
-            Fault::ExpectedString => Symbol::from("expected_string").into(),
-            Fault::ExpectedList => Symbol::from("expected_list").into(),
-            Fault::InvalidArity => Symbol::from("invalid_arity").into(),
-            Fault::InvalidLabel => Symbol::from("invalid_label").into(),
-            Fault::InvalidOpcode => Symbol::from("invalid_opcode").into(),
-            Fault::NoBudget => Symbol::from("no_budget").into(),
-            Fault::Timeout => Symbol::from("timeout").into(),
-            Fault::Waiting => Symbol::from("waiting").into(),
-            Fault::FrameChanged => Symbol::from("frame_changed").into(),
-            Fault::Exception(value) => return *value,
-            Fault::PatternMismatch => Symbol::from("mismatch").into(),
+            Fault::UnknownSymbol => Ok(Symbol::from("undefined")),
+            Fault::Forbidden => Ok(Symbol::from("forbidden")),
+            Fault::IncorrectNumberOfArguments => Ok(Symbol::from("args")),
+            Fault::OperationOnNil => Ok(Symbol::from("nil")),
+            Fault::ValueFreed => Ok(Symbol::from("Some(out-of-scope")),
+            Fault::NotAFunction => Ok(Symbol::from("not_invokable")),
+            Fault::NotAModule => Ok(Symbol::from("not_a_module")),
+            Fault::StackOverflow => Ok(Symbol::from("overflow")),
+            Fault::StackUnderflow => Ok(Symbol::from("underflow")),
+            Fault::UnsupportedOperation => Ok(Symbol::from("unsupported")),
+            Fault::OutOfMemory => Ok(Symbol::from("out_of_memory")),
+            Fault::OutOfBounds => Ok(Symbol::from("out_of_bounds")),
+            Fault::NotMutable => Ok(Symbol::from("immutable")),
+            Fault::DivideByZero => Ok(Symbol::from("divided_by_zero")),
+            Fault::InvalidInstructionAddress => Ok(Symbol::from("invalid_instruction")),
+            Fault::ExpectedSymbol => Ok(Symbol::from("expected_symbol")),
+            Fault::ExpectedInteger => Ok(Symbol::from("expected_integer")),
+            Fault::ExpectedString => Ok(Symbol::from("expected_string")),
+            Fault::ExpectedList => Ok(Symbol::from("expected_list")),
+            Fault::InvalidArity => Ok(Symbol::from("invalid_arity")),
+            Fault::InvalidLabel => Ok(Symbol::from("invalid_label")),
+            Fault::InvalidOpcode => Ok(Symbol::from("invalid_opcode")),
+            Fault::NoBudget => Ok(Symbol::from("no_budget")),
+            Fault::Timeout => Ok(Symbol::from("timeout")),
+            Fault::Waiting => Ok(Symbol::from("waiting")),
+            Fault::FrameChanged => Ok(Symbol::from("frame_changed")),
+            Fault::PatternMismatch => Ok(Symbol::from("mismatch")),
+            Fault::Exception(exc) => Err(*exc),
         }
     }
 
     /// Converts this fault into an exception.
     #[must_use]
     pub fn as_exception(&self, vm: &mut VmContext<'_, '_>) -> Value {
-        let exception = self.as_value();
-        Value::dynamic(Exception::new(exception, vm), vm)
+        match self.as_symbol() {
+            Ok(sym) => Value::dynamic(Exception::new(sym.into(), vm), vm),
+            Err(exc) => exc,
+        }
     }
 
     fn from_kind(kind: FaultKind, vm: &mut VmContext<'_, '_>) -> Self {

@@ -1155,7 +1155,10 @@ impl From<ExecutionError> for PrepareError {
 
 impl From<Fault> for PrepareError {
     fn from(err: Fault) -> Self {
-        Self::Execution(ExecutionError::Exception(err.as_value()))
+        Self::Execution(ExecutionError::Exception(match err.as_symbol() {
+            Ok(sym) => Value::Symbol(sym.downgrade()),
+            Err(exc) => exc,
+        }))
     }
 }
 
