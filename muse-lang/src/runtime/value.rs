@@ -4483,3 +4483,12 @@ impl Default for RootedValue {
         Self::nil()
     }
 }
+
+impl PartialEq for RootedValue {
+    fn eq(&self, other: &Self) -> bool {
+        let other = other.downgrade();
+        self.downgrade()
+            .equals(ContextOrGuard::Guard(&CollectionGuard::acquire()), &other)
+            .unwrap_or(false)
+    }
+}

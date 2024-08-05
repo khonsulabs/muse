@@ -2,7 +2,7 @@ use std::{thread, time::Duration};
 
 use muse_lang::{
     compiler::{self, syntax::Ranged},
-    runtime::value::{Primitive, Value},
+    runtime::value::{Primitive, RootedValue},
     vm::Vm,
 };
 use refuse::CollectionGuard;
@@ -13,9 +13,10 @@ use crate::{BudgetPoolConfig, NoWork, Reactor, ReactorHandle, TaskError};
 fn works() {
     let reactor = Reactor::new();
     let task = reactor.spawn_source("1 + 2").unwrap();
-    // TODO add RootedValue PartialEq
-    let result = task.join().unwrap().downgrade();
-    assert_eq!(result, Value::Primitive(Primitive::Int(3)));
+    assert_eq!(
+        task.join().unwrap(),
+        RootedValue::Primitive(Primitive::Int(3))
+    );
 }
 
 #[test]
@@ -38,9 +39,10 @@ fn spawning() {
             ",
         )
         .unwrap();
-    let result = task.join().unwrap().downgrade();
-    // TODO add RootedValue PartialEq
-    assert_eq!(result, Value::Primitive(Primitive::Int((0..=100).sum())));
+    assert_eq!(
+        task.join().unwrap(),
+        RootedValue::Primitive(Primitive::Int((0..=100).sum()))
+    );
 }
 
 #[test]
@@ -64,9 +66,10 @@ fn budgeting_basic() {
     // Give it some budget
     pool.increase_budget(100).unwrap();
 
-    // TODO add RootedValue PartialEq
-    let result = task.join().unwrap().downgrade();
-    assert_eq!(result, Value::Primitive(Primitive::Int(3)));
+    assert_eq!(
+        task.join().unwrap(),
+        RootedValue::Primitive(Primitive::Int(3))
+    );
 }
 
 #[test]
