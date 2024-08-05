@@ -10,7 +10,7 @@ use cushy::{App, Application, Open, PendingApp};
 use muse_lang::refuse::{self, CollectionGuard, SimpleType, Trace};
 use muse_lang::runtime::symbol::Symbol;
 use muse_lang::runtime::value::{
-    ContextOrGuard, CustomType, RustFunction, RustType, TypeRef, Value,
+    ContextOrGuard, CustomType, Primitive, RustFunction, RustType, TypeRef, Value,
 };
 use muse_lang::vm::{Fault, Register, Vm, VmContext};
 
@@ -89,7 +89,7 @@ impl CustomType for DynamicValue {
                                 Ok(old_value)
                             }
                         } else {
-                            Ok(Value::Nil)
+                            Ok(Value::nil())
                         }
                     } else if name == &Symbol::from("slider_between") && arity == 2 {
                         let start = vm[Register(0)].take();
@@ -105,20 +105,20 @@ impl CustomType for DynamicValue {
                                     this.0
                                         .linked(
                                             |v| v.as_f64().unwrap_or_default(),
-                                            |v| Value::Float(*v),
+                                            |v| Value::Primitive(Primitive::Float(*v)),
                                         )
                                         .slider_between(
                                             linked_dynamic_value(
                                                 &start,
                                                 vm.as_ref(),
                                                 |value| value.as_f64().unwrap_or_default(),
-                                                |float| Value::Float(*float),
+                                                |float| Value::Primitive(Primitive::Float(*float)),
                                             ),
                                             linked_dynamic_value(
                                                 &end,
                                                 vm.as_ref(),
                                                 |value| value.as_f64().unwrap_or_default(),
-                                                |float| Value::Float(*float),
+                                                |float| Value::Primitive(Primitive::Float(*float)),
                                             ),
                                         ),
                                 ),
@@ -129,20 +129,20 @@ impl CustomType for DynamicValue {
                                     this.0
                                         .linked(
                                             |v| v.as_i64().unwrap_or_default(),
-                                            |v| Value::Int(*v),
+                                            |v| Value::Primitive(Primitive::Int(*v)),
                                         )
                                         .slider_between(
                                             linked_dynamic_value(
                                                 &start,
                                                 vm.as_ref(),
                                                 |value| value.as_i64().unwrap_or_default(),
-                                                |int| Value::Int(*int),
+                                                |int| Value::Primitive(Primitive::Int(*int)),
                                             ),
                                             linked_dynamic_value(
                                                 &end,
                                                 vm.as_ref(),
                                                 |value| value.as_i64().unwrap_or_default(),
-                                                |int| Value::Int(*int),
+                                                |int| Value::Primitive(Primitive::Int(*int)),
                                             ),
                                         ),
                                 ),
@@ -182,8 +182,8 @@ impl CustomType for DynamicValue {
 
 fn numeric_kind(value: &Value, guard: &CollectionGuard) -> NumericKind {
     map_dynamic_value(value, guard, |value| match value {
-        Value::Int(_) => NumericKind::Int,
-        Value::Float(_) => NumericKind::Float,
+        Value::Primitive(Primitive::Int(_)) => NumericKind::Int,
+        Value::Primitive(Primitive::Float(_)) => NumericKind::Float,
         _ => NumericKind::Unknown,
     })
 }

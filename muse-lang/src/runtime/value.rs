@@ -28,9 +28,9 @@ use crate::vm::bitcode::{BitcodeFunction, ValueOrSource};
 use crate::vm::Function;
 use crate::vm::{Arity, ExecutionError, Fault, VmContext};
 
-/// A Muse virtual machine value.
+/// A primitive virtual machine value.
 #[derive(Default, Clone, Copy, Debug)]
-pub enum Value {
+pub enum Primitive {
     /// A value representing nothing.
     #[default]
     Nil,
@@ -42,6 +42,807 @@ pub enum Value {
     UInt(u64),
     /// A double-preceision floating point number.
     Float(f64),
+}
+
+impl Primitive {
+    /// Returns true if this value is nil.
+    #[must_use]
+    pub const fn is_nil(&self) -> bool {
+        matches!(self, Self::Nil)
+    }
+
+    /// Returns this value as an i64, if possible.
+    #[must_use]
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Self::Int(value) => Some(*value),
+            Self::UInt(value) => i64::try_from(*value).ok(),
+            #[allow(clippy::cast_possible_truncation)]
+            Self::Float(value) => Some(*value as i64),
+            _ => None,
+        }
+    }
+
+    /// Returns this value as an u64, if possible.
+    #[must_use]
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Self::Int(value) => u64::try_from(*value).ok(),
+            Self::UInt(value) => Some(*value),
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Self::Float(value) => Some(*value as u64),
+            _ => None,
+        }
+    }
+
+    /// Returns this value as an u32, if possible.
+    #[must_use]
+    pub fn as_u32(&self) -> Option<u32> {
+        match self {
+            Self::Int(value) => u32::try_from(*value).ok(),
+            Self::UInt(value) => u32::try_from(*value).ok(),
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Self::Float(value) => Some(*value as u32),
+            _ => None,
+        }
+    }
+
+    /// Returns this value as an u16, if possible.
+    #[must_use]
+    pub fn as_u16(&self) -> Option<u16> {
+        match self {
+            Self::Int(value) => u16::try_from(*value).ok(),
+            Self::UInt(value) => u16::try_from(*value).ok(),
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Self::Float(value) => Some(*value as u16),
+            _ => None,
+        }
+    }
+
+    /// Returns this value as an usize, if possible.
+    #[must_use]
+    pub fn as_usize(&self) -> Option<usize> {
+        match self {
+            Self::Int(value) => usize::try_from(*value).ok(),
+            Self::UInt(value) => usize::try_from(*value).ok(),
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Self::Float(value) => Some(*value as usize),
+            _ => None,
+        }
+    }
+
+    /// Returns this value as an f64, if possible.
+    #[must_use]
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            #[allow(clippy::cast_precision_loss)]
+            Self::Int(value) => Some(*value as f64),
+            Self::Float(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Converts this value to an i64, if possible.
+    #[must_use]
+    pub fn to_i64(&self) -> Option<i64> {
+        match self {
+            Self::Int(value) => Some(*value),
+            Self::UInt(value) => i64::try_from(*value).ok(),
+            #[allow(clippy::cast_possible_truncation)]
+            Self::Float(value) => Some(*value as i64),
+            Self::Nil => Some(0),
+            Self::Bool(bool) => Some(i64::from(*bool)),
+        }
+    }
+
+    /// Converts this value to an u64, if possible.
+    #[must_use]
+    pub fn to_u64(&self) -> Option<u64> {
+        match self {
+            Self::Int(value) => u64::try_from(*value).ok(),
+            Self::UInt(value) => Some(*value),
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Self::Float(value) => Some(*value as u64),
+            Self::Nil => Some(0),
+            Self::Bool(bool) => Some(u64::from(*bool)),
+        }
+    }
+
+    /// Converts this value to an u32, if possible.
+    #[must_use]
+    pub fn to_u32(&self) -> Option<u32> {
+        match self {
+            Self::Int(value) => u32::try_from(*value).ok(),
+            Self::UInt(value) => u32::try_from(*value).ok(),
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Self::Float(value) => Some(*value as u32),
+            Self::Nil => Some(0),
+            Self::Bool(bool) => Some(u32::from(*bool)),
+        }
+    }
+
+    /// Converts this value to an usize, if possible.
+    #[must_use]
+    pub fn to_usize(&self) -> Option<usize> {
+        match self {
+            Self::Int(value) => usize::try_from(*value).ok(),
+            Self::UInt(value) => usize::try_from(*value).ok(),
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Self::Float(value) => Some(*value as usize),
+            Self::Nil => Some(0),
+            Self::Bool(bool) => Some(usize::from(*bool)),
+        }
+    }
+
+    /// Converts this value to an f64, if possible.
+    #[must_use]
+    pub fn to_f64(&self) -> f64 {
+        match self {
+            #[allow(clippy::cast_precision_loss)]
+            Self::Int(value) => *value as f64,
+            #[allow(clippy::cast_precision_loss)]
+            Self::UInt(value) => *value as f64,
+            Self::Float(value) => *value,
+            Self::Nil => 0.,
+            Self::Bool(bool) => f64::from(*bool),
+        }
+    }
+
+    /// Returns true if this value should be considered `true` in a boolean
+    /// expression.
+    pub fn truthy(&self) -> bool {
+        match self {
+            Self::Nil => false,
+            Self::Bool(value) => *value,
+            Self::Int(value) => value != &0,
+            Self::UInt(value) => value != &0,
+            Self::Float(value) => value.abs() >= f64::EPSILON,
+        }
+    }
+
+    /// Adds `self` to `rhs`.
+    pub fn add(&self, rhs: &Self) -> Result<Self, Fault> {
+        match (self, rhs) {
+            (Self::Nil, _) | (_, Self::Nil) => Err(Fault::OperationOnNil),
+            (Self::Bool(lhs), Self::Bool(rhs)) => Ok(Self::Bool(*lhs || *rhs)),
+            (Self::Bool(_), _) | (_, Self::Bool(_)) => Err(Fault::UnsupportedOperation),
+
+            (Self::Int(lhs), Self::Int(rhs)) => Ok(Self::Int(lhs.saturating_add(*rhs))),
+            (Self::Int(lhs), Self::UInt(rhs)) => Ok(Self::Int(lhs.saturating_add_unsigned(*rhs))),
+            (Self::UInt(lhs), Self::UInt(rhs)) => Ok(Self::UInt(lhs.saturating_add(*rhs))),
+            (Self::UInt(lhs), Self::Int(rhs)) => Ok(Self::UInt(lhs.saturating_add_signed(*rhs))),
+
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Int(lhs), Self::Float(rhs)) => Ok(Self::Float(*lhs as f64 + rhs)),
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Float(lhs), Self::Int(rhs)) => Ok(Self::Float(lhs + *rhs as f64)),
+            #[allow(clippy::cast_precision_loss)]
+            (Self::UInt(lhs), Self::Float(rhs)) => Ok(Self::Float(*lhs as f64 + rhs)),
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Float(lhs), Self::UInt(rhs)) => Ok(Self::Float(lhs + *rhs as f64)),
+            (Self::Float(lhs), Self::Float(rhs)) => Ok(Self::Float(lhs + rhs)),
+        }
+    }
+
+    /// Subtracts `rhs` from `self`.
+    pub fn sub(&self, rhs: &Self) -> Result<Self, Fault> {
+        match (self, rhs) {
+            (Self::Nil, _) | (_, Self::Nil) => Err(Fault::OperationOnNil),
+
+            (Self::Int(lhs), Self::Int(rhs)) => Ok(Self::Int(lhs.saturating_sub(*rhs))),
+            (Self::Int(lhs), Self::UInt(rhs)) => Ok(Self::Int(lhs.saturating_sub_unsigned(*rhs))),
+            (Self::UInt(lhs), Self::UInt(rhs)) => Ok(Self::UInt(lhs.saturating_sub(*rhs))),
+            (Self::UInt(lhs), Self::Int(rhs)) => {
+                Ok(Self::UInt(lhs.saturating_add_signed(rhs.saturating_neg())))
+            }
+
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Int(lhs), Self::Float(rhs)) => Ok(Self::Float(*lhs as f64 - rhs)),
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Float(lhs), Self::Int(rhs)) => Ok(Self::Float(lhs - *rhs as f64)),
+            #[allow(clippy::cast_precision_loss)]
+            (Self::UInt(lhs), Self::Float(rhs)) => Ok(Self::Float(*lhs as f64 - rhs)),
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Float(lhs), Self::UInt(rhs)) => Ok(Self::Float(lhs - *rhs as f64)),
+            (Self::Float(lhs), Self::Float(rhs)) => Ok(Self::Float(lhs - rhs)),
+
+            _ => Err(Fault::UnsupportedOperation),
+        }
+    }
+
+    /// Multiplies `self` by `rhs`.
+    pub fn mul(&self, rhs: &Self) -> Result<Self, Fault> {
+        match (self, rhs) {
+            (Self::Nil, _) | (_, Self::Nil) => Err(Fault::OperationOnNil),
+
+            (Self::Int(lhs), Self::Int(rhs)) => Ok(Self::Int(lhs.saturating_mul(*rhs))),
+            (Self::Int(lhs), Self::UInt(rhs)) => Ok(Self::Int(
+                lhs.saturating_mul(i64::try_from(*rhs).unwrap_or(i64::MAX)),
+            )),
+            (Self::UInt(lhs), Self::Int(rhs)) => {
+                Ok(Self::UInt(if let Ok(rhs) = u64::try_from(*rhs) {
+                    lhs.saturating_mul(rhs)
+                } else {
+                    0
+                }))
+            }
+            (Self::UInt(lhs), Self::UInt(rhs)) => Ok(Self::UInt(lhs.saturating_mul(*rhs))),
+
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Int(lhs), Self::Float(rhs)) => Ok(Self::Float(*lhs as f64 * rhs)),
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Float(lhs), Self::Int(rhs)) => Ok(Self::Float(lhs * *rhs as f64)),
+            (Self::Float(lhs), Self::Float(rhs)) => Ok(Self::Float(lhs * rhs)),
+
+            _ => Err(Fault::UnsupportedOperation),
+        }
+    }
+
+    /// Raises `self` to the `rhs` power.
+    pub fn pow(&self, exp: &Self) -> Result<Self, Fault> {
+        match (self, exp) {
+            (Self::Nil, _) | (_, Self::Nil) => Err(Fault::OperationOnNil),
+
+            (Self::Int(lhs), Self::Int(rhs)) => Ok(if rhs.is_negative() {
+                #[allow(clippy::cast_precision_loss)]
+                Self::Float(powf64_i64(*lhs as f64, *rhs))
+            } else {
+                Self::Int(lhs.saturating_pow(u32::try_from(*rhs).unwrap_or(u32::MAX)))
+            }),
+            (Self::Int(lhs), Self::UInt(rhs)) => Ok(Self::Int(
+                lhs.saturating_pow(u32::try_from(*rhs).unwrap_or(u32::MAX)),
+            )),
+            (Self::UInt(lhs), Self::Int(rhs)) => Ok(if rhs.is_negative() {
+                #[allow(clippy::cast_precision_loss)]
+                Self::Float(powf64_i64(*lhs as f64, *rhs))
+            } else {
+                Self::UInt(lhs.saturating_pow(u32::try_from(*rhs).unwrap_or(u32::MAX)))
+            }),
+            (Self::UInt(lhs), Self::UInt(rhs)) => Ok(Self::UInt(
+                lhs.saturating_pow(u32::try_from(*rhs).unwrap_or(u32::MAX)),
+            )),
+
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Int(lhs), Self::Float(rhs)) => Ok(Self::Float((*lhs as f64).powf(*rhs))),
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Float(lhs), Self::Int(rhs)) => Ok(Self::Float(powf64_i64(*lhs, *rhs))),
+            #[allow(clippy::cast_precision_loss)]
+            (Self::UInt(lhs), Self::Float(rhs)) => Ok(Self::Float((*lhs as f64).powf(*rhs))),
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Float(lhs), Self::UInt(rhs)) => Ok(Self::Float(powf64_u64(*lhs, *rhs))),
+            (Self::Float(lhs), Self::Float(rhs)) => Ok(Self::Float(lhs * rhs)),
+
+            _ => Err(Fault::UnsupportedOperation),
+        }
+    }
+
+    /// Divides `self` by `rhs`.
+    pub fn div(&self, rhs: &Self) -> Result<Self, Fault> {
+        match (self, rhs) {
+            (Self::Nil, _) | (_, Self::Nil) => Err(Fault::OperationOnNil),
+
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Int(lhs), Self::Int(rhs)) => {
+                if *rhs != 0 {
+                    Ok(Self::Float(*lhs as f64 / *rhs as f64))
+                } else {
+                    Err(Fault::DivideByZero)
+                }
+            }
+            #[allow(clippy::cast_precision_loss)]
+            (Self::UInt(lhs), Self::Int(rhs)) => {
+                if *rhs != 0 {
+                    Ok(Self::Float(*lhs as f64 / *rhs as f64))
+                } else {
+                    Err(Fault::DivideByZero)
+                }
+            }
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Int(lhs), Self::UInt(rhs)) => {
+                if *rhs != 0 {
+                    Ok(Self::Float(*lhs as f64 / *rhs as f64))
+                } else {
+                    Err(Fault::DivideByZero)
+                }
+            }
+            #[allow(clippy::cast_precision_loss)]
+            (Self::UInt(lhs), Self::UInt(rhs)) => {
+                if *rhs != 0 {
+                    Ok(Self::Float(*lhs as f64 / *rhs as f64))
+                } else {
+                    Err(Fault::DivideByZero)
+                }
+            }
+
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Int(lhs), Self::Float(rhs)) => Ok(Self::Float(*lhs as f64 / rhs)),
+            #[allow(clippy::cast_precision_loss)]
+            (Self::UInt(lhs), Self::Float(rhs)) => Ok(Self::Float(*lhs as f64 / rhs)),
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Float(lhs), Self::Int(rhs)) => {
+                if *rhs != 0 {
+                    Ok(Self::Float(lhs / *rhs as f64))
+                } else {
+                    Err(Fault::DivideByZero)
+                }
+            }
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Float(lhs), Self::UInt(rhs)) => {
+                if *rhs != 0 {
+                    Ok(Self::Float(lhs / *rhs as f64))
+                } else {
+                    Err(Fault::DivideByZero)
+                }
+            }
+            (Self::Float(lhs), Self::Float(rhs)) => Ok(Self::Float(lhs / rhs)),
+
+            _ => Err(Fault::UnsupportedOperation),
+        }
+    }
+
+    /// Divides `self` by `rhs`, using whole numbers.
+    pub fn idiv(&self, rhs: &Self) -> Result<Self, Fault> {
+        match (self, rhs) {
+            (Self::Nil, _) | (_, Self::Nil) => Err(Fault::OperationOnNil),
+
+            (Self::Int(lhs), Self::Int(rhs)) => Ok(Self::Int(lhs.saturating_div(*rhs))),
+            (Self::Int(lhs), Self::UInt(rhs)) => {
+                if *rhs != 0 {
+                    Ok(Self::Int(
+                        lhs.saturating_div(i64::try_from(*rhs).unwrap_or(i64::MAX)),
+                    ))
+                } else {
+                    Err(Fault::DivideByZero)
+                }
+            }
+            (Self::UInt(lhs), Self::Int(rhs)) => {
+                if *rhs != 0 {
+                    Ok(Self::UInt(if let Ok(rhs) = u64::try_from(*rhs) {
+                        lhs.saturating_div(rhs)
+                    } else {
+                        0
+                    }))
+                } else {
+                    Err(Fault::DivideByZero)
+                }
+            }
+            (Self::UInt(lhs), Self::UInt(rhs)) => {
+                if *rhs != 0 {
+                    Ok(Self::UInt(lhs.saturating_div(*rhs)))
+                } else {
+                    Err(Fault::DivideByZero)
+                }
+            }
+
+            #[allow(clippy::cast_possible_truncation)]
+            (Self::Int(lhs), Self::Float(rhs)) => Ok(Self::Int(*lhs / *rhs as i64)),
+            #[allow(clippy::cast_possible_truncation)]
+            (Self::Float(lhs), Self::Int(rhs)) => {
+                if *rhs != 0 {
+                    Ok(Self::Int(*lhs as i64 / *rhs))
+                } else {
+                    Err(Fault::DivideByZero)
+                }
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            (Self::UInt(lhs), Self::Float(rhs)) => {
+                let rhs = *rhs as u64;
+                if rhs == 0 {
+                    Err(Fault::DivideByZero)
+                } else {
+                    Ok(Self::UInt(*lhs / rhs))
+                }
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            (Self::Float(lhs), Self::UInt(rhs)) => {
+                if *rhs != 0 {
+                    Ok(Self::UInt(*lhs as u64 / *rhs))
+                } else {
+                    Err(Fault::DivideByZero)
+                }
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            (Self::Float(lhs), Self::Float(rhs)) => Ok(Self::Int(*lhs as i64 / *rhs as i64)),
+
+            _ => Err(Fault::UnsupportedOperation),
+        }
+    }
+
+    /// Calcualtes the remainder of dividing `self` by `rhs` using whole
+    /// numbers.
+    pub fn rem(&self, rhs: &Self) -> Result<Self, Fault> {
+        match (self, rhs) {
+            (Self::Nil, _) | (_, Self::Nil) => Err(Fault::OperationOnNil),
+
+            (Self::Int(lhs), Self::Int(rhs)) => Ok(Self::Int(lhs % rhs)),
+            (Self::Int(lhs), Self::UInt(rhs)) => {
+                if *rhs != 0 {
+                    Ok(Self::Int(lhs % i64::try_from(*rhs).unwrap_or(i64::MAX)))
+                } else {
+                    Err(Fault::DivideByZero)
+                }
+            }
+            (Self::UInt(lhs), Self::Int(rhs)) => {
+                if *rhs != 0 {
+                    Ok(Self::UInt(if let Ok(rhs) = u64::try_from(*rhs) {
+                        lhs % rhs
+                    } else {
+                        0
+                    }))
+                } else {
+                    Err(Fault::DivideByZero)
+                }
+            }
+            (Self::UInt(lhs), Self::UInt(rhs)) => {
+                if *rhs != 0 {
+                    Ok(Self::UInt(lhs % *rhs))
+                } else {
+                    Err(Fault::DivideByZero)
+                }
+            }
+
+            #[allow(clippy::cast_possible_truncation)]
+            (Self::Int(lhs), Self::Float(rhs)) => Ok(Self::Int(*lhs % *rhs as i64)),
+            #[allow(clippy::cast_possible_truncation)]
+            (Self::Float(lhs), Self::Int(rhs)) => {
+                if *rhs != 0 {
+                    Ok(Self::Int(*lhs as i64 % *rhs))
+                } else {
+                    Err(Fault::DivideByZero)
+                }
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            (Self::UInt(lhs), Self::Float(rhs)) => {
+                let rhs = *rhs as u64;
+                if rhs == 0 {
+                    Err(Fault::DivideByZero)
+                } else {
+                    Ok(Self::UInt(*lhs % rhs))
+                }
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            (Self::Float(lhs), Self::UInt(rhs)) => {
+                if *rhs != 0 {
+                    Ok(Self::UInt(*lhs as u64 % *rhs))
+                } else {
+                    Err(Fault::DivideByZero)
+                }
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            (Self::Float(lhs), Self::Float(rhs)) => Ok(Self::Int(*lhs as i64 % *rhs as i64)),
+
+            _ => Err(Fault::UnsupportedOperation),
+        }
+    }
+
+    /// Returns the inverse of [`Self::truthy`].
+    pub fn not(&self) -> Result<Self, Fault> {
+        Ok(Self::Bool(!self.truthy()))
+    }
+
+    /// Negates this value.
+    pub fn negate(&self) -> Self {
+        match self {
+            Self::Nil => Self::Nil,
+            Self::Bool(bool) => Self::Bool(!bool),
+            Self::Int(value) => Self::Int(-*value),
+            Self::UInt(value) => {
+                if let Ok(value) = i64::try_from(*value) {
+                    Self::Int(value.saturating_neg())
+                } else {
+                    Self::Int(i64::MIN)
+                }
+            }
+            Self::Float(value) => Self::Float(-*value),
+        }
+    }
+
+    /// Returns the bitwise not of this value.
+    pub fn bitwise_not(&self) -> Result<Self, Fault> {
+        match self {
+            Self::Nil => Ok(Self::Nil),
+            Self::Bool(bool) => Ok(Self::Bool(!bool)),
+            Self::Int(value) => Ok(Self::Int(!*value)),
+            Self::UInt(value) => Ok(Self::UInt(!*value)),
+            Self::Float(_) => Err(Fault::UnsupportedOperation),
+        }
+    }
+
+    /// Returns the bitwise and of `self` and `rhs`.
+    pub fn bitwise_and(&self, rhs: &Self) -> Result<Self, Fault> {
+        match (self, rhs) {
+            (Self::Int(lhs), Self::Int(rhs)) => Ok(Self::Int(lhs & rhs)),
+            #[allow(clippy::cast_possible_wrap)]
+            (Self::Int(lhs), Self::UInt(rhs)) => Ok(Self::Int(lhs & *rhs as i64)),
+            (Self::Int(lhs), _) => {
+                if let Some(rhs) = rhs.as_i64() {
+                    Ok(Self::Int(lhs & rhs))
+                } else {
+                    Err(Fault::UnsupportedOperation)
+                }
+            }
+
+            (Self::UInt(lhs), Self::UInt(rhs)) => Ok(Self::UInt(lhs & rhs)),
+            #[allow(clippy::cast_sign_loss)]
+            (Self::UInt(lhs), Self::Int(rhs)) => Ok(Self::UInt(lhs & *rhs as u64)),
+            (Self::UInt(lhs), _) => {
+                if let Some(rhs) = rhs.to_u64() {
+                    Ok(Self::UInt(lhs & rhs))
+                } else {
+                    Err(Fault::UnsupportedOperation)
+                }
+            }
+
+            (Self::Float(lhs), _) if lhs.is_sign_negative() => {
+                match (self.as_i64(), rhs.as_i64()) {
+                    (Some(lhs), Some(rhs)) => Ok(Self::Int(lhs & rhs)),
+                    // If either are none, we know the result is 0.
+                    _ => Ok(Self::Int(0)),
+                }
+            }
+
+            _ => match (self.to_u64(), rhs.to_u64()) {
+                (Some(lhs), Some(rhs)) => Ok(Self::UInt(lhs & rhs)),
+                // If either are none, we know the result is 0.
+                _ => Ok(Self::UInt(0)),
+            },
+        }
+    }
+
+    /// Returns the bitwise or of `self` and `rhs`.
+    pub fn bitwise_or(&self, rhs: &Self) -> Result<Self, Fault> {
+        match (self, rhs) {
+            (Self::Int(lhs), Self::Int(rhs)) => Ok(Self::Int(lhs | rhs)),
+            #[allow(clippy::cast_possible_wrap)]
+            (Self::Int(lhs), Self::UInt(rhs)) => Ok(Self::Int(lhs | *rhs as i64)),
+            (Self::Int(lhs), _) => {
+                if let Some(rhs) = rhs.to_i64() {
+                    Ok(Self::Int(lhs | rhs))
+                } else {
+                    Err(Fault::UnsupportedOperation)
+                }
+            }
+
+            (Self::UInt(lhs), Self::UInt(rhs)) => Ok(Self::UInt(lhs | rhs)),
+            #[allow(clippy::cast_sign_loss)]
+            (Self::UInt(lhs), Self::Int(rhs)) => Ok(Self::UInt(lhs | *rhs as u64)),
+            (Self::UInt(lhs), _) => {
+                if let Some(rhs) = rhs.to_u64() {
+                    Ok(Self::UInt(lhs | rhs))
+                } else {
+                    Err(Fault::UnsupportedOperation)
+                }
+            }
+
+            (Self::Float(lhs), _) if lhs.is_sign_negative() => {
+                match (self.to_i64(), rhs.to_i64()) {
+                    (Some(lhs), Some(rhs)) => Ok(Self::Int(lhs | rhs)),
+                    (Some(result), None) | (None, Some(result)) => Ok(Self::Int(result)),
+                    (None, None) => Ok(Self::Int(0)),
+                }
+            }
+
+            _ => match (self.to_u64(), rhs.to_u64()) {
+                (Some(lhs), Some(rhs)) => Ok(Self::UInt(lhs | rhs)),
+                (Some(result), None) | (None, Some(result)) => Ok(Self::UInt(result)),
+                (None, None) => Ok(Self::UInt(0)),
+            },
+        }
+    }
+
+    /// Returns the bitwise xor of `self` and `rhs`.
+    pub fn bitwise_xor(&self, rhs: &Self) -> Result<Self, Fault> {
+        match (self, rhs) {
+            (Self::Int(lhs), Self::Int(rhs)) => Ok(Self::Int(lhs ^ rhs)),
+            #[allow(clippy::cast_possible_wrap)]
+            (Self::Int(lhs), Self::UInt(rhs)) => Ok(Self::Int(lhs ^ *rhs as i64)),
+            (Self::Int(lhs), _) => {
+                if let Some(rhs) = rhs.to_i64() {
+                    Ok(Self::Int(lhs ^ rhs))
+                } else {
+                    Err(Fault::UnsupportedOperation)
+                }
+            }
+
+            (Self::UInt(lhs), Self::UInt(rhs)) => Ok(Self::UInt(lhs ^ rhs)),
+            #[allow(clippy::cast_sign_loss)]
+            (Self::UInt(lhs), Self::Int(rhs)) => Ok(Self::UInt(lhs ^ *rhs as u64)),
+            (Self::UInt(lhs), _) => {
+                if let Some(rhs) = rhs.to_u64() {
+                    Ok(Self::UInt(lhs ^ rhs))
+                } else {
+                    Err(Fault::UnsupportedOperation)
+                }
+            }
+
+            (Self::Float(lhs), _) if lhs.is_sign_negative() => {
+                match (self.to_i64(), rhs.to_i64()) {
+                    (Some(lhs), Some(rhs)) => Ok(Self::Int(lhs ^ rhs)),
+                    (Some(result), None) | (None, Some(result)) => Ok(Self::Int(result)),
+                    (None, None) => Ok(Self::Int(0)),
+                }
+            }
+
+            _ => match (self.to_u64(), rhs.to_u64()) {
+                (Some(lhs), Some(rhs)) => Ok(Self::UInt(lhs ^ rhs)),
+                (Some(result), None) | (None, Some(result)) => Ok(Self::UInt(result)),
+                (None, None) => Ok(Self::UInt(0)),
+            },
+        }
+    }
+
+    /// Returns the bitwise shift left of `self` by `rhs`.
+    pub fn shift_left(&self, rhs: &Self) -> Result<Self, Fault> {
+        match self {
+            Self::Int(lhs) => Ok(Self::Int(
+                lhs.checked_shl(rhs.to_u32().ok_or(Fault::UnsupportedOperation)?)
+                    .unwrap_or_default(),
+            )),
+            Self::UInt(lhs) => Ok(Self::UInt(
+                lhs.checked_shl(rhs.to_u32().ok_or(Fault::UnsupportedOperation)?)
+                    .unwrap_or_default(),
+            )),
+
+            #[allow(clippy::cast_possible_truncation)]
+            Self::Float(lhs) if lhs.is_sign_negative() => Ok(Self::Int(
+                (*lhs as i64)
+                    .checked_shl(rhs.to_u32().ok_or(Fault::UnsupportedOperation)?)
+                    .unwrap_or_default(),
+            )),
+
+            _ => match (self.to_u64(), rhs.to_u32()) {
+                (Some(lhs), Some(rhs)) => Ok(Self::UInt(lhs.checked_shl(rhs).unwrap_or_default())),
+                _ => Err(Fault::UnsupportedOperation),
+            },
+        }
+    }
+
+    /// Returns the shift right of `self` by `rhs`.
+    pub fn shift_right(&self, rhs: &Self) -> Result<Self, Fault> {
+        match self {
+            Self::Int(lhs) => Ok(Self::Int(
+                lhs.checked_shr(rhs.to_u32().ok_or(Fault::UnsupportedOperation)?)
+                    .unwrap_or_default(),
+            )),
+            Self::UInt(lhs) => Ok(Self::UInt(
+                lhs.checked_shr(rhs.to_u32().ok_or(Fault::UnsupportedOperation)?)
+                    .unwrap_or_default(),
+            )),
+
+            #[allow(clippy::cast_possible_truncation)]
+            Self::Float(lhs) if lhs.is_sign_negative() => Ok(Self::Int(
+                (*lhs as i64)
+                    .checked_shr(rhs.to_u32().ok_or(Fault::UnsupportedOperation)?)
+                    .unwrap_or_default(),
+            )),
+
+            _ => match (self.to_u64(), rhs.to_u32()) {
+                (Some(lhs), Some(rhs)) => Ok(Self::UInt(lhs.checked_shr(rhs).unwrap_or_default())),
+                _ => Err(Fault::UnsupportedOperation),
+            },
+        }
+    }
+
+    /// Returns this value as a shared string reference.
+    pub fn to_string(&self) -> Result<SymbolRef, Fault> {
+        match self {
+            Self::Nil => Ok(Symbol::empty().downgrade()),
+            Self::Bool(bool) => Ok(SymbolRef::from(*bool)),
+            Self::Int(value) => Ok(SymbolRef::from(value.to_string())),
+            Self::UInt(value) => Ok(SymbolRef::from(value.to_string())),
+            Self::Float(value) => Ok(SymbolRef::from(value.to_string())),
+        }
+    }
+    /// Hashes this value into `hasher`.
+    pub fn hash_into(&self, hasher: &mut ValueHasher) {
+        core::mem::discriminant(self).hash(hasher);
+        match self {
+            Self::Nil => {}
+            Self::Bool(b) => b.hash(hasher),
+            Self::Int(i) => i.hash(hasher),
+            Self::UInt(i) => i.hash(hasher),
+            Self::Float(f) => f.to_bits().hash(hasher),
+        }
+    }
+
+    /// Returns true if `self` and `other` are equivalent values.
+    pub fn equals(&self, other: &Self) -> Result<bool, Fault> {
+        match (self, other) {
+            (Self::Nil, Self::Nil) => Ok(true),
+            (Self::Nil, _) | (_, Self::Nil) => Ok(false),
+
+            (Self::Bool(l0), Self::Bool(r0)) => Ok(l0 == r0),
+            (Self::Bool(b), Self::Int(i)) | (Self::Int(i), Self::Bool(b)) => {
+                Ok(&i64::from(*b) == i)
+            }
+            (Self::Bool(b), Self::Float(f)) | (Self::Float(f), Self::Bool(b)) => {
+                Ok((f64::from(u8::from(*b)) - f).abs() < f64::EPSILON)
+            }
+
+            (Self::Int(l0), Self::Int(r0)) => Ok(l0 == r0),
+            (Self::Int(signed), Self::UInt(unsigned))
+            | (Self::UInt(unsigned), Self::Int(signed)) => {
+                Ok(u64::try_from(*signed).map_or(false, |signed| &signed == unsigned))
+            }
+            (Self::UInt(l0), Self::UInt(r0)) => Ok(l0 == r0),
+            (Self::Float(l0), Self::Float(r0)) => Ok((l0 - r0).abs() < f64::EPSILON),
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Int(i), Self::Float(f)) | (Self::Float(f), Self::Int(i)) => {
+                Ok((*i as f64 - f).abs() < f64::EPSILON)
+            }
+            #[allow(clippy::cast_precision_loss)]
+            (Self::UInt(i), Self::Float(f)) | (Self::Float(f), Self::UInt(i)) => {
+                Ok((*i as f64 - f).abs() < f64::EPSILON)
+            }
+
+            _ => Ok(false),
+        }
+    }
+
+    /// Returns an ordering of `self` and `other` that takes into account both
+    /// the type of data and the value itself.
+    pub fn total_cmp(&self, other: &Self) -> Result<Ordering, Fault> {
+        match (self, other) {
+            (Self::Nil, Self::Nil) => Ok(Ordering::Equal),
+
+            (Self::Bool(l), Self::Bool(r)) => Ok(l.cmp(r)),
+
+            (Self::Bool(l), Self::Int(r)) => {
+                let l = i64::from(*l);
+                Ok(l.cmp(r))
+            }
+            (Self::Int(l), Self::Bool(r)) => {
+                let r = i64::from(*r);
+                Ok(l.cmp(&r))
+            }
+            (Self::Bool(b), Self::Float(f)) => Ok(f64::from(*b).total_cmp(f)),
+            (Self::Float(f), Self::Bool(b)) => Ok(f.total_cmp(&f64::from(*b))),
+
+            (Self::Int(l), Self::Int(r)) => Ok(l.cmp(r)),
+            (Self::Int(l), Self::UInt(r)) => Ok(if let Ok(l) = u64::try_from(*l) {
+                l.cmp(r)
+            } else {
+                Ordering::Less
+            }),
+            (Self::UInt(l), Self::UInt(r)) => Ok(l.cmp(r)),
+            (Self::Float(l), Self::Float(r)) => Ok(l.total_cmp(r)),
+
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Int(l_int), Self::Float(r_float)) => Ok((*l_int as f64).total_cmp(r_float)),
+            #[allow(clippy::cast_precision_loss)]
+            (Self::Float(l_float), Self::Int(r_int)) => Ok(l_float.total_cmp(&(*r_int as f64))),
+
+            (Self::Nil, _) => Ok(Ordering::Less),
+            (_, Self::Nil) => Ok(Ordering::Greater),
+
+            (Self::Bool(_), _) => Ok(Ordering::Less),
+            (_, Self::Bool(_)) => Ok(Ordering::Greater),
+            (_, Self::Int(_)) => Ok(Ordering::Greater),
+            (Self::UInt(_), _) => Ok(Ordering::Less),
+            (_, Self::UInt(_)) => Ok(Ordering::Greater),
+        }
+    }
+
+    /// Take the contents of this value, leaving nil behind.
+    #[must_use]
+    pub fn take(&mut self) -> Primitive {
+        std::mem::take(self)
+    }
+
+    /// Formats this value for display into `f`.
+    pub fn format(&self, context: &mut VmContext<'_, '_>, mut f: impl fmt::Write) -> fmt::Result {
+        if let Some(s) = self.to_string().ok().and_then(|s| s.load(context.guard())) {
+            f.write_str(s)
+        } else {
+            todo!("display unformattable value")
+        }
+    }
+}
+
+/// A Muse virtual machine value.
+#[derive(Clone, Copy, Debug)]
+pub enum Value {
+    Primitive(Primitive),
     /// A symbol.
     Symbol(SymbolRef),
     /// A dynamically allocated, garbage collected type.
@@ -53,11 +854,7 @@ impl Value {
     /// references.
     pub fn upgrade(&self, guard: &CollectionGuard<'_>) -> Option<RootedValue> {
         match self {
-            Value::Nil => Some(RootedValue::Nil),
-            Value::Bool(v) => Some(RootedValue::Bool(*v)),
-            Value::Int(v) => Some(RootedValue::Int(*v)),
-            Value::UInt(v) => Some(RootedValue::UInt(*v)),
-            Value::Float(v) => Some(RootedValue::Float(*v)),
+            Value::Primitive(primitive) => Some(RootedValue::Primitive(*primitive)),
             Value::Symbol(v) => v.upgrade(guard).map(RootedValue::Symbol),
             Value::Dynamic(v) => v.upgrade(guard).map(RootedValue::Dynamic),
         }
@@ -74,90 +871,63 @@ impl Value {
     /// Returns true if this value is nil.
     #[must_use]
     pub const fn is_nil(&self) -> bool {
-        matches!(self, Self::Nil)
+        matches!(self, Self::Primitive(Primitive::Nil))
+    }
+
+    pub const fn nil() -> Self {
+        Self::Primitive(Primitive::Nil)
+    }
+
+    /// Returns this value as an i64, if possible.
+    #[must_use]
+    pub fn as_primitive(&self) -> Option<Primitive> {
+        match self {
+            Value::Primitive(value) => Some(*value),
+            _ => None,
+        }
     }
 
     /// Returns this value as an i64, if possible.
     #[must_use]
     pub fn as_i64(&self) -> Option<i64> {
-        match self {
-            Value::Int(value) => Some(*value),
-            Value::UInt(value) => i64::try_from(*value).ok(),
-            #[allow(clippy::cast_possible_truncation)]
-            Value::Float(value) => Some(*value as i64),
-            _ => None,
-        }
+        self.as_primitive().and_then(|p| p.as_i64())
     }
 
     /// Returns this value as an u64, if possible.
     #[must_use]
     pub fn as_u64(&self) -> Option<u64> {
-        match self {
-            Value::Int(value) => u64::try_from(*value).ok(),
-            Value::UInt(value) => Some(*value),
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            Value::Float(value) => Some(*value as u64),
-            _ => None,
-        }
+        self.as_primitive().and_then(|p| p.as_u64())
     }
 
     /// Returns this value as an u32, if possible.
     #[must_use]
     pub fn as_u32(&self) -> Option<u32> {
-        match self {
-            Value::Int(value) => u32::try_from(*value).ok(),
-            Value::UInt(value) => u32::try_from(*value).ok(),
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            Value::Float(value) => Some(*value as u32),
-            _ => None,
-        }
+        self.as_primitive().and_then(|p| p.as_u32())
     }
 
     /// Returns this value as an u16, if possible.
     #[must_use]
     pub fn as_u16(&self) -> Option<u16> {
-        match self {
-            Value::Int(value) => u16::try_from(*value).ok(),
-            Value::UInt(value) => u16::try_from(*value).ok(),
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            Value::Float(value) => Some(*value as u16),
-            _ => None,
-        }
+        self.as_primitive().and_then(|p| p.as_u16())
     }
 
     /// Returns this value as an usize, if possible.
     #[must_use]
     pub fn as_usize(&self) -> Option<usize> {
-        match self {
-            Value::Int(value) => usize::try_from(*value).ok(),
-            Value::UInt(value) => usize::try_from(*value).ok(),
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            Value::Float(value) => Some(*value as usize),
-            _ => None,
-        }
+        self.as_primitive().and_then(|p| p.as_usize())
     }
 
     /// Returns this value as an f64, if possible.
     #[must_use]
     pub fn as_f64(&self) -> Option<f64> {
-        match self {
-            #[allow(clippy::cast_precision_loss)]
-            Value::Int(value) => Some(*value as f64),
-            Value::Float(value) => Some(*value),
-            _ => None,
-        }
+        self.as_primitive().and_then(|p| p.as_f64())
     }
 
     /// Converts this value to an i64, if possible.
     #[must_use]
     pub fn to_i64(&self) -> Option<i64> {
         match self {
-            Value::Int(value) => Some(*value),
-            Value::UInt(value) => i64::try_from(*value).ok(),
-            #[allow(clippy::cast_possible_truncation)]
-            Value::Float(value) => Some(*value as i64),
-            Value::Nil => Some(0),
-            Value::Bool(bool) => Some(i64::from(*bool)),
+            Value::Primitive(value) => value.to_i64(),
             Value::Symbol(_) | Value::Dynamic(_) => None, // TODO offer dynamic conversion
         }
     }
@@ -166,12 +936,7 @@ impl Value {
     #[must_use]
     pub fn to_u64(&self) -> Option<u64> {
         match self {
-            Value::Int(value) => u64::try_from(*value).ok(),
-            Value::UInt(value) => Some(*value),
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            Value::Float(value) => Some(*value as u64),
-            Value::Nil => Some(0),
-            Value::Bool(bool) => Some(u64::from(*bool)),
+            Value::Primitive(value) => value.to_u64(),
             Value::Symbol(_) | Value::Dynamic(_) => None, // TODO offer dynamic conversion
         }
     }
@@ -180,12 +945,7 @@ impl Value {
     #[must_use]
     pub fn to_u32(&self) -> Option<u32> {
         match self {
-            Value::Int(value) => u32::try_from(*value).ok(),
-            Value::UInt(value) => u32::try_from(*value).ok(),
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            Value::Float(value) => Some(*value as u32),
-            Value::Nil => Some(0),
-            Value::Bool(bool) => Some(u32::from(*bool)),
+            Value::Primitive(value) => value.to_u32(),
             Value::Symbol(_) | Value::Dynamic(_) => None, // TODO offer dynamic conversion
         }
     }
@@ -194,12 +954,7 @@ impl Value {
     #[must_use]
     pub fn to_usize(&self) -> Option<usize> {
         match self {
-            Value::Int(value) => usize::try_from(*value).ok(),
-            Value::UInt(value) => usize::try_from(*value).ok(),
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            Value::Float(value) => Some(*value as usize),
-            Value::Nil => Some(0),
-            Value::Bool(bool) => Some(usize::from(*bool)),
+            Value::Primitive(value) => value.to_usize(),
             Value::Symbol(_) | Value::Dynamic(_) => None, // TODO offer dynamic conversion
         }
     }
@@ -208,13 +963,7 @@ impl Value {
     #[must_use]
     pub fn to_f64(&self) -> Option<f64> {
         match self {
-            #[allow(clippy::cast_precision_loss)]
-            Value::Int(value) => Some(*value as f64),
-            #[allow(clippy::cast_precision_loss)]
-            Value::UInt(value) => Some(*value as f64),
-            Value::Float(value) => Some(*value),
-            Value::Nil => Some(0.),
-            Value::Bool(bool) => Some(f64::from(*bool)),
+            Value::Primitive(value) => Some(value.to_f64()),
             Value::Symbol(_) | Value::Dynamic(_) => None, // TODO offer dynamic conversion
         }
     }
@@ -286,11 +1035,7 @@ impl Value {
     /// expression.
     pub fn truthy(&self, vm: &mut VmContext<'_, '_>) -> bool {
         match self {
-            Value::Nil => false,
-            Value::Bool(value) => *value,
-            Value::Int(value) => value != &0,
-            Value::UInt(value) => value != &0,
-            Value::Float(value) => value.abs() >= f64::EPSILON,
+            Value::Primitive(value) => value.truthy(),
             Value::Symbol(sym) => sym.load(vm.as_ref()).map_or(false, |sym| !sym.is_empty()),
             Value::Dynamic(value) => value.truthy(vm),
         }
@@ -308,7 +1053,7 @@ impl Value {
                 let name = name.try_upgrade(vm.guard())?;
                 vm.resolve(&name).and_then(|named| named.call(vm, arity))
             }
-            Value::Nil => vm.recurse_current_function(arity.into()),
+            Value::Primitive(Primitive::Nil) => vm.recurse_current_function(arity.into()),
             _ => Err(Fault::NotAFunction),
         }
     }
@@ -322,7 +1067,7 @@ impl Value {
     ) -> Result<Value, Fault> {
         match self {
             Value::Dynamic(dynamic) => dynamic.invoke(vm, name, arity.into()),
-            Value::Nil => Err(Fault::OperationOnNil),
+            Value::Primitive(Primitive::Nil) => Err(Fault::OperationOnNil),
             // TODO we should pass through to the appropriate Type
             _ => Err(Fault::UnknownSymbol),
         }
@@ -331,9 +1076,7 @@ impl Value {
     /// Adds `self` to `rhs`.
     pub fn add(&self, vm: &mut VmContext<'_, '_>, rhs: &Self) -> Result<Value, Fault> {
         match (self, rhs) {
-            (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
-            (Value::Bool(lhs), Value::Bool(rhs)) => Ok(Value::Bool(*lhs || *rhs)),
-            (Value::Bool(_), _) | (_, Value::Bool(_)) => Err(Fault::UnsupportedOperation),
+            (Value::Primitive(lhs), Value::Primitive(rhs)) => lhs.add(rhs).map(Self::Primitive),
 
             (Value::Symbol(lhs), rhs) => {
                 let lhs = lhs.try_upgrade(vm.guard())?;
@@ -344,21 +1087,6 @@ impl Value {
                 lhs.map_str(vm, |_vm, lhs| Value::Symbol(SymbolRef::from(lhs + &rhs)))
             }
 
-            (Value::Int(lhs), Value::Int(rhs)) => Ok(Self::Int(lhs.saturating_add(*rhs))),
-            (Value::Int(lhs), Value::UInt(rhs)) => Ok(Self::Int(lhs.saturating_add_unsigned(*rhs))),
-            (Value::UInt(lhs), Value::UInt(rhs)) => Ok(Self::UInt(lhs.saturating_add(*rhs))),
-            (Value::UInt(lhs), Value::Int(rhs)) => Ok(Self::UInt(lhs.saturating_add_signed(*rhs))),
-
-            #[allow(clippy::cast_precision_loss)]
-            (Value::Int(lhs), Value::Float(rhs)) => Ok(Value::Float(*lhs as f64 + rhs)),
-            #[allow(clippy::cast_precision_loss)]
-            (Value::Float(lhs), Value::Int(rhs)) => Ok(Value::Float(lhs + *rhs as f64)),
-            #[allow(clippy::cast_precision_loss)]
-            (Value::UInt(lhs), Value::Float(rhs)) => Ok(Value::Float(*lhs as f64 + rhs)),
-            #[allow(clippy::cast_precision_loss)]
-            (Value::Float(lhs), Value::UInt(rhs)) => Ok(Value::Float(lhs + *rhs as f64)),
-            (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Float(lhs + rhs)),
-
             (Value::Dynamic(lhs), rhs) => lhs.add(vm, rhs),
             (lhs, Value::Dynamic(rhs)) => rhs.add_right(vm, lhs),
         }
@@ -367,24 +1095,7 @@ impl Value {
     /// Subtracts `rhs` from `self`.
     pub fn sub(&self, vm: &mut VmContext<'_, '_>, rhs: &Self) -> Result<Value, Fault> {
         match (self, rhs) {
-            (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
-
-            (Value::Int(lhs), Value::Int(rhs)) => Ok(Self::Int(lhs.saturating_sub(*rhs))),
-            (Value::Int(lhs), Value::UInt(rhs)) => Ok(Self::Int(lhs.saturating_sub_unsigned(*rhs))),
-            (Value::UInt(lhs), Value::UInt(rhs)) => Ok(Self::UInt(lhs.saturating_sub(*rhs))),
-            (Value::UInt(lhs), Value::Int(rhs)) => {
-                Ok(Self::UInt(lhs.saturating_add_signed(rhs.saturating_neg())))
-            }
-
-            #[allow(clippy::cast_precision_loss)]
-            (Value::Int(lhs), Value::Float(rhs)) => Ok(Value::Float(*lhs as f64 - rhs)),
-            #[allow(clippy::cast_precision_loss)]
-            (Value::Float(lhs), Value::Int(rhs)) => Ok(Value::Float(lhs - *rhs as f64)),
-            #[allow(clippy::cast_precision_loss)]
-            (Value::UInt(lhs), Value::Float(rhs)) => Ok(Value::Float(*lhs as f64 - rhs)),
-            #[allow(clippy::cast_precision_loss)]
-            (Value::Float(lhs), Value::UInt(rhs)) => Ok(Value::Float(lhs - *rhs as f64)),
-            (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Float(lhs - rhs)),
+            (Value::Primitive(lhs), Value::Primitive(rhs)) => lhs.sub(rhs).map(Value::Primitive),
 
             (Value::Dynamic(lhs), rhs) => lhs.sub(vm, rhs),
             (lhs, Value::Dynamic(rhs)) => rhs.sub_right(vm, lhs),
@@ -395,34 +1106,16 @@ impl Value {
     /// Multiplies `self` by `rhs`.
     pub fn mul(&self, vm: &mut VmContext<'_, '_>, rhs: &Self) -> Result<Value, Fault> {
         match (self, rhs) {
-            (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
+            (Value::Primitive(lhs), Value::Primitive(rhs)) => lhs.mul(rhs).map(Value::Primitive),
 
-            (Value::Int(count), Value::Symbol(string))
-            | (Value::Symbol(string), Value::Int(count)) => {
+            // TODO unsigned int
+            (Value::Primitive(Primitive::Int(count)), Value::Symbol(string))
+            | (Value::Symbol(string), Value::Primitive(Primitive::Int(count))) => {
                 let string = string.try_upgrade(vm.guard())?;
                 Ok(Value::Symbol(SymbolRef::from(string.repeat(
                     usize::try_from(*count).map_err(|_| Fault::OutOfMemory)?,
                 ))))
             }
-
-            (Value::Int(lhs), Value::Int(rhs)) => Ok(Self::Int(lhs.saturating_mul(*rhs))),
-            (Value::Int(lhs), Value::UInt(rhs)) => Ok(Self::Int(
-                lhs.saturating_mul(i64::try_from(*rhs).unwrap_or(i64::MAX)),
-            )),
-            (Value::UInt(lhs), Value::Int(rhs)) => {
-                Ok(Self::UInt(if let Ok(rhs) = u64::try_from(*rhs) {
-                    lhs.saturating_mul(rhs)
-                } else {
-                    0
-                }))
-            }
-            (Value::UInt(lhs), Value::UInt(rhs)) => Ok(Self::UInt(lhs.saturating_mul(*rhs))),
-
-            #[allow(clippy::cast_precision_loss)]
-            (Value::Int(lhs), Value::Float(rhs)) => Ok(Value::Float(*lhs as f64 * rhs)),
-            #[allow(clippy::cast_precision_loss)]
-            (Value::Float(lhs), Value::Int(rhs)) => Ok(Value::Float(lhs * *rhs as f64)),
-            (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Float(lhs * rhs)),
 
             (Value::Dynamic(lhs), rhs) => lhs.mul(vm, rhs),
             (lhs, Value::Dynamic(rhs)) => rhs.mul_right(vm, lhs),
@@ -433,36 +1126,7 @@ impl Value {
     /// Raises `self` to the `rhs` power.
     pub fn pow(&self, vm: &mut VmContext<'_, '_>, exp: &Self) -> Result<Value, Fault> {
         match (self, exp) {
-            (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
-
-            (Value::Int(lhs), Value::Int(rhs)) => Ok(if rhs.is_negative() {
-                #[allow(clippy::cast_precision_loss)]
-                Self::Float(powf64_i64(*lhs as f64, *rhs))
-            } else {
-                Self::Int(lhs.saturating_pow(u32::try_from(*rhs).unwrap_or(u32::MAX)))
-            }),
-            (Value::Int(lhs), Value::UInt(rhs)) => Ok(Self::Int(
-                lhs.saturating_pow(u32::try_from(*rhs).unwrap_or(u32::MAX)),
-            )),
-            (Value::UInt(lhs), Value::Int(rhs)) => Ok(if rhs.is_negative() {
-                #[allow(clippy::cast_precision_loss)]
-                Self::Float(powf64_i64(*lhs as f64, *rhs))
-            } else {
-                Self::UInt(lhs.saturating_pow(u32::try_from(*rhs).unwrap_or(u32::MAX)))
-            }),
-            (Value::UInt(lhs), Value::UInt(rhs)) => Ok(Self::UInt(
-                lhs.saturating_pow(u32::try_from(*rhs).unwrap_or(u32::MAX)),
-            )),
-
-            #[allow(clippy::cast_precision_loss)]
-            (Value::Int(lhs), Value::Float(rhs)) => Ok(Value::Float((*lhs as f64).powf(*rhs))),
-            #[allow(clippy::cast_precision_loss)]
-            (Value::Float(lhs), Value::Int(rhs)) => Ok(Value::Float(powf64_i64(*lhs, *rhs))),
-            #[allow(clippy::cast_precision_loss)]
-            (Value::UInt(lhs), Value::Float(rhs)) => Ok(Value::Float((*lhs as f64).powf(*rhs))),
-            #[allow(clippy::cast_precision_loss)]
-            (Value::Float(lhs), Value::UInt(rhs)) => Ok(Value::Float(powf64_u64(*lhs, *rhs))),
-            (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Float(lhs * rhs)),
+            (Value::Primitive(lhs), Value::Primitive(rhs)) => lhs.pow(rhs).map(Value::Primitive),
 
             (Value::Dynamic(lhs), rhs) => lhs.mul(vm, rhs),
             (lhs, Value::Dynamic(rhs)) => rhs.mul_right(vm, lhs),
@@ -473,62 +1137,7 @@ impl Value {
     /// Divides `self` by `rhs`.
     pub fn div(&self, vm: &mut VmContext<'_, '_>, rhs: &Self) -> Result<Value, Fault> {
         match (self, rhs) {
-            (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
-
-            #[allow(clippy::cast_precision_loss)]
-            (Value::Int(lhs), Value::Int(rhs)) => {
-                if *rhs != 0 {
-                    Ok(Value::Float(*lhs as f64 / *rhs as f64))
-                } else {
-                    Err(Fault::DivideByZero)
-                }
-            }
-            #[allow(clippy::cast_precision_loss)]
-            (Value::UInt(lhs), Value::Int(rhs)) => {
-                if *rhs != 0 {
-                    Ok(Value::Float(*lhs as f64 / *rhs as f64))
-                } else {
-                    Err(Fault::DivideByZero)
-                }
-            }
-            #[allow(clippy::cast_precision_loss)]
-            (Value::Int(lhs), Value::UInt(rhs)) => {
-                if *rhs != 0 {
-                    Ok(Value::Float(*lhs as f64 / *rhs as f64))
-                } else {
-                    Err(Fault::DivideByZero)
-                }
-            }
-            #[allow(clippy::cast_precision_loss)]
-            (Value::UInt(lhs), Value::UInt(rhs)) => {
-                if *rhs != 0 {
-                    Ok(Value::Float(*lhs as f64 / *rhs as f64))
-                } else {
-                    Err(Fault::DivideByZero)
-                }
-            }
-
-            #[allow(clippy::cast_precision_loss)]
-            (Value::Int(lhs), Value::Float(rhs)) => Ok(Value::Float(*lhs as f64 / rhs)),
-            #[allow(clippy::cast_precision_loss)]
-            (Value::UInt(lhs), Value::Float(rhs)) => Ok(Value::Float(*lhs as f64 / rhs)),
-            #[allow(clippy::cast_precision_loss)]
-            (Value::Float(lhs), Value::Int(rhs)) => {
-                if *rhs != 0 {
-                    Ok(Value::Float(lhs / *rhs as f64))
-                } else {
-                    Err(Fault::DivideByZero)
-                }
-            }
-            #[allow(clippy::cast_precision_loss)]
-            (Value::Float(lhs), Value::UInt(rhs)) => {
-                if *rhs != 0 {
-                    Ok(Value::Float(lhs / *rhs as f64))
-                } else {
-                    Err(Fault::DivideByZero)
-                }
-            }
-            (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Float(lhs / rhs)),
+            (Value::Primitive(lhs), Value::Primitive(rhs)) => lhs.div(rhs).map(Value::Primitive),
 
             (Value::Dynamic(lhs), rhs) => lhs.div(vm, rhs),
             (lhs, Value::Dynamic(rhs)) => rhs.div_right(vm, lhs),
@@ -539,66 +1148,7 @@ impl Value {
     /// Divides `self` by `rhs`, using whole numbers.
     pub fn idiv(&self, vm: &mut VmContext<'_, '_>, rhs: &Self) -> Result<Value, Fault> {
         match (self, rhs) {
-            (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
-
-            (Value::Int(lhs), Value::Int(rhs)) => Ok(Self::Int(lhs.saturating_div(*rhs))),
-            (Value::Int(lhs), Value::UInt(rhs)) => {
-                if *rhs != 0 {
-                    Ok(Self::Int(
-                        lhs.saturating_div(i64::try_from(*rhs).unwrap_or(i64::MAX)),
-                    ))
-                } else {
-                    Err(Fault::DivideByZero)
-                }
-            }
-            (Value::UInt(lhs), Value::Int(rhs)) => {
-                if *rhs != 0 {
-                    Ok(Self::UInt(if let Ok(rhs) = u64::try_from(*rhs) {
-                        lhs.saturating_div(rhs)
-                    } else {
-                        0
-                    }))
-                } else {
-                    Err(Fault::DivideByZero)
-                }
-            }
-            (Value::UInt(lhs), Value::UInt(rhs)) => {
-                if *rhs != 0 {
-                    Ok(Self::UInt(lhs.saturating_div(*rhs)))
-                } else {
-                    Err(Fault::DivideByZero)
-                }
-            }
-
-            #[allow(clippy::cast_possible_truncation)]
-            (Value::Int(lhs), Value::Float(rhs)) => Ok(Value::Int(*lhs / *rhs as i64)),
-            #[allow(clippy::cast_possible_truncation)]
-            (Value::Float(lhs), Value::Int(rhs)) => {
-                if *rhs != 0 {
-                    Ok(Value::Int(*lhs as i64 / *rhs))
-                } else {
-                    Err(Fault::DivideByZero)
-                }
-            }
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            (Value::UInt(lhs), Value::Float(rhs)) => {
-                let rhs = *rhs as u64;
-                if rhs == 0 {
-                    Err(Fault::DivideByZero)
-                } else {
-                    Ok(Value::UInt(*lhs / rhs))
-                }
-            }
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            (Value::Float(lhs), Value::UInt(rhs)) => {
-                if *rhs != 0 {
-                    Ok(Value::UInt(*lhs as u64 / *rhs))
-                } else {
-                    Err(Fault::DivideByZero)
-                }
-            }
-            #[allow(clippy::cast_possible_truncation)]
-            (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Int(*lhs as i64 / *rhs as i64)),
+            (Value::Primitive(lhs), Value::Primitive(rhs)) => lhs.idiv(rhs).map(Value::Primitive),
 
             (Value::Dynamic(lhs), rhs) => lhs.idiv(vm, rhs),
             (lhs, Value::Dynamic(rhs)) => rhs.idiv_right(vm, lhs),
@@ -610,64 +1160,7 @@ impl Value {
     /// numbers.
     pub fn rem(&self, vm: &mut VmContext<'_, '_>, rhs: &Self) -> Result<Value, Fault> {
         match (self, rhs) {
-            (Value::Nil, _) | (_, Value::Nil) => Err(Fault::OperationOnNil),
-
-            (Value::Int(lhs), Value::Int(rhs)) => Ok(Self::Int(lhs % rhs)),
-            (Value::Int(lhs), Value::UInt(rhs)) => {
-                if *rhs != 0 {
-                    Ok(Self::Int(lhs % i64::try_from(*rhs).unwrap_or(i64::MAX)))
-                } else {
-                    Err(Fault::DivideByZero)
-                }
-            }
-            (Value::UInt(lhs), Value::Int(rhs)) => {
-                if *rhs != 0 {
-                    Ok(Self::UInt(if let Ok(rhs) = u64::try_from(*rhs) {
-                        lhs % rhs
-                    } else {
-                        0
-                    }))
-                } else {
-                    Err(Fault::DivideByZero)
-                }
-            }
-            (Value::UInt(lhs), Value::UInt(rhs)) => {
-                if *rhs != 0 {
-                    Ok(Self::UInt(lhs % *rhs))
-                } else {
-                    Err(Fault::DivideByZero)
-                }
-            }
-
-            #[allow(clippy::cast_possible_truncation)]
-            (Value::Int(lhs), Value::Float(rhs)) => Ok(Value::Int(*lhs % *rhs as i64)),
-            #[allow(clippy::cast_possible_truncation)]
-            (Value::Float(lhs), Value::Int(rhs)) => {
-                if *rhs != 0 {
-                    Ok(Value::Int(*lhs as i64 % *rhs))
-                } else {
-                    Err(Fault::DivideByZero)
-                }
-            }
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            (Value::UInt(lhs), Value::Float(rhs)) => {
-                let rhs = *rhs as u64;
-                if rhs == 0 {
-                    Err(Fault::DivideByZero)
-                } else {
-                    Ok(Value::UInt(*lhs % rhs))
-                }
-            }
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            (Value::Float(lhs), Value::UInt(rhs)) => {
-                if *rhs != 0 {
-                    Ok(Value::UInt(*lhs as u64 % *rhs))
-                } else {
-                    Err(Fault::DivideByZero)
-                }
-            }
-            #[allow(clippy::cast_possible_truncation)]
-            (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Int(*lhs as i64 % *rhs as i64)),
+            (Value::Primitive(lhs), Value::Primitive(rhs)) => lhs.rem(rhs).map(Value::Primitive),
 
             (Value::Dynamic(lhs), rhs) => lhs.rem(vm, rhs),
             (lhs, Value::Dynamic(rhs)) => rhs.rem_right(vm, lhs),
@@ -677,21 +1170,13 @@ impl Value {
 
     /// Returns the inverse of [`Self::truthy`].
     pub fn not(&self, vm: &mut VmContext<'_, '_>) -> Result<Self, Fault> {
-        Ok(Value::Bool(!self.truthy(vm)))
+        Ok(Value::Primitive(Primitive::Bool(!self.truthy(vm))))
     }
 
     /// Negates this value.
     pub fn negate(&self, vm: &mut VmContext<'_, '_>) -> Result<Self, Fault> {
         match self {
-            Value::Nil => Ok(Value::Nil),
-            Value::Bool(bool) => Ok(Value::Bool(!bool)),
-            Value::Int(value) => Ok(Value::Int(-*value)),
-            Value::UInt(value) => Ok(if let Ok(value) = i64::try_from(*value) {
-                Value::Int(value.saturating_neg())
-            } else {
-                Value::Int(i64::MIN)
-            }),
-            Value::Float(value) => Ok(Value::Float(-*value)),
+            Value::Primitive(p) => Ok(Self::Primitive(p.negate())),
             Value::Dynamic(value) => value.negate(vm),
             Value::Symbol(_) => Err(Fault::UnsupportedOperation),
         }
@@ -700,12 +1185,9 @@ impl Value {
     /// Returns the bitwise not of this value.
     pub fn bitwise_not(&self, vm: &mut VmContext<'_, '_>) -> Result<Self, Fault> {
         match self {
-            Value::Nil => Ok(Value::Nil),
-            Value::Bool(bool) => Ok(Value::Bool(!bool)),
-            Value::Int(value) => Ok(Value::Int(!*value)),
-            Value::UInt(value) => Ok(Value::UInt(!*value)),
+            Value::Primitive(p) => p.bitwise_not().map(Self::Primitive),
             Value::Dynamic(value) => value.bitwise_not(vm),
-            Value::Float(_) | Value::Symbol(_) => Err(Fault::UnsupportedOperation),
+            Value::Symbol(_) => Err(Fault::UnsupportedOperation),
         }
     }
 
@@ -715,41 +1197,14 @@ impl Value {
             (Value::Dynamic(dymamic), other) | (other, Value::Dynamic(dymamic)) => {
                 dymamic.bitwise_and(vm, other)
             }
-
-            (Value::Int(lhs), Value::Int(rhs)) => Ok(Value::Int(lhs & rhs)),
-            #[allow(clippy::cast_possible_wrap)]
-            (Value::Int(lhs), Value::UInt(rhs)) => Ok(Value::Int(lhs & *rhs as i64)),
-            (Value::Int(lhs), _) => {
-                if let Some(rhs) = rhs.as_i64() {
-                    Ok(Value::Int(lhs & rhs))
-                } else {
-                    Err(Fault::UnsupportedOperation)
-                }
-            }
-
-            (Value::UInt(lhs), Value::UInt(rhs)) => Ok(Value::UInt(lhs & rhs)),
-            #[allow(clippy::cast_sign_loss)]
-            (Value::UInt(lhs), Value::Int(rhs)) => Ok(Value::UInt(lhs & *rhs as u64)),
-            (Value::UInt(lhs), _) => {
-                if let Some(rhs) = rhs.to_u64() {
-                    Ok(Value::UInt(lhs & rhs))
-                } else {
-                    Err(Fault::UnsupportedOperation)
-                }
-            }
-
-            (Value::Float(lhs), _) if lhs.is_sign_negative() => {
-                match (self.as_i64(), rhs.as_i64()) {
-                    (Some(lhs), Some(rhs)) => Ok(Value::Int(lhs & rhs)),
-                    // If either are none, we know the result is 0.
-                    _ => Ok(Value::Int(0)),
-                }
+            (Value::Primitive(lhs), Value::Primitive(rhs)) => {
+                lhs.bitwise_and(rhs).map(Value::Primitive)
             }
 
             _ => match (self.to_u64(), rhs.to_u64()) {
-                (Some(lhs), Some(rhs)) => Ok(Value::UInt(lhs & rhs)),
+                (Some(lhs), Some(rhs)) => Ok(Value::Primitive(Primitive::UInt(lhs & rhs))),
                 // If either are none, we know the result is 0.
-                _ => Ok(Value::UInt(0)),
+                _ => Ok(Value::Primitive(Primitive::UInt(0))),
             },
         }
     }
@@ -760,41 +1215,16 @@ impl Value {
             (Value::Dynamic(dymamic), other) | (other, Value::Dynamic(dymamic)) => {
                 dymamic.bitwise_or(vm, other)
             }
-
-            (Value::Int(lhs), Value::Int(rhs)) => Ok(Value::Int(lhs | rhs)),
-            #[allow(clippy::cast_possible_wrap)]
-            (Value::Int(lhs), Value::UInt(rhs)) => Ok(Value::Int(lhs | *rhs as i64)),
-            (Value::Int(lhs), _) => {
-                if let Some(rhs) = rhs.to_i64() {
-                    Ok(Value::Int(lhs | rhs))
-                } else {
-                    Err(Fault::UnsupportedOperation)
-                }
-            }
-
-            (Value::UInt(lhs), Value::UInt(rhs)) => Ok(Value::UInt(lhs | rhs)),
-            #[allow(clippy::cast_sign_loss)]
-            (Value::UInt(lhs), Value::Int(rhs)) => Ok(Value::UInt(lhs | *rhs as u64)),
-            (Value::UInt(lhs), _) => {
-                if let Some(rhs) = rhs.to_u64() {
-                    Ok(Value::UInt(lhs | rhs))
-                } else {
-                    Err(Fault::UnsupportedOperation)
-                }
-            }
-
-            (Value::Float(lhs), _) if lhs.is_sign_negative() => {
-                match (self.to_i64(), rhs.to_i64()) {
-                    (Some(lhs), Some(rhs)) => Ok(Value::Int(lhs | rhs)),
-                    (Some(result), None) | (None, Some(result)) => Ok(Value::Int(result)),
-                    (None, None) => Ok(Value::Int(0)),
-                }
+            (Value::Primitive(lhs), Value::Primitive(rhs)) => {
+                lhs.bitwise_or(rhs).map(Value::Primitive)
             }
 
             _ => match (self.to_u64(), rhs.to_u64()) {
-                (Some(lhs), Some(rhs)) => Ok(Value::UInt(lhs | rhs)),
-                (Some(result), None) | (None, Some(result)) => Ok(Value::UInt(result)),
-                (None, None) => Ok(Value::UInt(0)),
+                (Some(lhs), Some(rhs)) => Ok(Value::Primitive(Primitive::UInt(lhs | rhs))),
+                (Some(result), None) | (None, Some(result)) => {
+                    Ok(Value::Primitive(Primitive::UInt(result)))
+                }
+                (None, None) => Ok(Value::Primitive(Primitive::UInt(0))),
             },
         }
     }
@@ -805,68 +1235,33 @@ impl Value {
             (Value::Dynamic(dymamic), other) | (other, Value::Dynamic(dymamic)) => {
                 dymamic.bitwise_xor(vm, other)
             }
-
-            (Value::Int(lhs), Value::Int(rhs)) => Ok(Value::Int(lhs ^ rhs)),
-            #[allow(clippy::cast_possible_wrap)]
-            (Value::Int(lhs), Value::UInt(rhs)) => Ok(Value::Int(lhs ^ *rhs as i64)),
-            (Value::Int(lhs), _) => {
-                if let Some(rhs) = rhs.to_i64() {
-                    Ok(Value::Int(lhs ^ rhs))
-                } else {
-                    Err(Fault::UnsupportedOperation)
-                }
-            }
-
-            (Value::UInt(lhs), Value::UInt(rhs)) => Ok(Value::UInt(lhs ^ rhs)),
-            #[allow(clippy::cast_sign_loss)]
-            (Value::UInt(lhs), Value::Int(rhs)) => Ok(Value::UInt(lhs ^ *rhs as u64)),
-            (Value::UInt(lhs), _) => {
-                if let Some(rhs) = rhs.to_u64() {
-                    Ok(Value::UInt(lhs ^ rhs))
-                } else {
-                    Err(Fault::UnsupportedOperation)
-                }
-            }
-
-            (Value::Float(lhs), _) if lhs.is_sign_negative() => {
-                match (self.to_i64(), rhs.to_i64()) {
-                    (Some(lhs), Some(rhs)) => Ok(Value::Int(lhs ^ rhs)),
-                    (Some(result), None) | (None, Some(result)) => Ok(Value::Int(result)),
-                    (None, None) => Ok(Value::Int(0)),
-                }
+            (Value::Primitive(lhs), Value::Primitive(rhs)) => {
+                lhs.bitwise_xor(rhs).map(Value::Primitive)
             }
 
             _ => match (self.to_u64(), rhs.to_u64()) {
-                (Some(lhs), Some(rhs)) => Ok(Value::UInt(lhs ^ rhs)),
-                (Some(result), None) | (None, Some(result)) => Ok(Value::UInt(result)),
-                (None, None) => Ok(Value::UInt(0)),
+                (Some(lhs), Some(rhs)) => Ok(Value::Primitive(Primitive::UInt(lhs ^ rhs))),
+                (Some(result), None) | (None, Some(result)) => {
+                    Ok(Value::Primitive(Primitive::UInt(result)))
+                }
+                (None, None) => Ok(Value::Primitive(Primitive::UInt(0))),
             },
         }
     }
 
     /// Returns the bitwise shift left of `self` by `rhs`.
     pub fn shift_left(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Self, Fault> {
-        match self {
-            Value::Dynamic(dymamic) => dymamic.shift_left(vm, rhs),
+        match (self, rhs) {
+            (Value::Dynamic(dymamic), _) => dymamic.shift_left(vm, rhs),
 
-            Value::Int(lhs) => Ok(Value::Int(
-                lhs.checked_shl(rhs.to_u32().ok_or(Fault::UnsupportedOperation)?)
-                    .unwrap_or_default(),
-            )),
-            Value::UInt(lhs) => Ok(Value::UInt(
-                lhs.checked_shl(rhs.to_u32().ok_or(Fault::UnsupportedOperation)?)
-                    .unwrap_or_default(),
-            )),
-
-            #[allow(clippy::cast_possible_truncation)]
-            Value::Float(lhs) if lhs.is_sign_negative() => Ok(Value::Int(
-                (*lhs as i64)
-                    .checked_shl(rhs.to_u32().ok_or(Fault::UnsupportedOperation)?)
-                    .unwrap_or_default(),
-            )),
+            (Value::Primitive(lhs), Value::Primitive(rhs)) => {
+                lhs.shift_left(rhs).map(Value::Primitive)
+            }
 
             _ => match (self.to_u64(), rhs.to_u32()) {
-                (Some(lhs), Some(rhs)) => Ok(Value::UInt(lhs.checked_shl(rhs).unwrap_or_default())),
+                (Some(lhs), Some(rhs)) => Ok(Value::Primitive(Primitive::UInt(
+                    lhs.checked_shl(rhs).unwrap_or_default(),
+                ))),
                 _ => Err(Fault::UnsupportedOperation),
             },
         }
@@ -874,27 +1269,17 @@ impl Value {
 
     /// Returns the shift right of `self` by `rhs`.
     pub fn shift_right(&self, vm: &mut VmContext<'_, '_>, rhs: &Value) -> Result<Self, Fault> {
-        match self {
-            Value::Dynamic(dymamic) => dymamic.shift_right(vm, rhs),
+        match (self, rhs) {
+            (Value::Dynamic(dymamic), _) => dymamic.shift_right(vm, rhs),
 
-            Value::Int(lhs) => Ok(Value::Int(
-                lhs.checked_shr(rhs.to_u32().ok_or(Fault::UnsupportedOperation)?)
-                    .unwrap_or_default(),
-            )),
-            Value::UInt(lhs) => Ok(Value::UInt(
-                lhs.checked_shr(rhs.to_u32().ok_or(Fault::UnsupportedOperation)?)
-                    .unwrap_or_default(),
-            )),
-
-            #[allow(clippy::cast_possible_truncation)]
-            Value::Float(lhs) if lhs.is_sign_negative() => Ok(Value::Int(
-                (*lhs as i64)
-                    .checked_shr(rhs.to_u32().ok_or(Fault::UnsupportedOperation)?)
-                    .unwrap_or_default(),
-            )),
+            (Value::Primitive(lhs), Value::Primitive(rhs)) => {
+                lhs.shift_right(rhs).map(Value::Primitive)
+            }
 
             _ => match (self.to_u64(), rhs.to_u32()) {
-                (Some(lhs), Some(rhs)) => Ok(Value::UInt(lhs.checked_shr(rhs).unwrap_or_default())),
+                (Some(lhs), Some(rhs)) => Ok(Value::Primitive(Primitive::UInt(
+                    lhs.checked_shr(rhs).unwrap_or_default(),
+                ))),
                 _ => Err(Fault::UnsupportedOperation),
             },
         }
@@ -903,11 +1288,7 @@ impl Value {
     /// Returns this value as a shared string reference.
     pub fn to_string(&self, vm: &mut VmContext<'_, '_>) -> Result<SymbolRef, Fault> {
         match self {
-            Value::Nil => Ok(Symbol::empty().downgrade()),
-            Value::Bool(bool) => Ok(SymbolRef::from(*bool)),
-            Value::Int(value) => Ok(SymbolRef::from(value.to_string())),
-            Value::UInt(value) => Ok(SymbolRef::from(value.to_string())),
-            Value::Float(value) => Ok(SymbolRef::from(value.to_string())),
+            Value::Primitive(value) => value.to_string(),
             Value::Symbol(value) => Ok(*value),
             Value::Dynamic(value) => value.to_string(vm),
         }
@@ -931,11 +1312,7 @@ impl Value {
     pub fn hash_into(&self, vm: &mut VmContext<'_, '_>, hasher: &mut ValueHasher) {
         core::mem::discriminant(self).hash(hasher);
         match self {
-            Value::Nil => {}
-            Value::Bool(b) => b.hash(hasher),
-            Value::Int(i) => i.hash(hasher),
-            Value::UInt(i) => i.hash(hasher),
-            Value::Float(f) => f.to_bits().hash(hasher),
+            Value::Primitive(v) => v.hash_into(hasher),
             Value::Symbol(s) => s.hash(hasher),
             Value::Dynamic(d) => d.hash(vm, hasher),
         }
@@ -947,11 +1324,7 @@ impl Value {
 
         core::mem::discriminant(self).hash(&mut hasher);
         match self {
-            Value::Nil => {}
-            Value::Bool(b) => b.hash(&mut hasher),
-            Value::Int(i) => i.hash(&mut hasher),
-            Value::UInt(i) => i.hash(&mut hasher),
-            Value::Float(f) => f.to_bits().hash(&mut hasher),
+            Value::Primitive(v) => v.hash_into(&mut hasher),
             Value::Symbol(s) => s.hash(&mut hasher),
             Value::Dynamic(d) => d.hash(vm, &mut hasher),
         }
@@ -962,35 +1335,14 @@ impl Value {
     /// Returns true if `self` and `other` are equivalent values.
     pub fn equals(&self, vm: ContextOrGuard<'_, '_, '_>, other: &Self) -> Result<bool, Fault> {
         match (self, other) {
-            (Self::Nil, Self::Nil) => Ok(true),
-            (Self::Nil, _) | (_, Self::Nil) => Ok(false),
-
-            (Self::Bool(l0), Self::Bool(r0)) => Ok(l0 == r0),
-            (Self::Bool(b), Self::Int(i)) | (Self::Int(i), Self::Bool(b)) => {
-                Ok(&i64::from(*b) == i)
-            }
-            (Self::Bool(b), Self::Float(f)) | (Self::Float(f), Self::Bool(b)) => {
-                Ok((f64::from(u8::from(*b)) - f).abs() < f64::EPSILON)
-            }
-
-            (Self::Int(l0), Self::Int(r0)) => Ok(l0 == r0),
-            (Self::Int(signed), Self::UInt(unsigned))
-            | (Self::UInt(unsigned), Self::Int(signed)) => {
-                Ok(u64::try_from(*signed).map_or(false, |signed| &signed == unsigned))
-            }
-            (Self::UInt(l0), Self::UInt(r0)) => Ok(l0 == r0),
-            (Self::Float(l0), Self::Float(r0)) => Ok((l0 - r0).abs() < f64::EPSILON),
-            #[allow(clippy::cast_precision_loss)]
-            (Self::Int(i), Self::Float(f)) | (Self::Float(f), Self::Int(i)) => {
-                Ok((*i as f64 - f).abs() < f64::EPSILON)
-            }
-            #[allow(clippy::cast_precision_loss)]
-            (Self::UInt(i), Self::Float(f)) | (Self::Float(f), Self::UInt(i)) => {
-                Ok((*i as f64 - f).abs() < f64::EPSILON)
+            (Self::Primitive(l0), Self::Primitive(r0)) => l0.equals(r0),
+            (Self::Primitive(Primitive::Nil), _) | (_, Self::Primitive(Primitive::Nil)) => {
+                Ok(false)
             }
 
             (Self::Symbol(l0), Self::Symbol(r0)) => Ok(l0 == r0),
-            (Self::Symbol(s), Self::Bool(b)) | (Self::Bool(b), Self::Symbol(s)) => {
+            (Self::Symbol(s), Self::Primitive(Primitive::Bool(b)))
+            | (Self::Primitive(Primitive::Bool(b)), Self::Symbol(s)) => {
                 Ok(s == &SymbolRef::from(*b))
             }
 
@@ -1014,51 +1366,24 @@ impl Value {
     /// the type of data and the value itself.
     pub fn total_cmp(&self, vm: &mut VmContext<'_, '_>, other: &Self) -> Result<Ordering, Fault> {
         match (self, other) {
-            (Value::Nil, Value::Nil) => Ok(Ordering::Equal),
-
-            (Value::Bool(l), Value::Bool(r)) => Ok(l.cmp(r)),
-
-            (Self::Bool(l), Self::Int(r)) => {
-                let l = i64::from(*l);
-                Ok(l.cmp(r))
-            }
-            (Self::Int(l), Self::Bool(r)) => {
-                let r = i64::from(*r);
-                Ok(l.cmp(&r))
-            }
-            (Self::Bool(b), Self::Float(f)) => Ok(f64::from(*b).total_cmp(f)),
-            (Self::Float(f), Self::Bool(b)) => Ok(f.total_cmp(&f64::from(*b))),
-
-            (Value::Int(l), Value::Int(r)) => Ok(l.cmp(r)),
-            (Value::Int(l), Value::UInt(r)) => Ok(if let Ok(l) = u64::try_from(*l) {
-                l.cmp(r)
-            } else {
-                Ordering::Less
-            }),
-            (Value::UInt(l), Value::UInt(r)) => Ok(l.cmp(r)),
-            (Value::Float(l), Value::Float(r)) => Ok(l.total_cmp(r)),
-
-            #[allow(clippy::cast_precision_loss)]
-            (Value::Int(l_int), Value::Float(r_float)) => Ok((*l_int as f64).total_cmp(r_float)),
-            #[allow(clippy::cast_precision_loss)]
-            (Value::Float(l_float), Value::Int(r_int)) => Ok(l_float.total_cmp(&(*r_int as f64))),
+            (Value::Primitive(l), Value::Primitive(r)) => l.total_cmp(r),
 
             (Value::Symbol(l), Value::Symbol(r)) => Ok(l.cmp(r)),
 
             (Self::Dynamic(l0), _) => l0.cmp(vm, other),
             (_, Self::Dynamic(r0)) => r0.cmp(vm, self).map(Ordering::reverse),
 
-            (Value::Nil, _) => Ok(Ordering::Less),
-            (_, Value::Nil) => Ok(Ordering::Greater),
+            (Value::Primitive(Primitive::Nil), _) => Ok(Ordering::Less),
+            (_, Value::Primitive(Primitive::Nil)) => Ok(Ordering::Greater),
 
-            (Value::Bool(_), _) => Ok(Ordering::Less),
-            (_, Value::Bool(_)) => Ok(Ordering::Greater),
-            (Value::Int(_), _) => Ok(Ordering::Less),
-            (_, Value::Int(_)) => Ok(Ordering::Greater),
-            (Value::UInt(_), _) => Ok(Ordering::Less),
-            (_, Value::UInt(_)) => Ok(Ordering::Greater),
-            (Value::Float(_), _) => Ok(Ordering::Less),
-            (_, Value::Float(_)) => Ok(Ordering::Greater),
+            (Value::Primitive(Primitive::Bool(_)), _) => Ok(Ordering::Less),
+            (_, Value::Primitive(Primitive::Bool(_))) => Ok(Ordering::Greater),
+            (Value::Primitive(Primitive::Int(_)), _) => Ok(Ordering::Less),
+            (_, Value::Primitive(Primitive::Int(_))) => Ok(Ordering::Greater),
+            (Value::Primitive(Primitive::UInt(_)), _) => Ok(Ordering::Less),
+            (_, Value::Primitive(Primitive::UInt(_))) => Ok(Ordering::Greater),
+            (Value::Primitive(Primitive::Float(_)), _) => Ok(Ordering::Less),
+            (_, Value::Primitive(Primitive::Float(_))) => Ok(Ordering::Greater),
         }
     }
 
@@ -1074,11 +1399,7 @@ impl Value {
     /// result in `None`.
     pub fn deep_clone(&self, guard: &CollectionGuard) -> Option<Value> {
         match self {
-            Value::Nil => Some(Value::Nil),
-            Value::Bool(value) => Some(Value::Bool(*value)),
-            Value::Int(value) => Some(Value::Int(*value)),
-            Value::UInt(value) => Some(Value::UInt(*value)),
-            Value::Float(value) => Some(Value::Float(*value)),
+            Value::Primitive(p) => Some(Value::Primitive(*p)),
             Value::Symbol(value) => Some(Value::Symbol(*value)),
             Value::Dynamic(value) => value.deep_clone(guard).map(Value::Dynamic),
         }
@@ -1100,11 +1421,11 @@ impl Value {
     #[cfg(feature = "dispatched")]
     pub(crate) fn as_source(&self, guard: &CollectionGuard<'_>) -> ValueOrSource {
         match self {
-            Value::Nil => ValueOrSource::Nil,
-            Value::Bool(value) => ValueOrSource::Bool(*value),
-            Value::Int(value) => ValueOrSource::Int(*value),
-            Value::UInt(value) => ValueOrSource::UInt(*value),
-            Value::Float(value) => ValueOrSource::Float(*value),
+            Value::Primitive(Primitive::Nil) => ValueOrSource::Nil,
+            Value::Primitive(Primitive::Bool(value)) => ValueOrSource::Bool(*value),
+            Value::Primitive(Primitive::Int(value)) => ValueOrSource::Int(*value),
+            Value::Primitive(Primitive::UInt(value)) => ValueOrSource::UInt(*value),
+            Value::Primitive(Primitive::Float(value)) => ValueOrSource::Float(*value),
             Value::Symbol(value) => value
                 .upgrade(guard)
                 .map_or(ValueOrSource::Nil, ValueOrSource::Symbol),
@@ -1122,6 +1443,12 @@ impl Value {
                 }
             }
         }
+    }
+}
+
+impl Default for Value {
+    fn default() -> Self {
+        Self::Primitive(Primitive::default())
     }
 }
 
@@ -1161,17 +1488,38 @@ fn powf64_u64(base: f64, exp: u64) -> f64 {
     }
 }
 
-impl_from!(Value, f32, Float);
-impl_from!(Value, f64, Float);
-impl_from!(Value, i8, Int);
-impl_from!(Value, i16, Int);
-impl_from!(Value, i32, Int);
-impl_from!(Value, i64, Int);
-impl_from!(Value, u8, UInt);
-impl_from!(Value, u16, UInt);
-impl_from!(Value, u32, UInt);
-impl_from!(Value, u64, UInt);
-impl_from!(Value, bool, Bool);
+impl_from!(Primitive, f32, Float);
+impl_from!(Primitive, f64, Float);
+impl_from!(Primitive, i8, Int);
+impl_from!(Primitive, i16, Int);
+impl_from!(Primitive, i32, Int);
+impl_from!(Primitive, i64, Int);
+impl_from!(Primitive, u8, UInt);
+impl_from!(Primitive, u16, UInt);
+impl_from!(Primitive, u32, UInt);
+impl_from!(Primitive, u64, UInt);
+impl_from!(Primitive, bool, Bool);
+
+macro_rules! impl_from_primitive {
+    ($from:ty, $variant:ident) => {
+        impl From<$from> for Value {
+            fn from(value: $from) -> Self {
+                Self::Primitive(Primitive::$variant(value.into()))
+            }
+        }
+    };
+}
+impl_from_primitive!(f32, Float);
+impl_from_primitive!(f64, Float);
+impl_from_primitive!(i8, Int);
+impl_from_primitive!(i16, Int);
+impl_from_primitive!(i32, Int);
+impl_from_primitive!(i64, Int);
+impl_from_primitive!(u8, UInt);
+impl_from_primitive!(u16, UInt);
+impl_from_primitive!(u32, UInt);
+impl_from_primitive!(u64, UInt);
+impl_from_primitive!(bool, Bool);
 impl_from!(Value, Symbol, Symbol);
 impl_from!(Value, &'_ Symbol, Symbol);
 
@@ -1189,10 +1537,27 @@ macro_rules! impl_try_from {
     };
 }
 
-impl_try_from!(Value, u128, UInt);
-impl_try_from!(Value, usize, UInt);
-impl_try_from!(Value, isize, Int);
-impl_try_from!(Value, i128, UInt);
+impl_try_from!(Primitive, u128, UInt);
+impl_try_from!(Primitive, usize, UInt);
+impl_try_from!(Primitive, isize, Int);
+impl_try_from!(Primitive, i128, UInt);
+
+macro_rules! impl_try_from_primitive {
+    ($from:ty) => {
+        impl TryFrom<$from> for Value {
+            type Error = Fault;
+
+            fn try_from(value: $from) -> Result<Self, Self::Error> {
+                Primitive::try_from(value).map(Self::Primitive)
+            }
+        }
+    };
+}
+
+impl_try_from_primitive!(u128);
+impl_try_from_primitive!(usize);
+impl_try_from_primitive!(isize);
+impl_try_from_primitive!(i128);
 
 /// A weak reference to a [`Rooted<T>`].
 #[derive(Clone, Copy, Hash, Eq, PartialEq)]
@@ -3577,7 +3942,7 @@ where
         self.t = self.t.with_fallback(move |dynamic, guard| {
             dynamic
                 .as_rooted::<T>(guard)
-                .map_or(Value::Nil, |rooted| mapping(rooted, guard))
+                .map_or_else(Value::nil, |rooted| mapping(rooted, guard))
         });
         self
     }
@@ -4073,11 +4438,13 @@ fn dynamic() {
 fn functions() {
     let mut guard = CollectionGuard::acquire();
     let func = Value::Dynamic(AnyDynamic::new(
-        RustFunction::new(|_vm: &mut VmContext<'_, '_>, _arity| Ok(Value::Int(1))),
+        RustFunction::new(|_vm: &mut VmContext<'_, '_>, _arity| {
+            Ok(Value::Primitive(Primitive::Int(1)))
+        }),
         &guard,
     ));
     let runtime = crate::vm::Vm::new(&guard);
-    let Value::Int(i) = func
+    let Value::Primitive(Primitive::Int(i)) = func
         .call(&mut VmContext::new(&runtime, &mut guard), 0)
         .unwrap()
     else {
@@ -4087,19 +4454,9 @@ fn functions() {
 }
 
 /// A Muse virtual machine value that holds strong references.
-#[derive(Default, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub enum RootedValue {
-    /// A value representing nothing.
-    #[default]
-    Nil,
-    /// A boolean value.
-    Bool(bool),
-    /// A signed 64-bit integer.
-    Int(i64),
-    /// An unsigned 64-bit integer.
-    UInt(u64),
-    /// A double-preceision floating point number.
-    Float(f64),
+    Primitive(Primitive),
     /// A symbol.
     Symbol(Symbol),
     /// A dynamically allocated, garbage collected type.
@@ -4110,13 +4467,19 @@ impl RootedValue {
     /// Returns this value with weak references to any garbage collected data.
     pub fn downgrade(&self) -> Value {
         match self {
-            RootedValue::Nil => Value::Nil,
-            RootedValue::Bool(v) => Value::Bool(*v),
-            RootedValue::Int(v) => Value::Int(*v),
-            RootedValue::UInt(v) => Value::UInt(*v),
-            RootedValue::Float(v) => Value::Float(*v),
+            RootedValue::Primitive(p) => Value::Primitive(*p),
             RootedValue::Symbol(v) => Value::Symbol(v.downgrade()),
             RootedValue::Dynamic(v) => Value::Dynamic(v.downgrade()),
         }
+    }
+
+    pub const fn nil() -> Self {
+        Self::Primitive(Primitive::Nil)
+    }
+}
+
+impl Default for RootedValue {
+    fn default() -> Self {
+        Self::nil()
     }
 }

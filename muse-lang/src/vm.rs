@@ -44,7 +44,7 @@ use crate::runtime::regex::MuseRegex;
 use crate::runtime::symbol::{IntoOptionSymbol, Symbol, SymbolRef};
 use crate::runtime::types::{BitcodeEnum, BitcodeStruct};
 #[cfg(not(feature = "dispatched"))]
-use crate::runtime::value::ContextOrGuard;
+use crate::runtime::value::{ContextOrGuard, Primitive};
 use crate::runtime::value::{
     CustomType, Dynamic, Rooted, RustType, StaticRustFunctionTable, Value,
 };
@@ -94,7 +94,7 @@ impl Vm {
         Self {
             memory: Root::new(
                 VmMemory(Mutex::new(VmState {
-                    registers: array::from_fn(|_| Value::Nil),
+                    registers: array::from_fn(|_| Value::nil()),
                     frames: vec![Frame::default()],
                     stack: Vec::new(),
                     current_frame: 0,
@@ -569,7 +569,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         Vm {
             memory: Root::new(
                 VmMemory(Mutex::new(VmState {
-                    registers: array::from_fn(|_| Value::Nil),
+                    registers: array::from_fn(|_| Value::nil()),
                     stack: Vec::new(),
                     max_stack: self.vm.max_stack,
                     frames: vec![Frame::default()],
@@ -1223,7 +1223,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         if vm.current_frame >= 1 {
             vm.has_anonymous_frame = false;
             let current_frame = &vm.frames[vm.current_frame];
-            vm.stack[current_frame.start..current_frame.end].fill_with(|| Value::Nil);
+            vm.stack[current_frame.start..current_frame.end].fill_with(Value::nil);
             vm.current_frame -= 1;
             Ok(())
         } else {
@@ -1241,7 +1241,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
             Some(end) if end < vm.max_stack => {
                 current_frame.end += count;
                 if vm.stack.len() < current_frame.end {
-                    vm.stack.resize_with(current_frame.end, || Value::Nil);
+                    vm.stack.resize_with(current_frame.end, Value::nil);
                 }
                 Ok(index)
             }
@@ -1298,8 +1298,8 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         for frame in &mut self.frames {
             frame.clear();
         }
-        self.registers.fill_with(|| Value::Nil);
-        self.stack.fill_with(|| Value::Nil);
+        self.registers.fill_with(Value::nil);
+        self.stack.fill_with(Value::nil);
     }
 
     /// Generates a backtrace for the current virtual machine state.
@@ -1450,7 +1450,11 @@ impl VmContext<'_, '_> {
                 loaded.op1,
                 loaded.op2,
                 loaded.dest,
-                |vm, lhs, rhs| Ok(Value::Bool(lhs.truthy(vm) ^ rhs.truthy(vm))),
+                |vm, lhs, rhs| {
+                    Ok(Value::Primitive(Primitive::Bool(
+                        lhs.truthy(vm) ^ rhs.truthy(vm),
+                    )))
+                },
             ),
             LoadedOp::Assign(loaded) => {
                 self.op_assign(code_index, loaded.op1, loaded.op2, loaded.dest)
@@ -1527,7 +1531,7 @@ impl VmContext<'_, '_> {
                 loaded.dest,
                 |vm, lhs, rhs| {
                     lhs.equals(ContextOrGuard::Context(vm), &rhs)
-                        .map(Value::Bool)
+                        .map(|b| Value::Primitive(Primitive::Bool(b)))
                 },
             ),
             LoadedOp::NotEqual(loaded) => self.op_binop(
@@ -1537,7 +1541,7 @@ impl VmContext<'_, '_> {
                 loaded.dest,
                 |vm, lhs, rhs| {
                     lhs.equals(ContextOrGuard::Context(vm), &rhs)
-                        .map(|result| Value::Bool(!result))
+                        .map(|result| Value::Primitive(Primitive::Bool(!result)))
                 },
             ),
             LoadedOp::GreaterThan(loaded) => {
@@ -1555,7 +1559,10 @@ impl VmContext<'_, '_> {
                 loaded.op1,
                 loaded.op2,
                 loaded.dest,
-                |vm, lhs, rhs| lhs.matches(vm, &rhs).map(Value::Bool),
+                |vm, lhs, rhs| {
+                    lhs.matches(vm, &rhs)
+                        .map(|b| Value::Primitive(Primitive::Bool(b)))
+                },
             ),
             LoadedOp::BitwiseAnd(loaded) => self.op_binop(
                 code_index,
@@ -1688,7 +1695,7 @@ impl VmContext<'_, '_> {
         dest: OpDestination,
     ) -> Result<(), Fault> {
         let value = self.op_load(code_index, value)?;
-        let value = Value::Bool(value.truthy(self));
+        let value = Value::Primitive(Primitive::Bool(value.truthy(self)));
         self.op_store(code_index, value, dest)
     }
 
@@ -1789,7 +1796,8 @@ impl VmContext<'_, '_> {
         op: impl FnOnce(Ordering) -> bool,
     ) -> Result<(), Fault> {
         self.op_binop(code_index, lhs, rhs, dest, |vm, lhs, rhs| {
-            lhs.total_cmp(vm, &rhs).map(|ord| Value::Bool(op(ord)))
+            lhs.total_cmp(vm, &rhs)
+                .map(|ord| Value::Primitive(Primitive::Bool(op(ord))))
         })
     }
 
@@ -1910,11 +1918,11 @@ impl VmContext<'_, '_> {
 
     fn op_load(&mut self, code_index: usize, value: LoadedSource) -> Result<Value, Fault> {
         match value {
-            LoadedSource::Nil => Ok(Value::Nil),
-            LoadedSource::Bool(v) => Ok(Value::Bool(v)),
-            LoadedSource::Int(v) => Ok(Value::Int(v)),
-            LoadedSource::UInt(v) => Ok(Value::UInt(v)),
-            LoadedSource::Float(v) => Ok(Value::Float(v)),
+            LoadedSource::Nil => Ok(Value::nil()),
+            LoadedSource::Bool(v) => Ok(Value::Primitive(Primitive::Bool(v))),
+            LoadedSource::Int(v) => Ok(Value::Primitive(Primitive::Int(v))),
+            LoadedSource::UInt(v) => Ok(Value::Primitive(Primitive::UInt(v))),
+            LoadedSource::Float(v) => Ok(Value::Primitive(Primitive::Float(v))),
             LoadedSource::Symbol(v) => self.op_load_symbol(code_index, v).map(Value::Symbol),
             LoadedSource::Register(v) => Ok(self[v]),
             LoadedSource::Stack(v) => self
@@ -1928,7 +1936,7 @@ impl VmContext<'_, '_> {
                 .labels
                 .get(v.0)
                 .and_then(|label| u64::try_from(*label).ok())
-                .map(Value::UInt)
+                .map(|i| Value::Primitive(Primitive::UInt(i)))
                 .ok_or(Fault::InvalidOpcode),
             LoadedSource::Regex(v) => self.code[code_index]
                 .code

@@ -3,7 +3,7 @@
 use muse::compiler::Compiler;
 use muse::refuse::CollectionGuard;
 use muse::runtime::symbol::Symbol;
-use muse::runtime::value::{AsyncFunction, Value};
+use muse::runtime::value::{AsyncFunction, Primitive, Value};
 use muse::vm::{Arity, Fault, Register, Vm, VmContext};
 
 fn main() {
@@ -22,7 +22,11 @@ fn main() {
             .send(vm[Register(0)].as_i64().expect("invalid arg"))
             .unwrap();
         let output_receiver = output_receiver.clone();
-        async move { Ok::<_, Fault>(Value::Int(output_receiver.recv_async().await.unwrap())) }
+        async move {
+            Ok::<_, Fault>(Value::Primitive(Primitive::Int(
+                output_receiver.recv_async().await.unwrap(),
+            )))
+        }
     });
 
     let code = Compiler::compile(
@@ -47,6 +51,6 @@ fn main() {
 
     assert_eq!(
         pollster::block_on(context.execute_async(&code).unwrap()).unwrap(),
-        Value::Int(5)
+        Value::Primitive(Primitive::Int(5))
     );
 }

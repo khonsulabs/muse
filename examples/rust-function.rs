@@ -2,7 +2,7 @@
 use muse::compiler::Compiler;
 use muse::refuse::CollectionGuard;
 use muse::runtime::symbol::Symbol;
-use muse::runtime::value::{RustFunction, Value};
+use muse::runtime::value::{Primitive, RustFunction, Value};
 use muse::vm::{Fault, Register, Vm, VmContext};
 
 fn main() {
@@ -22,7 +22,7 @@ fn main() {
                     println!("Called with {arg:?}");
 
                     if let Some(int) = arg.as_i64() {
-                        Ok(Value::Bool(int % 2 == 0))
+                        Ok(Value::Primitive(Primitive::Bool(int % 2 == 0)))
                     } else {
                         Err(Fault::UnsupportedOperation)
                     }
@@ -31,5 +31,8 @@ fn main() {
             ),
         )
         .unwrap();
-    assert_eq!(context.execute(&code).unwrap(), Value::Bool(true));
+    assert_eq!(
+        context.execute(&code).unwrap(),
+        Value::Primitive(Primitive::Bool(true))
+    );
 }

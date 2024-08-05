@@ -7,7 +7,7 @@ use crate::compiler::syntax::{Expression, Ranged, SourceRange, TokenizeInto};
 use crate::compiler::Compiler;
 use crate::runtime::exception::Exception;
 use crate::runtime::symbol::Symbol;
-use crate::runtime::value::Value;
+use crate::runtime::value::{Primitive, Value};
 use crate::vm::bitcode::BitcodeBlock;
 use crate::vm::{ExecutionError, Register, Vm};
 
@@ -98,12 +98,15 @@ fn invoke() {
     let vm = Vm::new(&guard);
     vm.execute(&code, &mut guard).unwrap();
 
-    let Value::Int(result) = vm.invoke("test", [Value::Int(3)], &mut guard).unwrap() else {
+    let Value::Primitive(Primitive::Int(result)) = vm
+        .invoke("test", [Value::Primitive(Primitive::Int(3))], &mut guard)
+        .unwrap()
+    else {
         unreachable!()
     };
     assert_eq!(result, 6);
     let ExecutionError::Exception(exception) = vm
-        .invoke("private", [Value::Int(3)], &mut guard)
+        .invoke("private", [Value::Primitive(Primitive::Int(3))], &mut guard)
         .unwrap_err()
     else {
         unreachable!()

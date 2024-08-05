@@ -14,7 +14,7 @@ use muse::runtime::map::Map;
 use muse::runtime::regex::{MuseMatch, MuseRegex};
 use muse::runtime::string::MuseString;
 use muse::runtime::symbol::Symbol;
-use muse::runtime::value::Value;
+use muse::runtime::value::{Primitive, Value};
 use muse::vm::{Code, ExecutionError, StackFrame, Vm};
 use serde::de::Visitor;
 use serde::Deserialize;
@@ -120,11 +120,11 @@ impl From<Value> for TestOutput {
     fn from(value: Value) -> Self {
         let guard = CollectionGuard::acquire();
         match value {
-            Value::Nil => TestOutput::Nil,
-            Value::Bool(bool) => TestOutput::Bool(bool),
-            Value::Int(v) => TestOutput::Int(v),
-            Value::UInt(v) => TestOutput::UInt(v),
-            Value::Float(v) => TestOutput::Float(v),
+            Value::Primitive(Primitive::Nil) => TestOutput::Nil,
+            Value::Primitive(Primitive::Bool(bool)) => TestOutput::Bool(bool),
+            Value::Primitive(Primitive::Int(v)) => TestOutput::Int(v),
+            Value::Primitive(Primitive::UInt(v)) => TestOutput::UInt(v),
+            Value::Primitive(Primitive::Float(v)) => TestOutput::Float(v),
             Value::Symbol(v) => TestOutput::Symbol(v.upgrade(&guard).expect("missing symbol")),
             Value::Dynamic(v) => {
                 if let Some(str) = v.downcast_ref::<MuseString>(&guard) {

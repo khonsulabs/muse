@@ -18,7 +18,7 @@ use crate::compiler::syntax::{BitwiseKind, CompareKind};
 use crate::compiler::{BitcodeModule, UnaryKind};
 use crate::runtime::symbol::Symbol;
 use crate::runtime::types::{BitcodeEnum, BitcodeStruct};
-use crate::runtime::value::{ContextOrGuard, Dynamic, Value};
+use crate::runtime::value::{ContextOrGuard, Dynamic, Primitive, Value};
 use crate::vm::{Fault, SourceRange};
 
 impl CodeData {
@@ -371,7 +371,8 @@ where
     fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         let source = self.source.load(vm)?.truthy(vm);
 
-        self.dest.store(vm, Value::Bool(source))?;
+        self.dest
+            .store(vm, Value::Primitive(Primitive::Bool(source)))?;
 
         Ok(ControlFlow::Continue(()))
     }
@@ -488,7 +489,7 @@ where
         if let Some(target) = target.as_u64() {
             vm.jump_to(usize::try_from(target).map_err(|_| Fault::InvalidInstructionAddress)?);
             self.previous_address
-                .store(vm, Value::UInt(current_instruction))?;
+                .store(vm, Value::Primitive(Primitive::UInt(current_instruction)))?;
 
             Ok(ControlFlow::Continue(()))
         } else {
@@ -534,7 +535,7 @@ where
             if let Some(target) = target.as_u64() {
                 vm.jump_to(usize::try_from(target).map_err(|_| Fault::InvalidInstructionAddress)?);
                 self.previous_address
-                    .store(vm, Value::UInt(current_instruction))?;
+                    .store(vm, Value::Primitive(Primitive::UInt(current_instruction)))?;
 
                 Ok(ControlFlow::Continue(()))
             } else {
@@ -708,8 +709,10 @@ macro_rules! declare_comparison_instruction {
             fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
                 let (lhs, rhs) = try_all!(self.lhs.load(vm), self.rhs.load(vm));
                 let ordering = lhs.total_cmp(vm, &rhs)?;
-                self.dest
-                    .store(vm, Value::Bool(matches!(ordering, $pattern)))?;
+                self.dest.store(
+                    vm,
+                    Value::Primitive(Primitive::Bool(matches!(ordering, $pattern))),
+                )?;
 
                 Ok(ControlFlow::Continue(()))
             }
@@ -782,7 +785,8 @@ where
     fn execute(&self, vm: &mut VmContext<'_, '_>) -> Result<ControlFlow<()>, Fault> {
         let (lhs, rhs) = try_all!(self.lhs.load(vm), self.rhs.load(vm));
         let (lhs, rhs) = (lhs.truthy(vm), rhs.truthy(vm));
-        self.dest.store(vm, Value::Bool(lhs ^ rhs))?;
+        self.dest
+            .store(vm, Value::Primitive(Primitive::Bool(lhs ^ rhs)))?;
 
         Ok(ControlFlow::Continue(()))
     }
@@ -816,9 +820,11 @@ where
         let equals = lhs.equals(ContextOrGuard::Context(vm), &rhs)?;
 
         if NOT {
-            self.dest.store(vm, Value::Bool(!equals))?;
+            self.dest
+                .store(vm, Value::Primitive(Primitive::Bool(!equals)))?;
         } else {
-            self.dest.store(vm, Value::Bool(equals))?;
+            self.dest
+                .store(vm, Value::Primitive(Primitive::Bool(equals)))?;
         }
 
         Ok(ControlFlow::Continue(()))
@@ -854,7 +860,8 @@ where
         let lhs = self.lhs.load(vm)?;
         let rhs = self.rhs.load(vm)?;
         let matches = lhs.matches(vm, &rhs)?;
-        self.dest.store(vm, Value::Bool(matches))?;
+        self.dest
+            .store(vm, Value::Primitive(Primitive::Bool(matches)))?;
 
         Ok(ControlFlow::Continue(()))
     }
@@ -949,7 +956,7 @@ impl Source for Value {
 
 impl Source for () {
     fn load(&self, _vm: &VmContext<'_, '_>) -> Result<Value, Fault> {
-        Ok(Value::Nil)
+        Ok(Value::nil())
     }
 
     fn as_source(&self, _guard: &CollectionGuard<'_>) -> ValueOrSource {
@@ -959,7 +966,7 @@ impl Source for () {
 
 impl Source for bool {
     fn load(&self, _vm: &VmContext<'_, '_>) -> Result<Value, Fault> {
-        Ok(Value::Bool(*self))
+        Ok(Value::Primitive(Primitive::Bool(*self)))
     }
 
     fn as_source(&self, _guard: &CollectionGuard<'_>) -> ValueOrSource {
@@ -969,7 +976,7 @@ impl Source for bool {
 
 impl Source for i64 {
     fn load(&self, _vm: &VmContext<'_, '_>) -> Result<Value, Fault> {
-        Ok(Value::Int(*self))
+        Ok(Value::Primitive(Primitive::Int(*self)))
     }
 
     fn as_source(&self, _guard: &CollectionGuard<'_>) -> ValueOrSource {
@@ -979,7 +986,7 @@ impl Source for i64 {
 
 impl Source for u64 {
     fn load(&self, _vm: &VmContext<'_, '_>) -> Result<Value, Fault> {
-        Ok(Value::UInt(*self))
+        Ok(Value::Primitive(Primitive::UInt(*self)))
     }
 
     fn as_source(&self, _guard: &CollectionGuard<'_>) -> ValueOrSource {
@@ -989,7 +996,7 @@ impl Source for u64 {
 
 impl Source for f64 {
     fn load(&self, _vm: &VmContext<'_, '_>) -> Result<Value, Fault> {
-        Ok(Value::Float(*self))
+        Ok(Value::Primitive(Primitive::Float(*self)))
     }
 
     fn as_source(&self, _guard: &CollectionGuard<'_>) -> ValueOrSource {
@@ -1125,7 +1132,7 @@ impl Source for Label {
             .get(self.0)
             .ok_or(Fault::InvalidLabel)?;
         let instruction = u64::try_from(*instruction).map_err(|_| Fault::InvalidLabel)?;
-        Ok(Value::UInt(instruction))
+        Ok(Value::Primitive(Primitive::UInt(instruction)))
     }
 
     fn as_source(&self, _guard: &CollectionGuard<'_>) -> ValueOrSource {

@@ -16,7 +16,7 @@ use crate::compiler::{BitcodeModule, SourceMap, UnaryKind};
 use crate::runtime::regex::MuseRegex;
 use crate::runtime::symbol::{IntoOptionSymbol, Symbol};
 use crate::runtime::types::{BitcodeEnum, BitcodeStruct};
-use crate::runtime::value::Value;
+use crate::runtime::value::{Primitive, Value};
 use crate::vm::Stack;
 
 /// A value or a source of a value.
@@ -59,11 +59,11 @@ impl ValueOrSource {
     /// This function does not support loading [`Label`]s.
     pub fn load(&self, vm: &VmContext<'_, '_>) -> Result<Value, Fault> {
         match self {
-            ValueOrSource::Nil => Ok(Value::Nil),
-            ValueOrSource::Bool(v) => Ok(Value::Bool(*v)),
-            ValueOrSource::Int(v) => Ok(Value::Int(*v)),
-            ValueOrSource::UInt(v) => Ok(Value::UInt(*v)),
-            ValueOrSource::Float(v) => Ok(Value::Float(*v)),
+            ValueOrSource::Nil => Ok(Value::nil()),
+            ValueOrSource::Bool(v) => Ok(Value::Primitive(Primitive::Bool(*v))),
+            ValueOrSource::Int(v) => Ok(Value::Primitive(Primitive::Int(*v))),
+            ValueOrSource::UInt(v) => Ok(Value::Primitive(Primitive::UInt(*v))),
+            ValueOrSource::Float(v) => Ok(Value::Primitive(Primitive::Float(*v))),
             ValueOrSource::Symbol(v) => Ok(Value::Symbol(v.downgrade())),
             ValueOrSource::Regex(v) => MuseRegex::load(v, vm.guard()),
             ValueOrSource::Function(v) => Ok(Value::dynamic(v.to_function(vm.guard()), vm.guard())),
