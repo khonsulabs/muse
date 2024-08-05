@@ -7,6 +7,63 @@
 //! - Waiting on a task's completion
 //! - Cancelling a task
 //! - Budgeting tasks in pools
+//!
+//! # Basic Usage
+//!
+//! ```rust
+//! use muse_reactor::Reactor;
+//! use muse_lang::runtime::value::{Primitive, RootedValue};
+//!
+//! // Create a new reactor for tasks to run in.
+//! let reactor = Reactor::new();
+//!
+//! // Spawn a task that computes 1 + 2
+//! let task = reactor.spawn_source("1 + 2").unwrap();
+//!
+//! // Wait for the result and verify it's 3.
+//! assert_eq!(
+//!     task.join().unwrap(),
+//!     RootedValue::Primitive(Primitive::Int(3))
+//! );
+//! ```
+//!
+//! [`TaskHandle`] is also a future that can be awaited to wait for the task to
+//! complete.
+//!
+//! # Budget Pools
+//!
+//! Budget pools enable efficiently restricting groups of tasks to execution
+//! budgets. Each time a task assigned to a [`BudgetPool`] exhausts its budget,
+//! it requests additional budget from the pool. If no budget is available, the
+//! task is put to sleep and will automatically be resumed when the budget has
+//! been replenished.
+//!
+//! ```rust
+//! use muse_reactor::{BudgetPool, BudgetPoolConfig, Reactor};
+//! use muse_lang::runtime::value::{Primitive, RootedValue};
+//! use std::time::Duration;
+//!
+//! // Create a new reactor for tasks to run in.
+//! let reactor = Reactor::new();
+//!
+//! // Create a budget pool that we can spawn tasks within.
+//! let pool = reactor.create_budget_pool(BudgetPoolConfig::default()).unwrap();
+//!
+//! // Spawn a task within the budget pool
+//! let task = pool.spawn_source("var i = 0; while i < 100 { i = i + 1; }; i").unwrap();
+//!
+//! // Verify the task isn't able to complete.
+//! assert!(task.try_join_for(Duration::from_secs(1)).is_none());
+//!
+//! // Allocate enough budget.
+//! pool.increase_budget(1_000);
+//!
+//! // Wait for the task to complete
+//! assert_eq!(
+//!     task.join().unwrap(),
+//!     RootedValue::Primitive(Primitive::Int(100))
+//! );
+//! ```
 #![allow(missing_docs)]
 use std::any::Any;
 use std::cell::Cell;
@@ -608,10 +665,6 @@ impl ResultHandle {
     fn try_recv(&self) -> Option<Result<RootedValue, TaskError>> {
         self.0.locked.lock().result.clone()
     }
-
-    fn recv_async(&self) -> ResultHandleFuture<'_> {
-        ResultHandleFuture(self)
-    }
 }
 
 impl Debug for ResultHandle {
@@ -669,14 +722,11 @@ impl ResultDeadline for Instant {
     }
 }
 
-#[derive(Debug)]
-struct ResultHandleFuture<'a>(&'a ResultHandle);
-
-impl Future for ResultHandleFuture<'_> {
+impl Future for &'_ TaskHandle {
     type Output = Result<RootedValue, TaskError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut data = self.0 .0.locked.lock();
+        let mut data = self.result.0.locked.lock();
         if let Some(result) = &data.result {
             Poll::Ready(result.clone())
         } else {
@@ -846,10 +896,6 @@ impl TaskHandle {
         self.try_join_until(Instant::now() + duration)
     }
 
-    pub async fn join_async(&self) -> Result<RootedValue, TaskError> {
-        self.result.recv_async().await
-    }
-
     pub fn cancel(&self) {
         let mut locked = self.result.0.locked.lock();
         locked.cancelled = true;
@@ -866,7 +912,7 @@ impl CustomType for TaskHandle {
                 |this, vm, _arity| {
                     let waker = vm.waker().clone();
                     let mut context = Context::from_waker(&waker);
-                    let mut future = this.result.recv_async();
+                    let mut future = &*this;
                     match Pin::new(&mut future).poll(&mut context) {
                         Poll::Ready(result) => result.map(|v| v.downgrade()).map_err(|e| match e {
                             TaskError::Cancelled => {

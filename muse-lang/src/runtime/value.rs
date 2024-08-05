@@ -733,6 +733,7 @@ impl Primitive {
             Self::Float(value) => Ok(SymbolRef::from(value.to_string())),
         }
     }
+
     /// Hashes this value into `hasher`.
     pub fn hash_into(&self, hasher: &mut ValueHasher) {
         core::mem::discriminant(self).hash(hasher);

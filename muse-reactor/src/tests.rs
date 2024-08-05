@@ -1,10 +1,10 @@
-use std::{thread, time::Duration};
+use std::thread;
+use std::time::Duration;
 
-use muse_lang::{
-    compiler::{self, syntax::Ranged},
-    runtime::value::{Primitive, RootedValue},
-    vm::Vm,
-};
+use muse_lang::compiler::syntax::Ranged;
+use muse_lang::compiler::{self};
+use muse_lang::runtime::value::{Primitive, RootedValue};
+use muse_lang::vm::Vm;
 use refuse::CollectionGuard;
 
 use crate::{BudgetPoolConfig, NoWork, Reactor, ReactorHandle, TaskError};
