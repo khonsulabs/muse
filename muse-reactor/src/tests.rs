@@ -78,21 +78,31 @@ fn automatic_recharge() {
         .new_vm(
             |guard: &mut CollectionGuard<'_>, _reactor: &ReactorHandle<NoWork>| {
                 let vm = Vm::new(guard);
-                vm.set_steps_per_charge(1);
+                vm.set_steps_per_charge(5);
                 Ok(vm)
             },
         )
         .finish();
-    let pool = reactor
+    let pool1 = reactor
+        .create_budget_pool(BudgetPoolConfig::new().with_recharge(50, Duration::from_millis(200)))
+        .unwrap();
+    let pool2 = reactor
         .create_budget_pool(BudgetPoolConfig::new().with_recharge(50, Duration::from_millis(500)))
         .unwrap();
     let now = Instant::now();
-    let task = pool
+    let task1 = pool1
+        .spawn_source("var n = 0; while n < 60 { n = n + 1 }")
+        .unwrap();
+    let task2 = pool2
         .spawn_source("var n = 0; while n < 60 { n = n + 1 }")
         .unwrap();
 
     assert_eq!(
-        task.join().unwrap(),
+        task1.join().unwrap(),
+        RootedValue::Primitive(Primitive::Int(60))
+    );
+    assert_eq!(
+        task2.join().unwrap(),
         RootedValue::Primitive(Primitive::Int(60))
     );
     assert!(now.elapsed() > Duration::from_secs(1));
