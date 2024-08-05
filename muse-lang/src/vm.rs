@@ -1173,8 +1173,6 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
             let module = &vm.modules[vm.frames[vm.current_frame].module.0];
             if let Some(decl) = module.try_load(self.guard)?.declarations().get_mut(name) {
                 if decl.mutable {
-                    let name = name.try_load(self.guard()).expect("missing symbol");
-                    println!("Set {name} from {:?} to {value:?}", decl.value);
                     decl.value = value;
                     Ok(())
                 } else {
@@ -2137,7 +2135,7 @@ impl ExecutionError {
     /// Returns this error as a [`Value`].
     pub fn as_value(&self) -> Value {
         match self {
-            ExecutionError::NoBudget => Value::Symbol(SymbolRef::from("no-budget")),
+            ExecutionError::NoBudget => Value::Symbol(SymbolRef::from("no_budget")),
             ExecutionError::Waiting => Value::Symbol(SymbolRef::from("waiting")),
             ExecutionError::Timeout => Value::Symbol(SymbolRef::from("timeout")),
             ExecutionError::Exception(v) => *v,

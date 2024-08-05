@@ -57,7 +57,7 @@ impl BitcodeStruct {
                         .downcast_ref::<StructInstance>(vm.guard())
                         .ok_or(Fault::ValueFreed)?;
                     if let Some(field) = loaded.fields.get(field_name) {
-                        if field.access < dbg!(vm.caller_access_level_by_index(module)) {
+                        if field.access < vm.caller_access_level_by_index(module) {
                             return Err(Fault::Forbidden);
                         }
                         Ok(field.accessable)

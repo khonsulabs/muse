@@ -86,7 +86,7 @@ use kempt::{Map, Set};
 use muse_lang::compiler::syntax::Ranged;
 use muse_lang::compiler::{self, Compiler};
 use muse_lang::runtime::list::List;
-use muse_lang::runtime::symbol::SymbolRef;
+use muse_lang::runtime::symbol::{Symbol, SymbolRef};
 use muse_lang::runtime::value::{
     CustomType, Dynamic, Rooted, RootedValue, RustFunction, RustType, Value,
 };
@@ -220,6 +220,7 @@ enum ThreadCommand<Work> {
     Spawn(Spawn<Work>),
     Cancel(usize),
     NewBudgetPool(ReactorBudgetPool),
+    DestroyBudgetPool(BudgetPool),
 }
 
 struct DispatcherThread<Work> {
@@ -228,11 +229,19 @@ struct DispatcherThread<Work> {
     unparker: Unparker,
 }
 
+struct RechargingBudget {
+    pool: ReactorBudgetPool,
+    recharge_at: Instant,
+}
+
 struct Dispatcher<Work> {
     commands: Receiver<Command<Work>>,
     handle: ReactorHandle<Work>,
     threads: VecDeque<DispatcherThread<Work>>,
     next_rebalance: Instant,
+    budget_ids: Map<BudgetPool, LotId>,
+    recharging_budgets: Lots<RechargingBudget>,
+    recharge_queue: VecDeque<LotId>,
 }
 
 impl<Work> Dispatcher<Work> {
@@ -244,6 +253,9 @@ impl<Work> Dispatcher<Work> {
             handle,
             threads: VecDeque::new(),
             next_rebalance: Instant::now(),
+            budget_ids: Map::new(),
+            recharging_budgets: Lots::new(),
+            recharge_queue: VecDeque::new(),
         };
         this.cache_thread_loads(this.next_rebalance);
         this
@@ -272,75 +284,164 @@ impl<Work> Dispatcher<Work> {
     }
 
     fn run(mut self) {
-        while let Ok(command) = self.commands.recv() {
-            match command {
-                Command::NewBudgetPool(pool) => {
-                    self.threads.retain_mut(|th| {
-                        th.spawner
-                            .send(ThreadCommand::NewBudgetPool(pool.clone()))
-                            .is_ok()
-                    });
-                }
-                Command::Spawn(mut spawn) => {
-                    // We loop in case a thread dies.
-                    loop {
-                        let Some(thread) = self.threads.front_mut() else {
-                            return;
-                        };
+        while !self.commands.is_disconnected() {
+            while let Some(command) = if let Some(budget) = self
+                .recharge_queue
+                .iter()
+                .filter_map(|id| self.recharging_budgets.get(*id))
+                .next()
+            {
+                self.commands.recv_deadline(budget.recharge_at).ok()
+            } else {
+                self.commands.recv().ok()
+            } {
+                self.process_command(command);
+            }
 
-                        match thread.spawner.send(ThreadCommand::Spawn(spawn)) {
-                            Ok(()) => {
-                                thread.unparker.unpark();
-                                thread.load += 1;
-                                let new_load = thread.load;
-                                if let Some(next_load) = self
-                                    .threads
-                                    .get(1)
-                                    .and_then(|next| (next.load < new_load).then_some(next.load))
-                                {
-                                    // The next thread has a load lower than the current
-                                    // thread after this spawn. We need to find a new
-                                    // place for this thread. To avoid moving the buffer
-                                    // too much we are going to scan to find the right
-                                    // location.
-                                    //
-                                    // First, find the next highest load after the new
-                                    // "front" load `next_load`.
-                                    match self.threads.iter().enumerate().skip(2).find_map(
-                                        |(index, thread)| {
-                                            (next_load < thread.load).then_some(index)
-                                        },
-                                    ) {
-                                        Some(insert_at) => {
-                                            let current =
-                                                self.threads.pop_front().expect("already checked");
-                                            self.threads.insert(insert_at, current);
-                                        }
-                                        None => {
-                                            // Move to the end.
-                                            self.threads.rotate_left(1);
-                                        }
+            self.recharge_budgets();
+        }
+    }
+
+    fn process_command(&mut self, command: Command<Work>) {
+        match command {
+            Command::NewBudgetPool(pool) => {
+                self.threads.retain_mut(|th| {
+                    let sent = th
+                        .spawner
+                        .send(ThreadCommand::NewBudgetPool(pool.clone()))
+                        .is_ok();
+                    th.unparker.unpark();
+                    sent
+                });
+                if pool.0.config.recharges() {
+                    let recharge_at = Instant::now() + pool.0.config.recharge_every;
+                    let pool_id = pool.0.pool;
+                    let id = self
+                        .recharging_budgets
+                        .push(RechargingBudget { pool, recharge_at });
+                    self.budget_ids.insert(pool_id, id);
+                    self.recharge_queue
+                        .insert(self.find_recharge_queue_position(recharge_at, 0), id);
+                }
+            }
+            Command::DestroyBudgetPool(pool) => {
+                self.threads.retain_mut(|th| {
+                    let sent = th
+                        .spawner
+                        .send(ThreadCommand::DestroyBudgetPool(pool))
+                        .is_ok();
+                    th.unparker.unpark();
+                    sent
+                });
+                if let Some(id) = self.budget_ids.remove(&pool) {
+                    self.recharging_budgets.remove(id.value);
+                }
+            }
+            Command::Spawn(mut spawn) => {
+                // We loop in case a thread dies.
+                loop {
+                    let Some(thread) = self.threads.front_mut() else {
+                        return;
+                    };
+
+                    match thread.spawner.send(ThreadCommand::Spawn(spawn)) {
+                        Ok(()) => {
+                            thread.unparker.unpark();
+                            thread.load += 1;
+                            let new_load = thread.load;
+                            if let Some(next_load) = self
+                                .threads
+                                .get(1)
+                                .and_then(|next| (next.load < new_load).then_some(next.load))
+                            {
+                                // The next thread has a load lower than the current
+                                // thread after this spawn. We need to find a new
+                                // place for this thread. To avoid moving the buffer
+                                // too much we are going to scan to find the right
+                                // location.
+                                //
+                                // First, find the next highest load after the new
+                                // "front" load `next_load`.
+                                match self.threads.iter().enumerate().skip(2).find_map(
+                                    |(index, thread)| (next_load < thread.load).then_some(index),
+                                ) {
+                                    Some(insert_at) => {
+                                        let current =
+                                            self.threads.pop_front().expect("already checked");
+                                        self.threads.insert(insert_at, current);
+                                    }
+                                    None => {
+                                        // Move to the end.
+                                        self.threads.rotate_left(1);
                                     }
                                 }
-                                break;
                             }
-                            Err(SendError(returned_work)) => {
-                                let ThreadCommand::Spawn(returned_work) = returned_work else {
-                                    unreachable!("just sent")
-                                };
-                                spawn = returned_work;
-                                self.threads.remove(0);
-                            }
+                            break;
                         }
+                        Err(SendError(returned_work)) => {
+                            let ThreadCommand::Spawn(returned_work) = returned_work else {
+                                unreachable!("just sent")
+                            };
+                            spawn = returned_work;
+                            self.threads.remove(0);
+                        }
+                    }
 
-                        let now = Instant::now();
-                        if now > self.next_rebalance {
-                            self.cache_thread_loads(now);
-                        }
+                    let now = Instant::now();
+                    if now > self.next_rebalance {
+                        self.cache_thread_loads(now);
                     }
                 }
             }
         }
+    }
+
+    fn recharge_budgets(&mut self) {
+        let now = Instant::now();
+        while let Some(id) = self.recharge_queue.front().copied() {
+            let Some(pool) = self.recharging_budgets.get_mut(id) else {
+                self.recharge_queue.pop_front();
+                continue;
+            };
+            if pool.recharge_at > now {
+                break;
+            }
+
+            pool.pool
+                .increase_budget(pool.pool.0.config.recharge_amount);
+            // Step the recharge by the duration, but make sure that we always
+            // use a timestamp that is at least now. This ensures that if for
+            // some reason we can't keep up, we don't get in a situation where
+            // we can never recharge enough.
+            let new_deadline = (pool.recharge_at + pool.pool.0.config.recharge_every).max(now);
+            pool.recharge_at = new_deadline;
+            let new_index = self.find_recharge_queue_position(new_deadline, 1);
+            match new_index {
+                0 => {}
+                n if n == self.recharge_queue.len() => self.recharge_queue.rotate_left(1),
+                _ => {
+                    self.recharge_queue.pop_front();
+                    self.recharge_queue.insert(new_index, id);
+                }
+            }
+        }
+    }
+
+    fn find_recharge_queue_position(&self, recharge_at: Instant, start_at: usize) -> usize {
+        let mut insert_at = self.recharge_queue.len();
+        for (index, budget) in self
+            .recharge_queue
+            .iter()
+            .skip(start_at)
+            .enumerate()
+            .filter_map(|(index, id)| self.recharging_budgets.get(*id).map(|b| (index, b)))
+        {
+            if budget.recharge_at > recharge_at {
+                insert_at = index;
+                break;
+            }
+        }
+        insert_at
     }
 }
 
@@ -418,13 +519,13 @@ where
                         drop(future);
                         let result = root_result(Ok(result), &mut vm_context);
                         drop(vm_context);
-                        tasks.complete_running_task(result);
+                        tasks.complete_running_task(result, &mut self.budgets);
                     }
                     Poll::Ready(Err(ExecutionError::Exception(err))) => {
                         drop(future);
                         let result = root_result(Err(err), &mut vm_context);
                         drop(vm_context);
-                        tasks.complete_running_task(result);
+                        tasks.complete_running_task(result, &mut self.budgets);
                     }
                     Poll::Ready(Err(ExecutionError::Waiting)) | Poll::Pending => {
                         task.executing = false;
@@ -461,7 +562,7 @@ where
                                     parked_threads
                                         .entry(self.id)
                                         .or_insert_with(|| parker.unparker().clone());
-                                    budget.paused.push_back(task_id);
+                                    budget.exhausted.push_back(task_id);
                                     tasks.executing.pop_front();
                                 }
                             }
@@ -472,7 +573,7 @@ where
                                 &mut vm_context,
                             );
                             drop(vm_context);
-                            tasks.complete_running_task(result);
+                            tasks.complete_running_task(result, &mut self.budgets);
                         }
                     }
                 }
@@ -506,12 +607,26 @@ where
                                     locked.cancellation = Some(canceller.clone());
                                     drop(locked);
 
-                                    if let Some(pool) = command.pool {
+                                    let budget = if let Some(pool) = command.pool {
                                         if let Some(budget) = self.budgets.get_mut(&pool) {
                                             vm.increase_budget(budget.allocate());
+                                            Some(budget)
+                                        } else {
+                                            let _ = command.result.send(Err(TaskError::Exception(
+                                                RootedValue::Symbol(Symbol::from("no_budget")),
+                                            )));
+                                            continue;
                                         }
-                                    }
-                                    tasks.push(command.id, command.pool, vm, command.result);
+                                    } else {
+                                        None
+                                    };
+                                    tasks.push(
+                                        command.id,
+                                        command.pool,
+                                        vm,
+                                        command.result,
+                                        budget,
+                                    );
                                 }
                                 Err(err) => {
                                     let err = match err {
@@ -532,15 +647,34 @@ where
                                 ThreadBudget {
                                     pool,
                                     exhausted_at: Cell::new(0),
-                                    paused: VecDeque::new(),
+                                    exhausted: VecDeque::new(),
+                                    tasks: Set::new(),
                                 },
                             );
+                        }
+                        ThreadCommand::DestroyBudgetPool(pool) => {
+                            let Some(mut budget) = self.budgets.remove(&pool) else {
+                                continue;
+                            };
+                            for paused in std::mem::take(&mut budget.value.tasks).drain() {
+                                tasks.complete_task(
+                                    paused,
+                                    Err(TaskError::Exception(RootedValue::Symbol(Symbol::from(
+                                        "no_budget",
+                                    )))),
+                                    &mut self.budgets,
+                                );
+                            }
                         }
                         ThreadCommand::Cancel(global_id) => {
                             let Some(task_id) = tasks.registered.get(&global_id).copied() else {
                                 continue;
                             };
-                            let task = tasks.complete_task(task_id, Err(TaskError::Cancelled));
+                            let task = tasks.complete_task(
+                                task_id,
+                                Err(TaskError::Cancelled),
+                                &mut self.budgets,
+                            );
 
                             if task.executing {
                                 let (index, _) = tasks
@@ -558,11 +692,13 @@ where
                 }
             }
 
+            drop(guard);
+
             if tasks.executing.is_empty() {
                 let woken = tasks.woken.tasks.lock();
                 if woken.is_empty() {
                     drop(woken);
-                    guard.while_unlocked(|| parker.park());
+                    parker.park();
                 }
             }
         }
@@ -573,7 +709,7 @@ where
             let last_updated = budget.pool.0.last_updated.load(Ordering::Relaxed);
             if budget.exhausted_at.get() != last_updated {
                 budget.exhausted_at.set(last_updated);
-                for task_id in budget.paused.drain(..) {
+                for task_id in budget.exhausted.drain(..) {
                     let Some(task) = tasks.all.get_mut(task_id) else {
                         continue;
                     };
@@ -588,7 +724,8 @@ where
 struct ThreadBudget {
     pool: ReactorBudgetPool,
     exhausted_at: Cell<u64>,
-    paused: VecDeque<LotId>,
+    exhausted: VecDeque<LotId>,
+    tasks: Set<LotId>,
 }
 
 impl ThreadBudget {
@@ -795,6 +932,7 @@ impl ReactorTasks {
         budget_pool: Option<BudgetPool>,
         vm: Vm,
         result: ResultHandle,
+        budget: Option<&mut ThreadBudget>,
     ) -> LotId {
         let id = self.all.push(ReactorTask {
             vm,
@@ -809,23 +947,34 @@ impl ReactorTasks {
         });
         self.executing.push_back(id);
         self.registered.insert(global_id, id);
+        if let Some(budget) = budget {
+            budget.tasks.insert(id);
+        }
 
         id
     }
 
-    fn complete_running_task(&mut self, result: Result<RootedValue, RootedValue>) {
+    fn complete_running_task(
+        &mut self,
+        result: Result<RootedValue, RootedValue>,
+        budgets: &mut Map<BudgetPool, ThreadBudget>,
+    ) {
         let task_id = self.executing.pop_front().expect("no running task");
-        self.complete_task(task_id, result.map_err(TaskError::Exception));
+        self.complete_task(task_id, result.map_err(TaskError::Exception), budgets);
     }
 
     fn complete_task(
         &mut self,
         task_id: LotId,
         result: Result<RootedValue, TaskError>,
+        budgets: &mut Map<BudgetPool, ThreadBudget>,
     ) -> ReactorTask {
         let task = self.all.remove(task_id).expect("task missing");
         let _result = task.result.send(result);
         self.registered.remove(&task.global_id);
+        if let Some(budget) = task.budget_pool.and_then(|p| budgets.get_mut(&p)) {
+            budget.tasks.remove(&task_id);
+        }
         task
     }
 
@@ -1093,10 +1242,10 @@ where
                 return Err(ReactorShutdown);
             }
 
-            return Ok(BudgetPoolHandle {
+            return Ok(BudgetPoolHandle(Arc::new(BudgetPoolHandleData {
                 pool,
                 reactor: self.clone(),
-            });
+            })));
         }
     }
 }
@@ -1150,10 +1299,32 @@ struct HandleData<Work> {
 enum Command<Work> {
     Spawn(Spawn<Work>),
     NewBudgetPool(ReactorBudgetPool),
+    DestroyBudgetPool(BudgetPool),
 }
 
 #[derive(Clone)]
 struct ReactorBudgetPool(Arc<ReactorBudgetPoolData>);
+
+impl ReactorBudgetPool {
+    fn increase_budget(&self, amount: usize) {
+        let mut parked_threads = self.0.potentially_parked_threads.lock();
+        self.0
+            .budget
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |available| {
+                let max = if self.0.config.maximum == 0 {
+                    usize::MAX
+                } else {
+                    self.0.config.maximum
+                };
+                Some(available.saturating_add(amount).min(max))
+            })
+            .expect("always returned a value");
+        self.0.last_updated.fetch_add(1, Ordering::SeqCst);
+        for th in parked_threads.drain() {
+            th.value.unpark();
+        }
+    }
+}
 
 struct ReactorBudgetPoolData {
     pool: BudgetPool,
@@ -1325,7 +1496,9 @@ impl WorkUnit for NoWork {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub struct BudgetPool(NonZeroUsize);
 
-pub struct BudgetPoolHandle<Work> {
+pub struct BudgetPoolHandle<Work>(Arc<BudgetPoolHandleData<Work>>);
+
+struct BudgetPoolHandleData<Work> {
     pool: ReactorBudgetPool,
     reactor: ReactorHandle<Work>,
 }
@@ -1335,14 +1508,15 @@ where
     Work: WorkUnit,
 {
     pub fn spawn(&self, vm: Vm) -> Result<TaskHandle, ReactorShutdown> {
-        self.reactor
-            .spawn_spawnable(Spawnable::Spawn(vm), Some(self.pool.0.pool))
+        self.0
+            .reactor
+            .spawn_spawnable(Spawnable::Spawn(vm), Some(self.0.pool.0.pool))
     }
 
     pub fn spawn_source(&self, source: impl Into<String>) -> Result<TaskHandle, ReactorShutdown> {
-        self.reactor.spawn_spawnable(
+        self.0.reactor.spawn_spawnable(
             Spawnable::SpawnSource(source.into()),
-            Some(self.pool.0.pool),
+            Some(self.0.pool.0.pool),
         )
     }
 
@@ -1351,43 +1525,35 @@ where
         code: Code,
         args: Vec<RootedValue>,
     ) -> Result<TaskHandle, ReactorShutdown> {
-        self.reactor
-            .spawn_spawnable(Spawnable::SpawnCall(code, args), Some(self.pool.0.pool))
+        self.0
+            .reactor
+            .spawn_spawnable(Spawnable::SpawnCall(code, args), Some(self.0.pool.0.pool))
     }
 
     pub fn spawn_work(&self, work: Work) -> Result<TaskHandle, ReactorShutdown> {
-        self.reactor
-            .spawn_spawnable(Spawnable::SpawnWork(work), Some(self.pool.0.pool))
+        self.0
+            .reactor
+            .spawn_spawnable(Spawnable::SpawnWork(work), Some(self.0.pool.0.pool))
     }
 
-    pub fn increase_budget(&self, amount: usize) -> Result<(), ReactorShutdown> {
-        let mut parked_threads = self.pool.0.potentially_parked_threads.lock();
-        self.pool
-            .0
-            .budget
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |available| {
-                let max = if self.pool.0.config.maximum == 0 {
-                    usize::MAX
-                } else {
-                    self.pool.0.config.maximum
-                };
-                Some(available.saturating_add(amount).min(max))
-            })
-            .expect("always returned a value");
-        self.pool.0.last_updated.fetch_add(1, Ordering::SeqCst);
-        for th in parked_threads.drain() {
-            th.value.unpark();
-        }
-        Ok(())
+    pub fn increase_budget(&self, amount: usize) {
+        self.0.pool.increase_budget(amount)
     }
 }
 
 impl<Work> Clone for BudgetPoolHandle<Work> {
     fn clone(&self) -> Self {
-        Self {
-            pool: self.pool.clone(),
-            reactor: self.reactor.clone(),
-        }
+        Self(self.0.clone())
+    }
+}
+
+impl<Work> Drop for BudgetPoolHandleData<Work> {
+    fn drop(&mut self) {
+        let _ = self
+            .reactor
+            .data
+            .sender
+            .send(Command::DestroyBudgetPool(self.pool.0.pool));
     }
 }
 
@@ -1396,6 +1562,8 @@ pub struct BudgetPoolConfig {
     pub maximum: usize,
     pub allocation_size: usize,
     pub start: usize,
+    pub recharge_amount: usize,
+    pub recharge_every: Duration,
 }
 
 impl Default for BudgetPoolConfig {
@@ -1410,6 +1578,8 @@ impl BudgetPoolConfig {
             maximum: 0,
             start: 0,
             allocation_size: 100,
+            recharge_amount: 0,
+            recharge_every: Duration::ZERO,
         }
     }
 
@@ -1426,6 +1596,16 @@ impl BudgetPoolConfig {
     pub const fn with_per_task_allocation(mut self, allocation_size: usize) -> Self {
         self.allocation_size = allocation_size;
         self
+    }
+
+    pub const fn with_recharge(mut self, amount: usize, recharge_every: Duration) -> Self {
+        self.recharge_amount = amount;
+        self.recharge_every = recharge_every;
+        self
+    }
+
+    pub fn recharges(&self) -> bool {
+        self.recharge_every > Duration::ZERO && self.recharge_amount > 0
     }
 }
 
