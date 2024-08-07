@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 use refuse::CollectionGuard;
+use tracing_subscriber::filter::LevelFilter;
 
 use crate::compiler::syntax::token::{Paired, Token};
 use crate::compiler::syntax::{Expression, Ranged, SourceRange, TokenizeInto};
@@ -11,9 +12,16 @@ use crate::runtime::value::{Primitive, Value};
 use crate::vm::bitcode::BitcodeBlock;
 use crate::vm::{ExecutionError, Register, Vm};
 
+fn initialize_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(LevelFilter::TRACE)
+        .try_init();
+}
+
 #[test]
 fn budgeting() {
     const COUNT_TO: i64 = 42;
+    initialize_tracing();
 
     let mut guard = CollectionGuard::acquire();
     let mut code = BitcodeBlock::default();
@@ -42,6 +50,7 @@ fn budgeting() {
 #[test]
 fn module_budgeting() {
     const MAX_OPS: usize = 24;
+    initialize_tracing();
     let mut guard = CollectionGuard::acquire();
     let code = Compiler::compile(
         r"
@@ -86,6 +95,7 @@ fn module_budgeting() {
 
 #[test]
 fn invoke() {
+    initialize_tracing();
     let mut guard = CollectionGuard::acquire();
     let code = Compiler::compile(
         r"
@@ -124,6 +134,7 @@ fn invoke() {
 
 #[test]
 fn macros() {
+    initialize_tracing();
     let mut guard = CollectionGuard::acquire();
     let code = Compiler::default()
         .with_macro("$test", |mut tokens: VecDeque<Ranged<Token>>| {
@@ -148,6 +159,7 @@ fn macros() {
 
 #[test]
 fn recursive_macros() {
+    initialize_tracing();
     let mut guard = CollectionGuard::acquire();
     let code = Compiler::default()
         .with_macro("$inner", |mut tokens: VecDeque<Ranged<Token>>| {
@@ -179,6 +191,7 @@ fn recursive_macros() {
 
 #[test]
 fn infix_macros() {
+    initialize_tracing();
     let mut guard = CollectionGuard::acquire();
     let code = Compiler::default()
         .with_infix_macro(

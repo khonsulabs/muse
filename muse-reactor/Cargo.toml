@@ -5,6 +5,9 @@ edition = "2021"
 repository = "https://github.com/khonsulabs/muse"
 license = "MIT OR Apache-2.0"
 
+[features]
+tracing = ["dep:tracing", "muse-lang/tracing"]
+
 [dependencies]
 muse-lang = { workspace = true }
 alot = { workspace = true }
@@ -13,3 +16,7 @@ crossbeam-utils = { workspace = true }
 kempt = { workspace = true }
 parking_lot = { workspace = true }
 refuse = { workspace = true }
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

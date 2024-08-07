@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [features]
 dispatched = []
+tracing = ["dep:tracing"]
 
 [dependencies]
 serde = { workspace = true }
@@ -19,3 +20,7 @@ parking_lot = { workspace = true }
 ahash = "0.8.7"
 regex = "1.10.3"
 unicode-ident = "1.0.12"
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

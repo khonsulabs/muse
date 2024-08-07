@@ -15,6 +15,9 @@ use muse::vm::{ExecutionError, Fault, Register, Vm, VmContext};
 use muse::Error;
 
 fn main() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing_subscriber::filter::LevelFilter::TRACE)
+        .try_init();
     let filter = std::env::args().nth(1).unwrap_or_default();
     // let filter = String::from("basic_struct");
     for entry in std::fs::read_dir("tests/cases").unwrap() {

@@ -6,11 +6,19 @@ use muse_lang::compiler::{self};
 use muse_lang::runtime::value::{Primitive, RootedValue};
 use muse_lang::vm::Vm;
 use refuse::CollectionGuard;
+use tracing_subscriber::filter::LevelFilter;
 
 use crate::{BudgetPoolConfig, NoWork, Reactor, ReactorHandle, TaskError};
 
+fn initialize_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(LevelFilter::TRACE)
+        .try_init();
+}
+
 #[test]
 fn works() {
+    initialize_tracing();
     let reactor = Reactor::new();
     let task = reactor.spawn_source("1 + 2").unwrap();
     assert_eq!(

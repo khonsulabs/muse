@@ -10,6 +10,13 @@ macro_rules! impl_from {
     };
 }
 
+#[cfg(feature = "tracing")]
+#[macro_use]
+extern crate tracing;
+#[cfg(not(feature = "tracing"))]
+#[macro_use]
+mod mock_tracing;
+
 pub mod compiler;
 pub mod vm;
 

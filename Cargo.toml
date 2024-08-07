@@ -14,6 +14,8 @@ parking_lot = "0.12.1"
 refuse = "0.0.4"
 refuse-pool = "0.0.4"
 serde = { version = "1.0.195", features = ["derive", "rc"] }
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
 
 [package]
 name = "muse"
@@ -28,6 +30,7 @@ reactor = ["dep:muse-reactor"]
 ui = ["dep:muse-ui"]
 dispatched = ["muse-lang/dispatched"]
 repl = ["dep:rustyline", "dep:ariadne", "dep:dirs"]
+tracing = ["muse-reactor/tracing", "muse-lang/tracing"]
 
 [[bin]]
 name = "muse"
@@ -49,6 +52,7 @@ rsn = "0.1"
 pollster = "0.3.0"
 flume = "0.11.0"
 serde = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

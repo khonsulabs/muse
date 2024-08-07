@@ -1586,6 +1586,7 @@ dependencies = [
  "rsn",
  "rustyline",
  "serde",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1601,6 +1602,8 @@ dependencies = [
  "refuse-pool",
  "regex",
  "serde",
+ "tracing",
+ "tracing-subscriber",
  "unicode-ident",
 ]
 
@@ -1615,6 +1618,8 @@ dependencies = [
  "muse-lang",
  "parking_lot",
  "refuse",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

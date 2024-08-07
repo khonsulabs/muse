@@ -97,6 +97,13 @@ use muse_lang::vm::{
 use parking_lot::{Condvar, Mutex, MutexGuard};
 use refuse::{CollectionGuard, ContainsNoRefs, Trace};
 
+#[cfg(feature = "tracing")]
+#[macro_use]
+extern crate tracing;
+#[cfg(not(feature = "tracing"))]
+#[macro_use]
+mod mock_tracing;
+
 pub struct Builder<Work> {
     vm_source: Option<Arc<dyn NewVm<Work>>>,
     threads: usize,
@@ -184,7 +191,7 @@ where
         for id in 0..self.threads {
             let (spawn_send, spawn_recv) = flume::unbounded();
             let parker = Parker::new();
-            let data = Arc::new(PerThreadData::new(parker.unparker().clone()));
+            let data = Arc::new(PerThreadData::new(id, parker.unparker().clone()));
             let reactor = Reactor {
                 id,
                 receiver: spawn_recv,
@@ -224,6 +231,8 @@ enum ThreadCommand<Work> {
 }
 
 struct DispatcherThread<Work> {
+    #[cfg_attr(not(feature = "tracing"), allow(dead_code))]
+    num: usize,
     spawner: Sender<ThreadCommand<Work>>,
     load: usize,
     unparker: Unparker,
@@ -266,6 +275,7 @@ impl<Work> Dispatcher<Work> {
         self.threads.clear();
         for t in &*threads {
             self.threads.push_back(DispatcherThread {
+                num: t.data.num,
                 spawner: t.spawner.clone(),
                 load: t.spawner.len() * 2
                     + t.data.executing.load(Ordering::Relaxed)
@@ -344,6 +354,7 @@ impl<Work> Dispatcher<Work> {
                         return;
                     };
 
+                    trace!(task = spawn.id, thread = thread.num, "spawn");
                     match thread.spawner.send(ThreadCommand::Spawn(spawn)) {
                         Ok(()) => {
                             thread.unparker.unpark();
@@ -1272,14 +1283,16 @@ struct PerThread<Work> {
 
 #[derive(Debug)]
 struct PerThreadData {
+    num: usize,
     unparker: Unparker,
     executing: AtomicUsize,
     total: AtomicUsize,
 }
 
 impl PerThreadData {
-    fn new(unparker: Unparker) -> Self {
+    fn new(num: usize, unparker: Unparker) -> Self {
         Self {
+            num,
             unparker,
             executing: AtomicUsize::new(0),
             total: AtomicUsize::new(0),
