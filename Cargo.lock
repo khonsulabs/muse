@@ -1579,6 +1579,7 @@ dependencies = [
  "ariadne",
  "dirs",
  "flume",
+ "muse-channel",
  "muse-lang",
  "muse-reactor",
  "muse-ui",
@@ -1587,6 +1588,14 @@ dependencies = [
  "rustyline",
  "serde",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "muse-channel"
+version = "0.1.0"
+dependencies = [
+ "muse-lang",
+ "parking_lot",
 ]
 
 [[package]]

@@ -851,6 +851,11 @@ pub enum Value {
 }
 
 impl Value {
+    pub const TRUE: Self = Self::Primitive(Primitive::Bool(true));
+    pub const FALSE: Self = Self::Primitive(Primitive::Bool(false));
+    pub const NIL: Self = Self::Primitive(Primitive::Nil);
+    pub const ZERO: Self = Self::Primitive(Primitive::Int(0));
+
     /// Returns this value with any garbage collected values upgraded to root
     /// references.
     pub fn upgrade(&self, guard: &CollectionGuard<'_>) -> Option<RootedValue> {
@@ -873,10 +878,6 @@ impl Value {
     #[must_use]
     pub const fn is_nil(&self) -> bool {
         matches!(self, Self::Primitive(Primitive::Nil))
-    }
-
-    pub const fn nil() -> Self {
-        Self::Primitive(Primitive::Nil)
     }
 
     /// Returns this value as an i64, if possible.
@@ -3943,7 +3944,7 @@ where
         self.t = self.t.with_fallback(move |dynamic, guard| {
             dynamic
                 .as_rooted::<T>(guard)
-                .map_or_else(Value::nil, |rooted| mapping(rooted, guard))
+                .map_or(Value::NIL, |rooted| mapping(rooted, guard))
         });
         self
     }
@@ -4465,6 +4466,11 @@ pub enum RootedValue {
 }
 
 impl RootedValue {
+    pub const TRUE: Self = Self::Primitive(Primitive::Bool(true));
+    pub const FALSE: Self = Self::Primitive(Primitive::Bool(false));
+    pub const NIL: Self = Self::Primitive(Primitive::Nil);
+    pub const ZERO: Self = Self::Primitive(Primitive::Int(0));
+
     /// Returns this value with weak references to any garbage collected data.
     pub fn downgrade(&self) -> Value {
         match self {
@@ -4473,15 +4479,11 @@ impl RootedValue {
             RootedValue::Dynamic(v) => Value::Dynamic(v.downgrade()),
         }
     }
-
-    pub const fn nil() -> Self {
-        Self::Primitive(Primitive::Nil)
-    }
 }
 
 impl Default for RootedValue {
     fn default() -> Self {
-        Self::nil()
+        Self::NIL
     }
 }
 

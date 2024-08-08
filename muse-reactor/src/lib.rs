@@ -227,7 +227,7 @@ enum ThreadCommand<Work> {
     Spawn(Spawn<Work>),
     Cancel(usize),
     NewBudgetPool(ReactorBudgetPool),
-    DestroyBudgetPool(BudgetPool),
+    DestroyBudgetPool(BudgetPoolId),
 }
 
 struct DispatcherThread<Work> {
@@ -248,7 +248,7 @@ struct Dispatcher<Work> {
     handle: ReactorHandle<Work>,
     threads: VecDeque<DispatcherThread<Work>>,
     next_rebalance: Instant,
-    budget_ids: Map<BudgetPool, LotId>,
+    budget_ids: Map<BudgetPoolId, LotId>,
     recharging_budgets: Lots<RechargingBudget>,
     recharge_queue: VecDeque<LotId>,
 }
@@ -325,7 +325,7 @@ impl<Work> Dispatcher<Work> {
                 });
                 if pool.0.config.recharges() {
                     let recharge_at = Instant::now() + pool.0.config.recharge_every;
-                    let pool_id = pool.0.pool;
+                    let pool_id = pool.0.id;
                     let id = self
                         .recharging_budgets
                         .push(RechargingBudget { pool, recharge_at });
@@ -461,7 +461,7 @@ pub struct Reactor<Work = NoWork> {
     receiver: Receiver<ThreadCommand<Work>>,
     vm_source: Arc<dyn NewVm<Work>>,
     handle: ReactorHandle<Work>,
-    budgets: Map<BudgetPool, ThreadBudget>,
+    budgets: Map<BudgetPoolId, ThreadBudget>,
 }
 
 impl Reactor<NoWork> {
@@ -654,7 +654,7 @@ where
                         }
                         ThreadCommand::NewBudgetPool(pool) => {
                             self.budgets.insert(
-                                pool.0.pool,
+                                pool.0.id,
                                 ThreadBudget {
                                     pool,
                                     exhausted_at: Cell::new(0),
@@ -910,7 +910,7 @@ struct ResultHandleResult {
 
 struct ReactorTask {
     vm: Vm,
-    budget_pool: Option<BudgetPool>,
+    budget_pool: Option<BudgetPoolId>,
     waker: Waker,
     global_id: usize,
     executing: bool,
@@ -940,7 +940,7 @@ impl ReactorTasks {
     fn push(
         &mut self,
         global_id: usize,
-        budget_pool: Option<BudgetPool>,
+        budget_pool: Option<BudgetPoolId>,
         vm: Vm,
         result: ResultHandle,
         budget: Option<&mut ThreadBudget>,
@@ -968,7 +968,7 @@ impl ReactorTasks {
     fn complete_running_task(
         &mut self,
         result: Result<RootedValue, RootedValue>,
-        budgets: &mut Map<BudgetPool, ThreadBudget>,
+        budgets: &mut Map<BudgetPoolId, ThreadBudget>,
     ) {
         let task_id = self.executing.pop_front().expect("no running task");
         self.complete_task(task_id, result.map_err(TaskError::Exception), budgets);
@@ -978,7 +978,7 @@ impl ReactorTasks {
         &mut self,
         task_id: LotId,
         result: Result<RootedValue, TaskError>,
-        budgets: &mut Map<BudgetPool, ThreadBudget>,
+        budgets: &mut Map<BudgetPoolId, ThreadBudget>,
     ) -> ReactorTask {
         let task = self.all.remove(task_id).expect("task missing");
         let _result = task.result.send(result);
@@ -1169,7 +1169,7 @@ where
     fn spawn_spawnable(
         &self,
         spawnable: Spawnable<Work>,
-        pool: Option<BudgetPool>,
+        pool: Option<BudgetPoolId>,
     ) -> Result<TaskHandle, ReactorShutdown> {
         let command = Spawn::new(&self.data.next_task_id, spawnable, pool);
         let handle = TaskHandle {
@@ -1237,7 +1237,7 @@ where
                 continue;
             };
             let pool = ReactorBudgetPool(Arc::new(ReactorBudgetPoolData {
-                pool: BudgetPool(id),
+                id: BudgetPoolId(id),
                 budget: AtomicUsize::new(config.start),
                 last_updated: AtomicU64::new(0),
                 config,
@@ -1312,7 +1312,7 @@ struct HandleData<Work> {
 enum Command<Work> {
     Spawn(Spawn<Work>),
     NewBudgetPool(ReactorBudgetPool),
-    DestroyBudgetPool(BudgetPool),
+    DestroyBudgetPool(BudgetPoolId),
 }
 
 #[derive(Clone)]
@@ -1320,8 +1320,8 @@ struct ReactorBudgetPool(Arc<ReactorBudgetPoolData>);
 
 impl ReactorBudgetPool {
     fn increase_budget(&self, amount: usize) {
-        let mut parked_threads = self.0.potentially_parked_threads.lock();
-        self.0
+        let previous_budget = self
+            .0
             .budget
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |available| {
                 let max = if self.0.config.maximum == 0 {
@@ -1333,14 +1333,19 @@ impl ReactorBudgetPool {
             })
             .expect("always returned a value");
         self.0.last_updated.fetch_add(1, Ordering::SeqCst);
-        for th in parked_threads.drain() {
-            th.value.unpark();
+        // Only look for parked threads if our budget was smaller than the
+        // allocation amount.
+        if previous_budget < self.0.config.allocation_size {
+            let mut parked_threads = self.0.potentially_parked_threads.lock();
+            for th in parked_threads.drain() {
+                th.value.unpark();
+            }
         }
     }
 }
 
 struct ReactorBudgetPoolData {
-    pool: BudgetPool,
+    id: BudgetPoolId,
     budget: AtomicUsize,
     last_updated: AtomicU64,
     config: BudgetPoolConfig,
@@ -1349,13 +1354,13 @@ struct ReactorBudgetPoolData {
 
 struct Spawn<Work> {
     id: usize,
-    pool: Option<BudgetPool>,
+    pool: Option<BudgetPoolId>,
     what: Spawnable<Work>,
     result: ResultHandle,
 }
 
 impl<Work> Spawn<Work> {
-    fn new(ids: &AtomicUsize, kind: Spawnable<Work>, pool: Option<BudgetPool>) -> Self {
+    fn new(ids: &AtomicUsize, kind: Spawnable<Work>, pool: Option<BudgetPoolId>) -> Self {
         let result = ResultHandle::default();
 
         Self {
@@ -1507,9 +1512,9 @@ impl WorkUnit for NoWork {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
-pub struct BudgetPool(NonZeroUsize);
+pub struct BudgetPoolId(NonZeroUsize);
 
-pub struct BudgetPoolHandle<Work>(Arc<BudgetPoolHandleData<Work>>);
+pub struct BudgetPoolHandle<Work = NoWork>(Arc<BudgetPoolHandleData<Work>>);
 
 struct BudgetPoolHandleData<Work> {
     pool: ReactorBudgetPool,
@@ -1520,16 +1525,20 @@ impl<Work> BudgetPoolHandle<Work>
 where
     Work: WorkUnit,
 {
+    pub fn id(&self) -> BudgetPoolId {
+        self.0.pool.0.id
+    }
+
     pub fn spawn(&self, vm: Vm) -> Result<TaskHandle, ReactorShutdown> {
         self.0
             .reactor
-            .spawn_spawnable(Spawnable::Spawn(vm), Some(self.0.pool.0.pool))
+            .spawn_spawnable(Spawnable::Spawn(vm), Some(self.0.pool.0.id))
     }
 
     pub fn spawn_source(&self, source: impl Into<String>) -> Result<TaskHandle, ReactorShutdown> {
         self.0.reactor.spawn_spawnable(
             Spawnable::SpawnSource(source.into()),
-            Some(self.0.pool.0.pool),
+            Some(self.0.pool.0.id),
         )
     }
 
@@ -1540,17 +1549,34 @@ where
     ) -> Result<TaskHandle, ReactorShutdown> {
         self.0
             .reactor
-            .spawn_spawnable(Spawnable::SpawnCall(code, args), Some(self.0.pool.0.pool))
+            .spawn_spawnable(Spawnable::SpawnCall(code, args), Some(self.0.pool.0.id))
     }
 
     pub fn spawn_work(&self, work: Work) -> Result<TaskHandle, ReactorShutdown> {
         self.0
             .reactor
-            .spawn_spawnable(Spawnable::SpawnWork(work), Some(self.0.pool.0.pool))
+            .spawn_spawnable(Spawnable::SpawnWork(work), Some(self.0.pool.0.id))
     }
 
     pub fn increase_budget(&self, amount: usize) {
         self.0.pool.increase_budget(amount)
+    }
+
+    pub fn remaining_budget(&self) -> usize {
+        self.0.pool.0.budget.load(Ordering::Relaxed)
+    }
+
+    pub fn reactor(&self) -> &ReactorHandle<Work> {
+        &self.0.reactor
+    }
+}
+
+impl<Work> Debug for BudgetPoolHandle<Work> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BudgetPoolHandle")
+            .field("id", &self.0.pool.0.id.0.get())
+            .field("budget", &self.0.pool.0.id.0.get())
+            .finish()
     }
 }
 
@@ -1566,7 +1592,7 @@ impl<Work> Drop for BudgetPoolHandleData<Work> {
             .reactor
             .data
             .sender
-            .send(Command::DestroyBudgetPool(self.pool.0.pool));
+            .send(Command::DestroyBudgetPool(self.pool.0.id));
     }
 }
 

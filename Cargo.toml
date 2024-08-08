@@ -1,5 +1,5 @@
 [workspace]
-members = ["amuse", "muse-lang", "muse-reactor", "muse-ui"]
+members = ["amuse", "muse-channel", "muse-lang", "muse-reactor", "muse-ui"]
 
 [workspace.dependencies]
 muse = { path = ".", default-features = false }
@@ -7,6 +7,7 @@ muse-lang = { path = "muse-lang", default-features = false }
 kempt = { version = "0.2.3", features = ["serde"] }
 muse-ui = { path = "muse-ui" }
 muse-reactor = { version = "0.1.0", path = "muse-reactor" }
+muse-channel = { version = "0.1.0", path = "muse-channel" }
 cushy = { git = "https://github.com/khonsulabs/cushy" }
 alot = "0.3.1"
 crossbeam-utils = "0.8.19"
@@ -27,6 +28,7 @@ license = "MIT OR Apache-2.0"
 [features]
 default = ["repl"]
 reactor = ["dep:muse-reactor"]
+channel = ["dep:muse-channel"]
 ui = ["dep:muse-ui"]
 dispatched = ["muse-lang/dispatched"]
 repl = ["dep:rustyline", "dep:ariadne", "dep:dirs"]
@@ -40,6 +42,7 @@ required-features = ["repl"]
 [dependencies]
 muse-lang = { workspace = true }
 muse-reactor = { workspace = true, optional = true }
+muse-channel = { workspace = true, optional = true }
 muse-ui = { workspace = true, optional = true }
 ariadne = { version = "0.4.0", optional = true }
 dirs = { version = "5.0.1", optional = true }

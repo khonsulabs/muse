@@ -229,7 +229,7 @@ impl CustomType for MuseCaptures {
                             } else {
                                 let name = index.to_string(vm)?.try_upgrade(vm.guard())?;
                                 let Some(index) = this.by_name.get(&name).copied() else {
-                                    return Ok(Value::nil());
+                                    return Ok(Value::NIL);
                                 };
                                 index
                             };

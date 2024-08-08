@@ -956,7 +956,7 @@ impl Source for Value {
 
 impl Source for () {
     fn load(&self, _vm: &VmContext<'_, '_>) -> Result<Value, Fault> {
-        Ok(Value::nil())
+        Ok(Value::NIL)
     }
 
     fn as_source(&self, _guard: &CollectionGuard<'_>) -> ValueOrSource {

@@ -89,7 +89,7 @@ impl CustomType for DynamicValue {
                                 Ok(old_value)
                             }
                         } else {
-                            Ok(Value::nil())
+                            Ok(Value::NIL)
                         }
                     } else if name == &Symbol::from("slider_between") && arity == 2 {
                         let start = vm[Register(0)].take();

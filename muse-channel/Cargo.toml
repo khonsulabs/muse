@@ -1,0 +1,8 @@
+[package]
+name = "muse-channel"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+muse-lang = { workspace = true }
+parking_lot = { workspace = true }

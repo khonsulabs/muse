@@ -59,7 +59,7 @@ impl ValueOrSource {
     /// This function does not support loading [`Label`]s.
     pub fn load(&self, vm: &VmContext<'_, '_>) -> Result<Value, Fault> {
         match self {
-            ValueOrSource::Nil => Ok(Value::nil()),
+            ValueOrSource::Nil => Ok(Value::NIL),
             ValueOrSource::Bool(v) => Ok(Value::Primitive(Primitive::Bool(*v))),
             ValueOrSource::Int(v) => Ok(Value::Primitive(Primitive::Int(*v))),
             ValueOrSource::UInt(v) => Ok(Value::Primitive(Primitive::UInt(*v))),

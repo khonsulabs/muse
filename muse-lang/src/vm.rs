@@ -94,7 +94,7 @@ impl Vm {
         Self {
             memory: Root::new(
                 VmMemory(Mutex::new(VmState {
-                    registers: array::from_fn(|_| Value::nil()),
+                    registers: array::from_fn(|_| Value::NIL),
                     frames: vec![Frame::default()],
                     stack: Vec::new(),
                     current_frame: 0,
@@ -569,7 +569,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         Vm {
             memory: Root::new(
                 VmMemory(Mutex::new(VmState {
-                    registers: array::from_fn(|_| Value::nil()),
+                    registers: array::from_fn(|_| Value::NIL),
                     stack: Vec::new(),
                     max_stack: self.vm.max_stack,
                     frames: vec![Frame::default()],
@@ -697,7 +697,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
                     self.check_timeout()
                         .map_err(|err| ExecutionError::new(err, self))?;
 
-                    self.parker.park();
+                    self.guard.while_unlocked(|| self.vm.parker.park());
                 }
                 Err(other) => return Err(ExecutionError::new(other, self)),
                 Ok(value) => return Ok(value),
@@ -1221,7 +1221,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         if vm.current_frame >= 1 {
             vm.has_anonymous_frame = false;
             let current_frame = &vm.frames[vm.current_frame];
-            vm.stack[current_frame.start..current_frame.end].fill_with(Value::nil);
+            vm.stack[current_frame.start..current_frame.end].fill(Value::NIL);
             vm.current_frame -= 1;
             Ok(())
         } else {
@@ -1239,7 +1239,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
             Some(end) if end < vm.max_stack => {
                 current_frame.end += count;
                 if vm.stack.len() < current_frame.end {
-                    vm.stack.resize_with(current_frame.end, Value::nil);
+                    vm.stack.resize(current_frame.end, Value::NIL);
                 }
                 Ok(index)
             }
@@ -1296,8 +1296,8 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         for frame in &mut self.frames {
             frame.clear();
         }
-        self.registers.fill_with(Value::nil);
-        self.stack.fill_with(Value::nil);
+        self.registers.fill(Value::NIL);
+        self.stack.fill(Value::NIL);
     }
 
     /// Generates a backtrace for the current virtual machine state.
@@ -1916,7 +1916,7 @@ impl VmContext<'_, '_> {
 
     fn op_load(&mut self, code_index: usize, value: LoadedSource) -> Result<Value, Fault> {
         match value {
-            LoadedSource::Nil => Ok(Value::nil()),
+            LoadedSource::Nil => Ok(Value::NIL),
             LoadedSource::Bool(v) => Ok(Value::Primitive(Primitive::Bool(v))),
             LoadedSource::Int(v) => Ok(Value::Primitive(Primitive::Int(v))),
             LoadedSource::UInt(v) => Ok(Value::Primitive(Primitive::UInt(v))),
