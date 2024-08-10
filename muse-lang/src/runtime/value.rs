@@ -1503,27 +1503,29 @@ impl_from!(Primitive, u64, UInt);
 impl_from!(Primitive, bool, Bool);
 
 macro_rules! impl_from_primitive {
-    ($from:ty, $variant:ident) => {
-        impl From<$from> for Value {
+    ($on:ident, $from:ty, $variant:ident) => {
+        impl From<$from> for $on {
             fn from(value: $from) -> Self {
                 Self::Primitive(Primitive::$variant(value.into()))
             }
         }
     };
 }
-impl_from_primitive!(f32, Float);
-impl_from_primitive!(f64, Float);
-impl_from_primitive!(i8, Int);
-impl_from_primitive!(i16, Int);
-impl_from_primitive!(i32, Int);
-impl_from_primitive!(i64, Int);
-impl_from_primitive!(u8, UInt);
-impl_from_primitive!(u16, UInt);
-impl_from_primitive!(u32, UInt);
-impl_from_primitive!(u64, UInt);
-impl_from_primitive!(bool, Bool);
+impl_from_primitive!(Value, f32, Float);
+impl_from_primitive!(Value, f64, Float);
+impl_from_primitive!(Value, i8, Int);
+impl_from_primitive!(Value, i16, Int);
+impl_from_primitive!(Value, i32, Int);
+impl_from_primitive!(Value, i64, Int);
+impl_from_primitive!(Value, u8, UInt);
+impl_from_primitive!(Value, u16, UInt);
+impl_from_primitive!(Value, u32, UInt);
+impl_from_primitive!(Value, u64, UInt);
+impl_from_primitive!(Value, bool, Bool);
 impl_from!(Value, Symbol, Symbol);
 impl_from!(Value, &'_ Symbol, Symbol);
+impl_from!(Value, SymbolRef, Symbol);
+impl_from!(Value, &'_ SymbolRef, Symbol);
 
 macro_rules! impl_try_from {
     ($on:ty, $from:ty, $variant:ident) => {
@@ -1545,8 +1547,8 @@ impl_try_from!(Primitive, isize, Int);
 impl_try_from!(Primitive, i128, UInt);
 
 macro_rules! impl_try_from_primitive {
-    ($from:ty) => {
-        impl TryFrom<$from> for Value {
+    ($on:ident, $from:ty) => {
+        impl TryFrom<$from> for $on {
             type Error = Fault;
 
             fn try_from(value: $from) -> Result<Self, Self::Error> {
@@ -1556,10 +1558,10 @@ macro_rules! impl_try_from_primitive {
     };
 }
 
-impl_try_from_primitive!(u128);
-impl_try_from_primitive!(usize);
-impl_try_from_primitive!(isize);
-impl_try_from_primitive!(i128);
+impl_try_from_primitive!(Value, u128);
+impl_try_from_primitive!(Value, usize);
+impl_try_from_primitive!(Value, isize);
+impl_try_from_primitive!(Value, i128);
 
 /// A weak reference to a [`Rooted<T>`].
 #[derive(Clone, Copy, Hash, Eq, PartialEq)]
@@ -2006,6 +2008,55 @@ impl AnyDynamicRoot {
     pub const fn downgrade(&self) -> AnyDynamic {
         AnyDynamic(self.0.as_any())
     }
+    /// Returns `value` as a garbage collected value that can be used in Muse.
+    pub fn new<'guard, T>(value: T, guard: impl AsRef<CollectionGuard<'guard>>) -> Self
+    where
+        T: DynamicValue + Trace,
+    {
+        Self(Root::new(Custom(value), guard).into_any_root())
+    }
+
+    /// Upgrades this reference to a [`Dynamic<T>`].
+    ///
+    /// This function does no type checking. If `T` is the incorrect type,
+    /// trying to access the underyling data will return None/an error.
+    #[must_use]
+    pub fn as_dynamic<T>(&self) -> Dynamic<T>
+    where
+        T: DynamicValue + Trace,
+    {
+        Dynamic(self.0.downcast_ref::<Custom<T>>())
+    }
+
+    /// Tries to upgrade this reference to a [`Rooted<T>`].
+    ///
+    /// This function can return None if:
+    ///
+    /// - `T` is not the correct type.
+    /// - The value has been garbage collected.
+    #[must_use]
+    pub fn as_rooted<T>(&self) -> Option<Rooted<T>>
+    where
+        T: DynamicValue + Trace,
+    {
+        self.0.downcast_root::<Custom<T>>().map(|cast| Rooted(cast))
+    }
+
+    /// Tries to load a reference to this reference's underlying data.
+    ///
+    /// This function can return None if:
+    ///
+    /// - `T` is not the correct type.
+    /// - The value has been garbage collected.
+    #[must_use]
+    pub fn downcast_ref<T>(&self) -> Option<&T>
+    where
+        T: DynamicValue + Trace,
+    {
+        self.0
+            .load::<Custom<T>>()
+            .and_then(|d| d.0.as_any().downcast_ref())
+    }
 }
 
 /// A reference counted pointer to a garbage collected value.
@@ -2031,6 +2082,12 @@ where
     #[must_use]
     pub const fn downgrade(&self) -> Dynamic<T> {
         Dynamic(self.0.downgrade())
+    }
+
+    /// Returns this value as a typeless root reference.
+    #[must_use]
+    pub fn as_any_root(&self) -> AnyDynamicRoot {
+        AnyDynamicRoot(self.0.to_any_root())
     }
 
     /// Returns this value as a typeless root reference.
@@ -4474,9 +4531,186 @@ impl RootedValue {
     /// Returns this value with weak references to any garbage collected data.
     pub fn downgrade(&self) -> Value {
         match self {
-            RootedValue::Primitive(p) => Value::Primitive(*p),
-            RootedValue::Symbol(v) => Value::Symbol(v.downgrade()),
-            RootedValue::Dynamic(v) => Value::Dynamic(v.downgrade()),
+            Self::Primitive(p) => Value::Primitive(*p),
+            Self::Symbol(v) => Value::Symbol(v.downgrade()),
+            Self::Dynamic(v) => Value::Dynamic(v.downgrade()),
+        }
+    }
+
+    /// Moves `value` into the virtual machine.
+    pub fn dynamic<'guard, T>(value: T, guard: impl AsRef<CollectionGuard<'guard>>) -> Self
+    where
+        T: DynamicValue + Trace,
+    {
+        Self::Dynamic(AnyDynamicRoot::new(value, guard))
+    }
+
+    /// Returns true if this value is nil.
+    #[must_use]
+    pub const fn is_nil(&self) -> bool {
+        matches!(self, Self::Primitive(Primitive::Nil))
+    }
+
+    /// Returns this value as an i64, if possible.
+    #[must_use]
+    pub fn as_primitive(&self) -> Option<Primitive> {
+        match self {
+            Self::Primitive(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Returns this value as an i64, if possible.
+    #[must_use]
+    pub fn as_i64(&self) -> Option<i64> {
+        self.as_primitive().and_then(|p| p.as_i64())
+    }
+
+    /// Returns this value as an u64, if possible.
+    #[must_use]
+    pub fn as_u64(&self) -> Option<u64> {
+        self.as_primitive().and_then(|p| p.as_u64())
+    }
+
+    /// Returns this value as an u32, if possible.
+    #[must_use]
+    pub fn as_u32(&self) -> Option<u32> {
+        self.as_primitive().and_then(|p| p.as_u32())
+    }
+
+    /// Returns this value as an u16, if possible.
+    #[must_use]
+    pub fn as_u16(&self) -> Option<u16> {
+        self.as_primitive().and_then(|p| p.as_u16())
+    }
+
+    /// Returns this value as an usize, if possible.
+    #[must_use]
+    pub fn as_usize(&self) -> Option<usize> {
+        self.as_primitive().and_then(|p| p.as_usize())
+    }
+
+    /// Returns this value as an f64, if possible.
+    #[must_use]
+    pub fn as_f64(&self) -> Option<f64> {
+        self.as_primitive().and_then(|p| p.as_f64())
+    }
+
+    /// Converts this value to an i64, if possible.
+    #[must_use]
+    pub fn to_i64(&self) -> Option<i64> {
+        match self {
+            Self::Primitive(value) => value.to_i64(),
+            Self::Symbol(_) | Self::Dynamic(_) => None, // TODO offer dynamic conversion
+        }
+    }
+
+    /// Converts this value to an u64, if possible.
+    #[must_use]
+    pub fn to_u64(&self) -> Option<u64> {
+        match self {
+            Self::Primitive(value) => value.to_u64(),
+            Self::Symbol(_) | Self::Dynamic(_) => None, // TODO offer dynamic conversion
+        }
+    }
+
+    /// Converts this value to an u32, if possible.
+    #[must_use]
+    pub fn to_u32(&self) -> Option<u32> {
+        match self {
+            Self::Primitive(value) => value.to_u32(),
+            Self::Symbol(_) | Self::Dynamic(_) => None, // TODO offer dynamic conversion
+        }
+    }
+
+    /// Converts this value to an usize, if possible.
+    #[must_use]
+    pub fn to_usize(&self) -> Option<usize> {
+        match self {
+            Self::Primitive(value) => value.to_usize(),
+            Self::Symbol(_) | Self::Dynamic(_) => None, // TODO offer dynamic conversion
+        }
+    }
+
+    /// Converts this value to an f64, if possible.
+    #[must_use]
+    pub fn to_f64(&self) -> Option<f64> {
+        match self {
+            Self::Primitive(value) => Some(value.to_f64()),
+            Self::Symbol(_) | Self::Dynamic(_) => None, // TODO offer dynamic conversion
+        }
+    }
+
+    /// Returns this value as a `SymbolRef`, if possible.
+    #[must_use]
+    pub fn as_symbol_ref(&self) -> Option<SymbolRef> {
+        match self {
+            Self::Symbol(value) => Some(value.downgrade()),
+            _ => None,
+        }
+    }
+
+    /// Returns this value as a `Symbol`, if possible.
+    #[must_use]
+    pub fn as_symbol(&self) -> Option<&Symbol> {
+        match self {
+            Self::Symbol(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Returns this value as an `AnyDynamic`, if possible.
+    #[must_use]
+    pub fn as_any_dynamic(&self) -> Option<AnyDynamic> {
+        match self {
+            Self::Dynamic(value) => Some(value.downgrade()),
+            _ => None,
+        }
+    }
+
+    /// Returns this value as a `Dynamic<T>`, if this value contains a `T`.
+    #[must_use]
+    pub fn as_dynamic<T>(&self) -> Option<Dynamic<T>>
+    where
+        T: DynamicValue + Trace,
+    {
+        match self {
+            Self::Dynamic(value) => Some(value.as_dynamic()),
+            _ => None,
+        }
+    }
+
+    /// Returns this value as a `Rooted<T>`, if this value contains a `T`.
+    #[must_use]
+    pub fn as_rooted<T>(&self) -> Option<Rooted<T>>
+    where
+        T: DynamicValue + Trace,
+    {
+        match self {
+            Self::Dynamic(value) => value.as_rooted(),
+            _ => None,
+        }
+    }
+
+    /// Returns this value as a`&T`, if this value contains a `T`.
+    #[must_use]
+    pub fn as_downcast_ref<T>(&self) -> Option<&T>
+    where
+        T: DynamicValue + Trace,
+    {
+        match self {
+            Self::Dynamic(value) => value.downcast_ref(),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this value should be considered `true` in a boolean
+    /// expression.
+    pub fn truthy(&self, vm: &mut VmContext<'_, '_>) -> bool {
+        match self {
+            Self::Primitive(value) => value.truthy(),
+            Self::Symbol(sym) => !sym.is_empty(),
+            Self::Dynamic(value) => value.downgrade().truthy(vm),
         }
     }
 }
@@ -4495,3 +4729,21 @@ impl PartialEq for RootedValue {
             .unwrap_or(false)
     }
 }
+
+impl_from_primitive!(RootedValue, f32, Float);
+impl_from_primitive!(RootedValue, f64, Float);
+impl_from_primitive!(RootedValue, i8, Int);
+impl_from_primitive!(RootedValue, i16, Int);
+impl_from_primitive!(RootedValue, i32, Int);
+impl_from_primitive!(RootedValue, i64, Int);
+impl_from_primitive!(RootedValue, u8, UInt);
+impl_from_primitive!(RootedValue, u16, UInt);
+impl_from_primitive!(RootedValue, u32, UInt);
+impl_from_primitive!(RootedValue, u64, UInt);
+impl_from_primitive!(RootedValue, bool, Bool);
+impl_from!(RootedValue, Symbol, Symbol);
+impl_from!(RootedValue, &'_ Symbol, Symbol);
+impl_try_from_primitive!(RootedValue, u128);
+impl_try_from_primitive!(RootedValue, usize);
+impl_try_from_primitive!(RootedValue, isize);
+impl_try_from_primitive!(RootedValue, i128);
