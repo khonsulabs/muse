@@ -30,6 +30,7 @@ fn works() {
 
 #[test]
 fn spawning() {
+    initialize_tracing();
     let reactor = Reactor::new();
     let task = reactor
         .spawn_source(
@@ -56,6 +57,7 @@ fn spawning() {
 
 #[test]
 fn budgeting_basic() {
+    initialize_tracing();
     let reactor = Reactor::build()
         .new_vm(
             |guard: &mut CollectionGuard<'_>, _reactor: &ReactorHandle<NoWork>| {
@@ -83,6 +85,7 @@ fn budgeting_basic() {
 
 #[test]
 fn automatic_recharge() {
+    initialize_tracing();
     let reactor = Reactor::build()
         .new_vm(
             |guard: &mut CollectionGuard<'_>, _reactor: &ReactorHandle<NoWork>| {
@@ -119,6 +122,7 @@ fn automatic_recharge() {
 
 #[test]
 fn spawn_err() {
+    initialize_tracing();
     let reactor = Reactor::new();
     let task = reactor.spawn_source("invalid source code").unwrap();
     match task.join() {
@@ -139,6 +143,7 @@ fn spawn_err() {
 
 #[test]
 fn task_cancellation() {
+    initialize_tracing();
     let reactor = Reactor::new();
     // Spawn a task with an infinite loop
     let task = reactor.spawn_source("loop {}").unwrap();
@@ -158,6 +163,7 @@ fn task_cancellation() {
 
 #[test]
 fn pool_cancellation() {
+    initialize_tracing();
     let reactor = Reactor::new();
     // Spawn a task with an infinite loop
     let pool = reactor
@@ -181,6 +187,7 @@ fn pool_cancellation() {
 
 #[test]
 fn task_panic() {
+    initialize_tracing();
     let reactor = Reactor::build()
         .new_vm(
             |guard: &mut CollectionGuard<'_>, _reactor: &ReactorHandle| {
