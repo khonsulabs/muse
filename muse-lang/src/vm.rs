@@ -137,7 +137,7 @@ impl Vm {
     /// This function does not actually execute any code. A call to
     /// [`resume`](Self::resume)/[`resume_async`](Self::resume_async) is needed
     /// to begin executing the function call.
-    pub fn prepare(&self, code: &Code, guard: &mut CollectionGuard) -> Result<(), ExecutionError> {
+    pub fn prepare(&self, code: &Code, guard: &mut CollectionGuard) -> Result<(), Fault> {
         self.context(guard).prepare(code)
     }
 
@@ -151,7 +151,7 @@ impl Vm {
         function: &Rooted<Function>,
         arity: Arity,
         guard: &mut CollectionGuard,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<(), Fault> {
         self.context(guard).prepare_call(function, arity)
     }
 
@@ -225,7 +225,7 @@ impl Vm {
         &'context self,
         code: &Code,
         guard: &'context mut CollectionGuard<'guard>,
-    ) -> Result<ExecuteAsync<'static, 'context, 'guard>, ExecutionError> {
+    ) -> Result<ExecuteAsync<'static, 'context, 'guard>, Fault> {
         MaybeOwnedContext::Owned(self.context(guard)).execute_async(code)
     }
 
@@ -649,7 +649,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
     /// This function does not actually execute any code. A call to
     /// [`resume`](Self::resume)/[`resume_async`](Self::resume_async) is needed
     /// to begin executing the function call.
-    pub fn prepare(&mut self, code: &Code) -> Result<(), ExecutionError> {
+    pub fn prepare(&mut self, code: &Code) -> Result<(), Fault> {
         let code = self.push_code(code, None);
         self.prepare_owned(code)
     }
@@ -725,18 +725,18 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         self.resume_until(Instant::now() + duration)
     }
 
-    fn prepare_owned(&mut self, code: CodeIndex) -> Result<(), ExecutionError> {
+    fn prepare_owned(&mut self, code: CodeIndex) -> Result<(), Fault> {
         let vm = self.vm();
         vm.frames[vm.current_frame].code = Some(code);
         vm.frames[vm.current_frame].instruction = 0;
 
-        self.allocate(self.code[code.0].code.data.stack_requirement)
-            .map_err(|err| ExecutionError::new(err, self))?;
+        self.allocate(self.code[code.0].code.data.stack_requirement)?;
         Ok(())
     }
 
     fn execute_owned(&mut self, code: CodeIndex) -> Result<Value, ExecutionError> {
-        self.prepare_owned(code)?;
+        self.prepare_owned(code)
+            .map_err(|err| ExecutionError::new(err, self))?;
 
         self.resume()
     }
@@ -747,7 +747,8 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         code: &Code,
     ) -> Result<ExecuteAsync<'vm, 'context, 'guard>, ExecutionError> {
         let code = self.push_code(code, None);
-        self.prepare_owned(code)?;
+        self.prepare_owned(code)
+            .map_err(|err| ExecutionError::new(err, self))?;
 
         Ok(ExecuteAsync(MaybeOwnedContext::Borrowed(self)))
     }
@@ -800,15 +801,9 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
     /// This function does not actually execute any code. A call to
     /// [`resume`](Self::resume)/[`resume_async`](Self::resume_async) is needed
     /// to begin executing the function call.
-    pub fn prepare_call(
-        &mut self,
-        function: &Rooted<Function>,
-        arity: Arity,
-    ) -> Result<(), ExecutionError> {
+    pub fn prepare_call(&mut self, function: &Rooted<Function>, arity: Arity) -> Result<(), Fault> {
         let Some(body) = function.body(arity) else {
-            return Err(ExecutionError::Exception(
-                Fault::IncorrectNumberOfArguments.as_exception(self),
-            ));
+            return Err(Fault::IncorrectNumberOfArguments);
         };
         let code = self.push_code(body, Some(function));
         self.prepare_owned(code)
@@ -2879,7 +2874,7 @@ impl<'vm, 'context, 'guard> MaybeOwnedContext<'vm, 'context, 'guard> {
     pub fn execute_async(
         mut self,
         code: &Code,
-    ) -> Result<ExecuteAsync<'vm, 'context, 'guard>, ExecutionError> {
+    ) -> Result<ExecuteAsync<'vm, 'context, 'guard>, Fault> {
         let code = self.push_code(code, None);
         self.prepare_owned(code)?;
 

@@ -123,13 +123,12 @@ impl Builder<NoWork> {
         }
     }
 
-    pub fn unit<Work>(self) -> Builder<Work> {
-        assert!(
-            self.vm_source.is_none(),
-            "new_vm must be invoked after unit() to ensure the correct ReactorHandle type"
-        );
+    pub fn new_vm<F, Work>(self, new_vm: F) -> Builder<Work>
+    where
+        F: NewVm<Work>,
+    {
         Builder {
-            vm_source: None,
+            vm_source: Some(Arc::new(new_vm)),
             threads: self.threads,
             thread_name: self.thread_name,
             work_queue_limit: self.work_queue_limit,
@@ -149,14 +148,6 @@ where
 
     pub fn work_queue_limit(mut self, limit: usize) -> Self {
         self.work_queue_limit = Some(limit);
-        self
-    }
-
-    pub fn new_vm<F>(mut self, new_vm: F) -> Self
-    where
-        F: NewVm<Work>,
-    {
-        self.vm_source = Some(Arc::new(new_vm));
         self
     }
 
@@ -1269,6 +1260,8 @@ impl<Work> Clone for ReactorHandle<Work> {
     }
 }
 
+impl<Work> ContainsNoRefs for ReactorHandle<Work> where Work: WorkUnit {}
+
 #[derive(Debug)]
 struct SharedReactorData {
     shutdown: AtomicBool,
@@ -1515,6 +1508,8 @@ impl WorkUnit for NoWork {
 pub struct BudgetPoolId(NonZeroUsize);
 
 pub struct BudgetPoolHandle<Work = NoWork>(Arc<BudgetPoolHandleData<Work>>);
+
+impl<Work> ContainsNoRefs for BudgetPoolHandle<Work> where Work: WorkUnit {}
 
 struct BudgetPoolHandleData<Work> {
     pool: ReactorBudgetPool,
