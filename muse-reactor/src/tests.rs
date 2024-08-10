@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 
 use muse_lang::compiler::syntax::Ranged;
 use muse_lang::compiler::{self};
-use muse_lang::runtime::value::{Primitive, RootedValue};
+use muse_lang::runtime::symbol::Symbol;
+use muse_lang::runtime::value::{Primitive, RootedValue, RustFunction, Value};
 use muse_lang::vm::Vm;
 use refuse::CollectionGuard;
 use tracing_subscriber::filter::LevelFilter;
@@ -175,5 +176,28 @@ fn pool_cancellation() {
     match task.join() {
         Err(TaskError::Exception(RootedValue::Symbol(sym))) if sym == "no_budget" => {}
         other => unreachable!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
+fn task_panic() {
+    let reactor = Reactor::build()
+        .new_vm(
+            |guard: &mut CollectionGuard<'_>, _reactor: &ReactorHandle| {
+                let vm = Vm::new(&guard);
+                vm.declare(
+                    "panics",
+                    Value::dynamic(RustFunction::new(|_vm, _arity| panic!()), &guard),
+                    guard,
+                )?;
+                Ok(vm)
+            },
+        )
+        .finish();
+    let task = reactor.spawn_source("panics()").unwrap();
+    let error = task.join().unwrap_err();
+    match error {
+        TaskError::Exception(exc) if exc == RootedValue::from(Symbol::from("panic")) => {}
+        other => unreachable!("Unexpected result: {other:?}"),
     }
 }

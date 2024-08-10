@@ -72,6 +72,7 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
+use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -516,30 +517,30 @@ where
                 let pinned_future = Pin::new(&mut future);
 
                 let mut context = Context::from_waker(&task.waker);
-                match pinned_future.poll(&mut context) {
-                    Poll::Ready(Ok(result)) => {
+                match panic::catch_unwind(AssertUnwindSafe(|| pinned_future.poll(&mut context))) {
+                    Ok(Poll::Ready(Ok(result))) => {
                         drop(future);
                         let result = root_result(Ok(result), &mut vm_context);
                         drop(vm_context);
                         tasks.complete_running_task(result, &mut self.budgets);
                     }
-                    Poll::Ready(Err(ExecutionError::Exception(err))) => {
+                    Ok(Poll::Ready(Err(ExecutionError::Exception(err)))) => {
                         drop(future);
                         let result = root_result(Err(err), &mut vm_context);
                         drop(vm_context);
                         tasks.complete_running_task(result, &mut self.budgets);
                     }
-                    Poll::Ready(Err(ExecutionError::Waiting)) | Poll::Pending => {
+                    Ok(Poll::Ready(Err(ExecutionError::Waiting)) | Poll::Pending) => {
                         task.executing = false;
                         tasks.executing.pop_front();
                     }
-                    Poll::Ready(Err(ExecutionError::Timeout)) => {
+                    Ok(Poll::Ready(Err(ExecutionError::Timeout))) => {
                         // Task is still executing, but took longer than its
                         // time slice. Keep it in queue for the next iteration
                         // of the loop.
                         tasks.executing.rotate_left(1);
                     }
-                    Poll::Ready(Err(ExecutionError::NoBudget)) => {
+                    Ok(Poll::Ready(Err(ExecutionError::NoBudget))) => {
                         if let Some(budget) = task
                             .budget_pool
                             .and_then(|pool_id| self.budgets.get_mut(&pool_id))
@@ -576,6 +577,20 @@ where
                             );
                             drop(vm_context);
                             tasks.complete_running_task(result, &mut self.budgets);
+                        }
+                    }
+                    Err(mut panic) => {
+                        drop(future);
+                        let result = root_result(
+                            Err(Value::from(SymbolRef::from("panic"))),
+                            &mut vm_context,
+                        );
+                        drop(vm_context);
+                        tasks.complete_running_task(result, &mut self.budgets);
+                        while let Err(new_panic) =
+                            panic::catch_unwind(AssertUnwindSafe(move || drop(panic)))
+                        {
+                            panic = new_panic;
                         }
                     }
                 }
