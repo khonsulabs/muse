@@ -39,7 +39,7 @@
 //! been replenished.
 //!
 //! ```rust
-//! use muse_reactor::{BudgetPool, BudgetPoolConfig, Reactor};
+//! use muse_reactor::{BudgetPoolId, BudgetPoolConfig, Reactor};
 //! use muse_lang::runtime::value::{Primitive, RootedValue};
 //! use std::time::Duration;
 //!
