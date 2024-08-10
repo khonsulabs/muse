@@ -400,16 +400,23 @@ impl Iterator for Tokens<'_> {
 
                     Ok(self.chars.ranged(start.., Token::NilCoalesce))
                 }
+                (start, ch)
+                    if unicode_ident::is_xid_start(ch)
+                        || (ch == '_' && self.chars.peek().map_or(false, is_ident_continue)) =>
+                {
+                    Ok(self.tokenize_identifier(start, ch))
+                }
                 (start, ch) if ch.is_ascii_punctuation() => {
                     Ok(self.chars.ranged(start.., Token::Char(ch)))
-                }
-                (start, ch) if unicode_ident::is_xid_start(ch) => {
-                    Ok(self.tokenize_identifier(start, ch))
                 }
                 (start, ch) => Err(self.chars.ranged(start.., LexerError::UnexpectedChar(ch))),
             });
         }
     }
+}
+
+fn is_ident_continue(ch: char) -> bool {
+    unicode_ident::is_xid_continue(ch) || ch == '_' || ch.is_ascii_digit()
 }
 
 impl<'a> Tokens<'a> {
@@ -617,11 +624,7 @@ impl<'a> Tokens<'a> {
         self.scratch.clear();
         self.scratch.push(start_char);
 
-        while let Some(ch) = self
-            .chars
-            .peek()
-            .filter(|ch| unicode_ident::is_xid_continue(*ch) || *ch == '_' || ch.is_ascii_digit())
-        {
+        while let Some(ch) = self.chars.peek().filter(|ch| is_ident_continue(*ch)) {
             self.scratch.push(ch);
             self.chars.next();
         }
@@ -1140,7 +1143,7 @@ pub struct FormatStringPart {
 #[test]
 fn basics() {
     use std::num::NonZeroUsize;
-    let tokens = Tokens::new("a_09_ + 1 - .2")
+    let tokens = Tokens::new("a_09_ + 1 - .2 __reserved")
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(
@@ -1158,6 +1161,11 @@ fn basics() {
             Ranged::new((SourceId::anonymous(), 10..11), Token::Char('-')),
             Ranged::new((SourceId::anonymous(), 11..12), Token::Whitespace),
             Ranged::new((SourceId::anonymous(), 12..14), Token::Float(0.2)),
+            Ranged::new((SourceId::anonymous(), 14..15), Token::Whitespace),
+            Ranged::new(
+                (SourceId::anonymous(), 15..25),
+                Token::Identifier(Symbol::from("__reserved"))
+            ),
         ]
     );
     let id = SourceId::new(NonZeroUsize::MIN);
