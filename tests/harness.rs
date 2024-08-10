@@ -23,7 +23,10 @@ fn main() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing_subscriber::filter::LevelFilter::TRACE)
         .try_init();
-    let filter = std::env::args().nth(1).unwrap_or_default();
+    let filter = std::env::args()
+        .filter(|arg| !arg.starts_with('-'))
+        .nth(1)
+        .unwrap_or_default();
     // let filter = String::from("mod_multi");
     for entry in std::fs::read_dir("tests/cases").unwrap() {
         let entry = entry.unwrap().path();
