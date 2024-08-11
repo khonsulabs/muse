@@ -6,3 +6,6 @@ edition = "2021"
 [dependencies]
 muse-lang = { workspace = true }
 parking_lot = { workspace = true }
+
+[lints]
+workspace = true

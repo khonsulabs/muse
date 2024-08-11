@@ -15,7 +15,7 @@
 //! use muse_lang::runtime::value::{Primitive, RootedValue};
 //!
 //! // Create a new reactor for tasks to run in.
-//! let reactor = Reactor::new();
+//! let reactor = Reactor::spawn();
 //!
 //! // Spawn a task that computes 1 + 2
 //! let task = reactor.spawn_source("1 + 2").unwrap();
@@ -44,7 +44,7 @@
 //! use std::time::Duration;
 //!
 //! // Create a new reactor for tasks to run in.
-//! let reactor = Reactor::new();
+//! let reactor = Reactor::spawn();
 //!
 //! // Create a budget pool that we can spawn tasks within.
 //! let pool = reactor.create_budget_pool(BudgetPoolConfig::default()).unwrap();
@@ -73,6 +73,7 @@ use std::fmt::{Debug, Write};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
+use std::ops::ControlFlow;
 use std::panic::{self, AssertUnwindSafe, PanicInfo};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -108,15 +109,22 @@ mod mock_tracing;
 
 static PANIC_HOOK_INSTALL: OnceLock<()> = OnceLock::new();
 thread_local! {
-    static PANIC_INFO: Cell<Option<(String, Option<Backtrace>)>> = Cell::new(None);
+    static PANIC_INFO: Cell<Option<(String, Option<Backtrace>)>> = const { Cell::new(None) };
 }
 
+#[must_use]
 pub struct Builder<Work> {
     vm_source: Option<Arc<dyn NewVm<Work>>>,
     threads: usize,
     thread_name: Option<String>,
     work_queue_limit: Option<usize>,
     _work: PhantomData<Work>,
+}
+
+impl Default for Builder<NoWork> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Builder<NoWork> {
@@ -158,6 +166,7 @@ where
         self
     }
 
+    #[must_use]
     pub fn finish(self) -> ReactorHandle<Work> {
         PANIC_HOOK_INSTALL.get_or_init(|| {
             let default_hook = panic::take_hook();
@@ -210,7 +219,7 @@ where
                 spawner: spawn_send.clone(),
                 handle: thread::Builder::new()
                     .name(thread_name.clone())
-                    .spawn(move || reactor.run(spawn_send, data, parker))
+                    .spawn(move || reactor.run(spawn_send, data, &parker))
                     .expect("error spawning thread"),
             });
         }
@@ -304,8 +313,7 @@ impl<Work> Dispatcher<Work> {
             while let Some(command) = if let Some(budget) = self
                 .recharge_queue
                 .iter()
-                .filter_map(|id| self.recharging_budgets.get(*id))
-                .next()
+                .find_map(|id| self.recharging_budgets.get(*id))
             {
                 self.commands.recv_deadline(budget.recharge_at).ok()
             } else {
@@ -471,7 +479,8 @@ pub struct Reactor<Work = NoWork> {
 }
 
 impl Reactor<NoWork> {
-    pub fn new() -> ReactorHandle<NoWork> {
+    #[must_use]
+    pub fn spawn() -> ReactorHandle<NoWork> {
         Self::build().finish()
     }
 
@@ -512,241 +521,153 @@ where
         mut self,
         sender: Sender<ThreadCommand<Work>>,
         data: Arc<PerThreadData>,
-        parker: Parker,
+        parker: &Parker,
     ) {
         let canceller = TaskCanceller {
             canceller: Arc::new(sender),
             unparker: parker.unparker().clone(),
         };
         let mut tasks = ReactorTasks::new(data);
-        'outer: while !self.handle.data.shared.shutdown.load(Ordering::Relaxed) {
+        while !self.handle.data.shared.shutdown.load(Ordering::Relaxed) {
             tasks.wake_woken();
             self.wake_exhausted(&mut tasks);
             let mut guard = CollectionGuard::acquire();
-            for _ in 0..tasks.executing.len() {
-                let task_id = tasks.executing[0];
-                let task = &mut tasks.all[task_id];
-                let mut vm_context = task.vm.context(&mut guard);
-                let mut future = vm_context.resume_for_async(Duration::from_micros(100));
-                let pinned_future = Pin::new(&mut future);
+            self.execute_executing(&mut tasks, &mut guard, parker);
 
-                let mut context = Context::from_waker(&task.waker);
-                match panic::catch_unwind(AssertUnwindSafe(|| pinned_future.poll(&mut context))) {
-                    Ok(Poll::Ready(Ok(result))) => {
-                        drop(future);
-                        let result = root_result(Ok(result), &mut vm_context);
-                        drop(vm_context);
-                        tasks.complete_running_task(result, &mut self.budgets);
-                    }
-                    Ok(Poll::Ready(Err(ExecutionError::Exception(err)))) => {
-                        drop(future);
-                        let result = root_result(Err(err), &mut vm_context);
-                        drop(vm_context);
-                        tasks.complete_running_task(result, &mut self.budgets);
-                    }
-                    Ok(Poll::Ready(Err(ExecutionError::Waiting)) | Poll::Pending) => {
-                        task.executing = false;
-                        tasks.executing.pop_front();
-                    }
-                    Ok(Poll::Ready(Err(ExecutionError::Timeout))) => {
-                        // Task is still executing, but took longer than its
-                        // time slice. Keep it in queue for the next iteration
-                        // of the loop.
-                        tasks.executing.rotate_left(1);
-                    }
-                    Ok(Poll::Ready(Err(ExecutionError::NoBudget))) => {
-                        if let Some(budget) = task
-                            .budget_pool
-                            .and_then(|pool_id| self.budgets.get_mut(&pool_id))
-                        {
-                            let allocated = budget.allocate();
-                            if allocated > 0 {
-                                // We gathered some budget, give it back to the
-                                // task and keep it executing.
-                                vm_context.increase_budget(allocated);
-                                tasks.executing.rotate_left(1);
-                            } else {
-                                let mut parked_threads =
-                                    budget.pool.0.potentially_parked_threads.lock();
-                                // In the time it took to lock the thread, we
-                                // might have received budget.
-                                let allocated = budget.allocate();
-                                if allocated > 0 {
-                                    vm_context.increase_budget(allocated);
-                                    tasks.executing.rotate_left(1);
-                                } else {
-                                    task.executing = false;
-                                    parked_threads
-                                        .entry(self.id)
-                                        .or_insert_with(|| parker.unparker().clone());
-                                    budget.exhausted.push_back(task_id);
-                                    tasks.executing.pop_front();
-                                }
-                            }
-                        } else {
-                            drop(future);
-                            let result = root_result(
-                                Err(Fault::NoBudget.as_exception(&mut vm_context)),
-                                &mut vm_context,
-                            );
-                            drop(vm_context);
-                            tasks.complete_running_task(result, &mut self.budgets);
-                        }
-                    }
-                    Err(mut panic) => {
-                        drop(future);
-                        let (mut summary, backtrace) = PANIC_INFO.take().unwrap_or_default();
-                        if let Some(backtrace) = backtrace {
-                            let _result = write!(&mut summary, "\n{backtrace}");
-                        }
-                        let result = root_result(
-                            Err(Value::dynamic(
-                                List::from_iter([
-                                    Value::from(SymbolRef::from("panic")),
-                                    Value::from(SymbolRef::from(summary)),
-                                ]),
-                                vm_context.guard(),
-                            )),
-                            &mut vm_context,
-                        );
-                        drop(vm_context);
-                        tasks.complete_running_task(result, &mut self.budgets);
-                        while let Err(new_panic) =
-                            panic::catch_unwind(AssertUnwindSafe(move || drop(panic)))
-                        {
-                            panic = new_panic;
-                        }
-                    }
-                }
-            }
-
-            loop {
-                match self.receiver.try_recv() {
-                    Ok(command) => match command {
-                        ThreadCommand::Spawn(command) => {
-                            let spawn =
-                                match command.what {
-                                    Spawnable::Spawn(vm) => Ok(vm),
-                                    Spawnable::SpawnSource(source) => self
-                                        .vm_source
-                                        .compile_and_prepare(&source, &mut guard, &self.handle),
-                                    Spawnable::SpawnCall(code, args) => self
-                                        .vm_source
-                                        .prepare_call(code, args, &mut guard, &self.handle),
-                                    Spawnable::SpawnWork(work) => work.initialize(
-                                        self.vm_source.as_ref(),
-                                        &mut guard,
-                                        &self.handle,
-                                    ),
-                                };
-                            match spawn {
-                                Ok(vm) => {
-                                    let mut locked = command.result.0.locked.lock();
-                                    if locked.cancelled {
-                                        continue;
-                                    }
-                                    locked.cancellation = Some(canceller.clone());
-                                    drop(locked);
-
-                                    let budget = if let Some(pool) = command.pool {
-                                        if let Some(budget) = self.budgets.get_mut(&pool) {
-                                            vm.increase_budget(budget.allocate());
-                                            Some(budget)
-                                        } else {
-                                            let _ = command.result.send(Err(TaskError::Exception(
-                                                RootedValue::Symbol(Symbol::from("no_budget")),
-                                            )));
-                                            continue;
-                                        }
-                                    } else {
-                                        None
-                                    };
-                                    tasks.push(
-                                        command.id,
-                                        command.pool,
-                                        vm,
-                                        command.result,
-                                        budget,
-                                    );
-                                }
-                                Err(err) => {
-                                    let err = match err {
-                                        PrepareError::Compilation(errors) => {
-                                            TaskError::Compilation(errors)
-                                        }
-                                        PrepareError::Execution(err) => TaskError::Exception(
-                                            err.as_value().upgrade(&guard).expect("just allocated"),
-                                        ),
-                                    };
-                                    let _result = command.result.send(Err(err));
-                                }
-                            }
-                        }
-                        ThreadCommand::NewBudgetPool(pool) => {
-                            self.budgets.insert(
-                                pool.0.id,
-                                ThreadBudget {
-                                    pool,
-                                    exhausted_at: Cell::new(0),
-                                    exhausted: VecDeque::new(),
-                                    tasks: Set::new(),
-                                },
-                            );
-                        }
-                        ThreadCommand::DestroyBudgetPool(pool) => {
-                            let Some(mut budget) = self.budgets.remove(&pool) else {
-                                continue;
-                            };
-                            for paused in std::mem::take(&mut budget.value.tasks).drain() {
-                                tasks.complete_task(
-                                    paused,
-                                    Err(TaskError::Exception(RootedValue::Symbol(Symbol::from(
-                                        "no_budget",
-                                    )))),
-                                    &mut self.budgets,
-                                );
-                            }
-                        }
-                        ThreadCommand::Cancel(global_id) => {
-                            let Some(task_id) = tasks.registered.get(&global_id).copied() else {
-                                continue;
-                            };
-                            let task = tasks.complete_task(
-                                task_id,
-                                Err(TaskError::Cancelled),
-                                &mut self.budgets,
-                            );
-
-                            if task.executing {
-                                let (index, _) = tasks
-                                    .executing
-                                    .iter()
-                                    .enumerate()
-                                    .find(|(_, id)| task_id == **id)
-                                    .expect("task is executing");
-                                tasks.executing.remove(index);
-                            }
-                        }
-                    },
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => break 'outer,
-                }
+            if self
+                .process_commands(&canceller, &mut tasks, &mut guard)
+                .is_break()
+            {
+                break;
             }
 
             drop(guard);
 
-            if tasks.executing.is_empty() {
-                let woken = tasks.woken.tasks.lock();
-                if woken.is_empty() {
-                    drop(woken);
-                    parker.park();
+            if !tasks.has_work() {
+                parker.park();
+            }
+        }
+    }
+
+    fn process_command(
+        &mut self,
+        command: ThreadCommand<Work>,
+        canceller: &TaskCanceller,
+        tasks: &mut ReactorTasks,
+        guard: &mut CollectionGuard<'_>,
+    ) {
+        match command {
+            ThreadCommand::Spawn(command) => {
+                let spawn = match command.what {
+                    Spawnable::Spawn(vm) => Ok(vm),
+                    Spawnable::SpawnSource(source) => {
+                        self.vm_source
+                            .compile_and_prepare(&source, guard, &self.handle)
+                    }
+                    Spawnable::SpawnCall(code, args) => {
+                        self.vm_source.prepare_call(code, args, guard, &self.handle)
+                    }
+                    Spawnable::SpawnWork(work) => {
+                        work.initialize(self.vm_source.as_ref(), guard, &self.handle)
+                    }
+                };
+                match spawn {
+                    Ok(vm) => {
+                        let mut locked = command.result.0.locked.lock();
+                        if locked.cancelled {
+                            return;
+                        }
+                        locked.cancellation = Some(canceller.clone());
+                        drop(locked);
+
+                        let budget = if let Some(pool) = command.pool {
+                            if let Some(budget) = self.budgets.get_mut(&pool) {
+                                vm.increase_budget(budget.allocate());
+                                Some(budget)
+                            } else {
+                                command.result.send(Err(TaskError::Exception(
+                                    RootedValue::Symbol(Symbol::from("no_budget")),
+                                )));
+                                return;
+                            }
+                        } else {
+                            None
+                        };
+                        tasks.push(command.id, command.pool, vm, command.result, budget);
+                    }
+                    Err(err) => {
+                        let err = match err {
+                            PrepareError::Compilation(errors) => TaskError::Compilation(errors),
+                            PrepareError::Execution(err) => TaskError::Exception(
+                                err.as_value().upgrade(guard).expect("just allocated"),
+                            ),
+                        };
+                        command.result.send(Err(err));
+                    }
+                }
+            }
+            ThreadCommand::NewBudgetPool(pool) => {
+                self.budgets.insert(
+                    pool.0.id,
+                    ThreadBudget {
+                        pool,
+                        exhausted_at: Cell::new(0),
+                        exhausted: VecDeque::new(),
+                        tasks: Set::new(),
+                    },
+                );
+            }
+            ThreadCommand::DestroyBudgetPool(pool) => {
+                let Some(mut budget) = self.budgets.remove(&pool) else {
+                    return;
+                };
+                for paused in std::mem::take(&mut budget.value.tasks).drain() {
+                    tasks.complete_task(
+                        paused,
+                        Err(TaskError::Exception(RootedValue::Symbol(Symbol::from(
+                            "no_budget",
+                        )))),
+                        &mut self.budgets,
+                    );
+                }
+            }
+            ThreadCommand::Cancel(global_id) => {
+                let Some(task_id) = tasks.registered.get(&global_id).copied() else {
+                    return;
+                };
+                let task =
+                    tasks.complete_task(task_id, Err(TaskError::Cancelled), &mut self.budgets);
+
+                if task.executing {
+                    let (index, _) = tasks
+                        .executing
+                        .iter()
+                        .enumerate()
+                        .find(|(_, id)| task_id == **id)
+                        .expect("task is executing");
+                    tasks.executing.remove(index);
                 }
             }
         }
     }
 
+    fn process_commands(
+        &mut self,
+        canceller: &TaskCanceller,
+        tasks: &mut ReactorTasks,
+        guard: &mut CollectionGuard<'_>,
+    ) -> ControlFlow<()> {
+        loop {
+            match self.receiver.try_recv() {
+                Ok(command) => self.process_command(command, canceller, tasks, guard),
+                Err(TryRecvError::Empty) => return ControlFlow::Continue(()),
+                Err(TryRecvError::Disconnected) => return ControlFlow::Break(()),
+            }
+        }
+    }
+
     fn wake_exhausted(&mut self, tasks: &mut ReactorTasks) {
-        for (_, budget) in self.budgets.iter_mut() {
+        for (_, budget) in &mut self.budgets {
             let last_updated = budget.pool.0.last_updated.load(Ordering::Relaxed);
             if budget.exhausted_at.get() != last_updated {
                 budget.exhausted_at.set(last_updated);
@@ -756,6 +677,110 @@ where
                     };
                     task.executing = true;
                     tasks.executing.push_back(task_id);
+                }
+            }
+        }
+    }
+
+    fn execute_executing(
+        &mut self,
+        tasks: &mut ReactorTasks,
+        guard: &mut CollectionGuard<'_>,
+        parker: &Parker,
+    ) {
+        for _ in 0..tasks.executing.len() {
+            let task_id = tasks.executing[0];
+            let task = &mut tasks.all[task_id];
+            let mut vm_context = task.vm.context(guard);
+            let mut future = vm_context.resume_for_async(Duration::from_micros(100));
+            let pinned_future = Pin::new(&mut future);
+
+            let mut context = Context::from_waker(&task.waker);
+            match panic::catch_unwind(AssertUnwindSafe(|| pinned_future.poll(&mut context))) {
+                Ok(Poll::Ready(Ok(result))) => {
+                    drop(future);
+                    let result = root_result(Ok(result), &mut vm_context);
+                    drop(vm_context);
+                    tasks.complete_running_task(result, &mut self.budgets);
+                }
+                Ok(Poll::Ready(Err(ExecutionError::Exception(err)))) => {
+                    drop(future);
+                    let result = root_result(Err(err), &mut vm_context);
+                    drop(vm_context);
+                    tasks.complete_running_task(result, &mut self.budgets);
+                }
+                Ok(Poll::Ready(Err(ExecutionError::Waiting)) | Poll::Pending) => {
+                    task.executing = false;
+                    tasks.executing.pop_front();
+                }
+                Ok(Poll::Ready(Err(ExecutionError::Timeout))) => {
+                    // Task is still executing, but took longer than its
+                    // time slice. Keep it in queue for the next iteration
+                    // of the loop.
+                    tasks.executing.rotate_left(1);
+                }
+                Ok(Poll::Ready(Err(ExecutionError::NoBudget))) => {
+                    if let Some(budget) = task
+                        .budget_pool
+                        .and_then(|pool_id| self.budgets.get_mut(&pool_id))
+                    {
+                        let allocated = budget.allocate();
+                        if allocated > 0 {
+                            // We gathered some budget, give it back to the
+                            // task and keep it executing.
+                            vm_context.increase_budget(allocated);
+                            tasks.executing.rotate_left(1);
+                        } else {
+                            let mut parked_threads =
+                                budget.pool.0.potentially_parked_threads.lock();
+                            // In the time it took to lock the thread, we
+                            // might have received budget.
+                            let allocated = budget.allocate();
+                            if allocated > 0 {
+                                vm_context.increase_budget(allocated);
+                                tasks.executing.rotate_left(1);
+                            } else {
+                                task.executing = false;
+                                parked_threads
+                                    .entry(self.id)
+                                    .or_insert_with(|| parker.unparker().clone());
+                                budget.exhausted.push_back(task_id);
+                                tasks.executing.pop_front();
+                            }
+                        }
+                    } else {
+                        drop(future);
+                        let result = root_result(
+                            Err(Fault::NoBudget.as_exception(&mut vm_context)),
+                            &mut vm_context,
+                        );
+                        drop(vm_context);
+                        tasks.complete_running_task(result, &mut self.budgets);
+                    }
+                }
+                Err(mut panic) => {
+                    drop(future);
+                    let (mut summary, backtrace) = PANIC_INFO.take().unwrap_or_default();
+                    if let Some(backtrace) = backtrace {
+                        let _result = write!(&mut summary, "\n{backtrace}");
+                    }
+                    let result = root_result(
+                        Err(Value::dynamic(
+                            List::from_iter([
+                                Value::from(SymbolRef::from("panic")),
+                                Value::from(SymbolRef::from(summary)),
+                            ]),
+                            vm_context.guard(),
+                        )),
+                        &mut vm_context,
+                    );
+                    drop(vm_context);
+                    tasks.complete_running_task(result, &mut self.budgets);
+                    while let Err(new_panic) =
+                        panic::catch_unwind(AssertUnwindSafe(move || drop(panic)))
+                    {
+                        panic = new_panic;
+                    }
                 }
             }
         }
@@ -826,6 +851,7 @@ impl ResultHandle {
         self.0.sync.notify_all();
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn recv<Deadline>(&self, deadline: Deadline) -> Deadline::Result
     where
         Deadline: ResultDeadline,
@@ -995,6 +1021,9 @@ impl ReactorTasks {
         id
     }
 
+    fn has_work(&self) -> bool {
+        !(self.executing.is_empty() && self.woken.tasks.lock().is_empty())
+    }
     fn complete_running_task(
         &mut self,
         result: Result<RootedValue, RootedValue>,
@@ -1011,7 +1040,7 @@ impl ReactorTasks {
         budgets: &mut Map<BudgetPoolId, ThreadBudget>,
     ) -> ReactorTask {
         let task = self.all.remove(task_id).expect("task missing");
-        let _result = task.result.send(result);
+        task.result.send(result);
         self.registered.remove(&task.global_id);
         if let Some(budget) = task.budget_pool.and_then(|p| budgets.get_mut(&p)) {
             budget.tasks.remove(&task_id);
@@ -1030,7 +1059,7 @@ impl ReactorTasks {
             };
             if !task.executing {
                 task.executing = true;
-                self.executing.push_back(id)
+                self.executing.push_back(id);
             }
         }
         drop(woken);
@@ -1074,14 +1103,17 @@ impl TaskHandle {
         self.result.recv(())
     }
 
+    #[must_use]
     pub fn try_join(&self) -> Option<Result<RootedValue, TaskError>> {
         self.result.try_recv()
     }
 
+    #[must_use]
     pub fn try_join_until(&self, deadline: Instant) -> Option<Result<RootedValue, TaskError>> {
         self.result.recv(deadline)
     }
 
+    #[must_use]
     pub fn try_join_for(&self, duration: Duration) -> Option<Result<RootedValue, TaskError>> {
         self.try_join_until(Instant::now() + duration)
     }
@@ -1149,6 +1181,7 @@ impl<Work> ReactorHandle<Work>
 where
     Work: WorkUnit,
 {
+    #[must_use]
     pub fn runtime_module_in(
         &self,
         parent: Dynamic<Module>,
@@ -1559,6 +1592,7 @@ impl<Work> BudgetPoolHandle<Work>
 where
     Work: WorkUnit,
 {
+    #[must_use]
     pub fn id(&self) -> BudgetPoolId {
         self.0.pool.0.id
     }
@@ -1593,13 +1627,15 @@ where
     }
 
     pub fn increase_budget(&self, amount: usize) {
-        self.0.pool.increase_budget(amount)
+        self.0.pool.increase_budget(amount);
     }
 
+    #[must_use]
     pub fn remaining_budget(&self) -> usize {
         self.0.pool.0.budget.load(Ordering::Relaxed)
     }
 
+    #[must_use]
     pub fn reactor(&self) -> &ReactorHandle<Work> {
         &self.0.reactor
     }
@@ -1631,6 +1667,7 @@ impl<Work> Drop for BudgetPoolHandleData<Work> {
 }
 
 #[non_exhaustive]
+#[must_use]
 pub struct BudgetPoolConfig {
     pub maximum: usize,
     pub allocation_size: usize,
@@ -1677,6 +1714,7 @@ impl BudgetPoolConfig {
         self
     }
 
+    #[must_use]
     pub fn recharges(&self) -> bool {
         self.recharge_every > Duration::ZERO && self.recharge_amount > 0
     }

@@ -28,7 +28,7 @@ pub fn install(vm: &Vm, guard: &mut CollectionGuard<'_>) {
                     Err(Fault::IncorrectNumberOfArguments)
                 }
             }),
-            &guard,
+            guard,
         ),
         guard,
     )

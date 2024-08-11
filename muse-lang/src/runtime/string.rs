@@ -126,7 +126,7 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
                             Ok(Value::dynamic(
                                 List::from(vec![Value::dynamic(
                                     MuseString::from(String::default()),
-                                    &vm,
+                                    vm,
                                 )]),
                                 vm,
                             ))
@@ -136,7 +136,7 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
                             Ok(Value::dynamic(
                                 haystack
                                     .split(&*needle)
-                                    .map(|segment| Value::dynamic(MuseString::from(segment), &vm))
+                                    .map(|segment| Value::dynamic(MuseString::from(segment), vm))
                                     .collect::<List>(),
                                 vm,
                             ))
@@ -146,7 +146,7 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
                         Ok(Value::dynamic(
                             needle
                                 .split(&haystack)
-                                .map(|segment| Value::dynamic(MuseString::from(segment), &vm))
+                                .map(|segment| Value::dynamic(MuseString::from(segment), vm))
                                 .collect::<List>(),
                             vm,
                         ))
@@ -171,7 +171,7 @@ pub static STRING_TYPE: RustType<MuseString> = RustType::new("String", |t| {
                     let mut combined = String::with_capacity(lhs.len() + rhs.len());
                     combined.push_str(&lhs);
                     combined.push_str(&rhs);
-                    Ok(Value::dynamic(MuseString::from(combined), &vm))
+                    Ok(Value::dynamic(MuseString::from(combined), vm))
                 }
             } else {
                 let rhs = rhs.to_string(vm)?.try_upgrade(vm.guard())?;

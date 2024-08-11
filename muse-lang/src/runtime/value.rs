@@ -867,7 +867,7 @@ impl Value {
     }
 
     /// Moves `value` into the virtual machine.
-    pub fn dynamic<'guard, T>(value: T, guard: impl AsRef<CollectionGuard<'guard>>) -> Self
+    pub fn dynamic<'guard, T>(value: T, guard: &impl AsRef<CollectionGuard<'guard>>) -> Self
     where
         T: DynamicValue + Trace,
     {
@@ -1569,7 +1569,7 @@ pub struct AnyDynamic(pub(crate) AnyRef);
 
 impl AnyDynamic {
     /// Returns `value` as a garbage collected value that can be used in Muse.
-    pub fn new<'guard, T>(value: T, guard: impl AsRef<CollectionGuard<'guard>>) -> Self
+    pub fn new<'guard, T>(value: T, guard: &impl AsRef<CollectionGuard<'guard>>) -> Self
     where
         T: DynamicValue + Trace,
     {
@@ -2009,7 +2009,7 @@ impl AnyDynamicRoot {
         AnyDynamic(self.0.as_any())
     }
     /// Returns `value` as a garbage collected value that can be used in Muse.
-    pub fn new<'guard, T>(value: T, guard: impl AsRef<CollectionGuard<'guard>>) -> Self
+    pub fn new<'guard, T>(value: T, guard: &impl AsRef<CollectionGuard<'guard>>) -> Self
     where
         T: DynamicValue + Trace,
     {
@@ -2068,7 +2068,7 @@ where
     /// Moves `value` into the garbage collector and returns a rooted reference
     /// to it.
     #[must_use]
-    pub fn new<'guard>(value: T, guard: impl AsRef<CollectionGuard<'guard>>) -> Self {
+    pub fn new<'guard>(value: T, guard: &impl AsRef<CollectionGuard<'guard>>) -> Self {
         Self(Root::new(Custom(value), guard))
     }
 
@@ -2151,7 +2151,7 @@ where
     /// Moves `value` into the garbage collector and returns a weak reference to
     /// it.
     #[must_use]
-    pub fn new<'guard>(value: T, guard: impl AsRef<CollectionGuard<'guard>>) -> Self {
+    pub fn new<'guard>(value: T, guard: &impl AsRef<CollectionGuard<'guard>>) -> Self {
         Self(Ref::new(Custom(value), guard))
     }
 
@@ -4399,7 +4399,7 @@ impl CustomType for AsyncFunction {
                         vm.allocate(1)?;
                         vm.current_frame_mut()[0] = Value::dynamic(
                             ValueFuture(Arc::new(Mutex::new(Box::pin(future)))),
-                            &vm,
+                            vm.guard(),
                         );
                         vm.jump_to(1);
                     }
@@ -4538,7 +4538,7 @@ impl RootedValue {
     }
 
     /// Moves `value` into the virtual machine.
-    pub fn dynamic<'guard, T>(value: T, guard: impl AsRef<CollectionGuard<'guard>>) -> Self
+    pub fn dynamic<'guard, T>(value: T, guard: &impl AsRef<CollectionGuard<'guard>>) -> Self
     where
         T: DynamicValue + Trace,
     {

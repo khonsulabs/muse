@@ -1075,7 +1075,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
         };
 
         function.module = Some(ModuleId(0));
-        self.declare_inner(name, Value::dynamic(function, &self), true, Access::Public)
+        self.declare_inner(name, Value::dynamic(function, self), true, Access::Public)
     }
 
     /// Resolves the value at `path`.
@@ -1948,7 +1948,7 @@ impl VmContext<'_, '_> {
                         function
                             .to_function(self.guard)
                             .in_module(self.frames[self.current_frame].module),
-                        &self,
+                        self,
                     )
                 })
                 .ok_or(Fault::InvalidOpcode),
@@ -1960,7 +1960,7 @@ impl VmContext<'_, '_> {
                 .map(|ty| {
                     Value::dynamic(
                         ty.load(self.guard, self.frames[self.current_frame].module),
-                        &self,
+                        self,
                     )
                 })
                 .ok_or(Fault::InvalidOpcode),
@@ -1972,7 +1972,7 @@ impl VmContext<'_, '_> {
                     .get(v)
                     .ok_or(Fault::InvalidOpcode)?;
                 let ty = ty.load(self)?;
-                Ok(Value::dynamic(ty, &self))
+                Ok(Value::dynamic(ty, self))
             }
         }
     }

@@ -20,3 +20,6 @@ tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

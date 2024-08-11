@@ -409,6 +409,12 @@ impl Deref for StaticSymbol {
     }
 }
 
+impl<'a> From<&'a StaticSymbol> for SymbolRef {
+    fn from(value: &'a StaticSymbol) -> Self {
+        value.downgrade()
+    }
+}
+
 /// A type that contains a list of symbols.
 pub trait SymbolList {
     /// The iterator used for [`into_symbols`](Self::into_symbols).

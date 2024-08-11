@@ -21,7 +21,7 @@ fn initialize_tracing() {
 #[test]
 fn works() {
     initialize_tracing();
-    let reactor = Reactor::new();
+    let reactor = Reactor::spawn();
     let task = reactor.spawn_source("1 + 2").unwrap();
     assert_eq!(
         task.join().unwrap(),
@@ -32,7 +32,7 @@ fn works() {
 #[test]
 fn spawning() {
     initialize_tracing();
-    let reactor = Reactor::new();
+    let reactor = Reactor::spawn();
     let task = reactor
         .spawn_source(
             r"
@@ -124,7 +124,7 @@ fn automatic_recharge() {
 #[test]
 fn spawn_err() {
     initialize_tracing();
-    let reactor = Reactor::new();
+    let reactor = Reactor::spawn();
     let task = reactor.spawn_source("invalid source code").unwrap();
     match task.join() {
         Err(TaskError::Compilation(errors)) => assert_eq!(
@@ -145,7 +145,7 @@ fn spawn_err() {
 #[test]
 fn task_cancellation() {
     initialize_tracing();
-    let reactor = Reactor::new();
+    let reactor = Reactor::spawn();
     // Spawn a task with an infinite loop
     let task = reactor.spawn_source("loop {}").unwrap();
     // Wait a bit to make sure it's running.
@@ -165,7 +165,7 @@ fn task_cancellation() {
 #[test]
 fn pool_cancellation() {
     initialize_tracing();
-    let reactor = Reactor::new();
+    let reactor = Reactor::spawn();
     // Spawn a task with an infinite loop
     let pool = reactor
         .create_budget_pool(BudgetPoolConfig::default())
@@ -192,10 +192,10 @@ fn task_panic() {
     let reactor = Reactor::build()
         .new_vm(
             |guard: &mut CollectionGuard<'_>, _reactor: &ReactorHandle| {
-                let vm = Vm::new(&guard);
+                let vm = Vm::new(guard);
                 vm.declare(
                     "panics",
-                    Value::dynamic(RustFunction::new(|_vm, _arity| panic!()), &guard),
+                    Value::dynamic(RustFunction::new(|_vm, _arity| panic!()), guard),
                     guard,
                 )?;
                 Ok(vm)
