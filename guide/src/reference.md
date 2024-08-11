@@ -147,9 +147,10 @@ MatchBody: (<MatchPattern> (',' <MatchPattern>)*)?;
 MatchPattern: <GuardedPattern> '=>' <Expression>;
 GuardedPattern: <Pattern> ('if' <Expression>)?;
 Pattern: <PatternKind> ('|' <PatternKind>)*;
-PatternKind: <IdentifierPattern | ListPattern | MapPattern>;
+PatternKind: <IdentifierPattern | ListPattern | MapPattern | ExpressionPattern>;
 IdentifierPattern: '_' | '...' | <Identifier>;
 ListPattern: '[' (<Pattern> (',' <Pattern>)*)? ']';
+ExpressionPattern: ('<=' | '>=' | '<' | '>' | '=' | '!=') <Expression>;
 
 MapPattern: '{' (<EntryPattern> (',' <EntryPattern>)*)? ','? '}';
 EntryPattern: <EntryKeyPattern> ':' <Pattern>;
