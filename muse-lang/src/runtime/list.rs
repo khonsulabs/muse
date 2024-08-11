@@ -44,7 +44,7 @@ pub static LIST_TYPE: RustType<List> = RustType::new("List", |t| {
                 1,
                 |vm, this| {
                     let key = vm[Register(0)].take();
-                    this.get(&key)
+                    this.get_by_value(&key)
                 },
             ),
     )
@@ -67,13 +67,17 @@ impl List {
     ///
     /// Returns [`Fault::OutOfBounds`] if `index` cannot be converted to a
     /// `usize` or is out of bounds of this list.
-    pub fn get(&self, index: &Value) -> Result<Value, Fault> {
+    pub fn get_by_value(&self, index: &Value) -> Result<Value, Fault> {
         let Some(index) = index.as_usize() else {
             return Err(Fault::OutOfBounds);
         };
+        self.get(index).ok_or(Fault::OutOfBounds)
+    }
+
+    pub fn get(&self, index: usize) -> Option<Value> {
         let contents = self.0.lock();
 
-        contents.get(index).copied().ok_or(Fault::OutOfBounds)
+        contents.get(index).copied()
     }
 
     /// Inserts `value` at `index`.

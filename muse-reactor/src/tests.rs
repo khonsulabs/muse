@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 
 use muse_lang::compiler::syntax::Ranged;
 use muse_lang::compiler::{self};
-use muse_lang::runtime::symbol::Symbol;
+use muse_lang::runtime::list::List;
+use muse_lang::runtime::symbol::SymbolRef;
 use muse_lang::runtime::value::{Primitive, RootedValue, RustFunction, Value};
 use muse_lang::vm::Vm;
 use refuse::CollectionGuard;
@@ -204,7 +205,14 @@ fn task_panic() {
     let task = reactor.spawn_source("panics()").unwrap();
     let error = task.join().unwrap_err();
     match error {
-        TaskError::Exception(exc) if exc == RootedValue::from(Symbol::from("panic")) => {}
+        TaskError::Exception(exc)
+            if exc.as_rooted::<List>().map_or(false, |list| {
+                list.get(0) == Some(Value::from(SymbolRef::from("panic")))
+                    && list
+                        .get(1)
+                        .and_then(|v| v.as_symbol(&CollectionGuard::acquire()))
+                        .map_or(false, |s| dbg!(s).contains("panicked at muse-reactor"))
+            }) => {}
         other => unreachable!("Unexpected result: {other:?}"),
     }
 }

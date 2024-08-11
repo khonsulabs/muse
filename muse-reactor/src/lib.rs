@@ -66,16 +66,17 @@
 //! ```
 #![allow(missing_docs)]
 use std::any::Any;
+use std::backtrace::Backtrace;
 use std::cell::Cell;
 use std::collections::VecDeque;
-use std::fmt::Debug;
+use std::fmt::{Debug, Write};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
-use std::panic::{self, AssertUnwindSafe};
+use std::panic::{self, AssertUnwindSafe, PanicInfo};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -104,6 +105,11 @@ extern crate tracing;
 #[cfg(not(feature = "tracing"))]
 #[macro_use]
 mod mock_tracing;
+
+static PANIC_HOOK_INSTALL: OnceLock<()> = OnceLock::new();
+thread_local! {
+    static PANIC_INFO: Cell<Option<(String, Option<Backtrace>)>> = Cell::new(None);
+}
 
 pub struct Builder<Work> {
     vm_source: Option<Arc<dyn NewVm<Work>>>,
@@ -153,6 +159,14 @@ where
     }
 
     pub fn finish(self) -> ReactorHandle<Work> {
+        PANIC_HOOK_INSTALL.get_or_init(|| {
+            let default_hook = panic::take_hook();
+            panic::set_hook(Box::new(move |info: &PanicInfo| {
+                PANIC_INFO.set(Some((info.to_string(), Some(Backtrace::capture()))));
+                default_hook(info);
+            }));
+        });
+
         let (sender, receiver) = if let Some(limit) = self.work_queue_limit {
             flume::bounded(limit)
         } else {
@@ -581,8 +595,18 @@ where
                     }
                     Err(mut panic) => {
                         drop(future);
+                        let (mut summary, backtrace) = PANIC_INFO.take().unwrap_or_default();
+                        if let Some(backtrace) = backtrace {
+                            let _result = write!(&mut summary, "\n{backtrace}");
+                        }
                         let result = root_result(
-                            Err(Value::from(SymbolRef::from("panic"))),
+                            Err(Value::dynamic(
+                                List::from_iter([
+                                    Value::from(SymbolRef::from("panic")),
+                                    Value::from(SymbolRef::from(summary)),
+                                ]),
+                                vm_context.guard(),
+                            )),
                             &mut vm_context,
                         );
                         drop(vm_context);
