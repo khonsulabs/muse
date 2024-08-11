@@ -33,8 +33,8 @@
 //! # Budget Pools
 //!
 //! Budget pools enable efficiently restricting groups of tasks to execution
-//! budgets. Each time a task assigned to a [`BudgetPool`] exhausts its budget,
-//! it requests additional budget from the pool. If no budget is available, the
+//! budgets. Each time a task assigned to a budget pool exhausts its budget, it
+//! requests additional budget from the pool. If no budget is available, the
 //! task is put to sleep and will automatically be resumed when the budget has
 //! been replenished.
 //!
@@ -53,7 +53,7 @@
 //! let task = pool.spawn_source("var i = 0; while i < 100 { i = i + 1; }; i").unwrap();
 //!
 //! // Verify the task isn't able to complete.
-//! assert!(task.try_join_for(Duration::from_secs(1)).is_none());
+//! assert!(task.join_for(Duration::from_secs(1)).is_none());
 //!
 //! // Allocate enough budget.
 //! pool.increase_budget(1_000);
@@ -64,12 +64,11 @@
 //!     RootedValue::Primitive(Primitive::Int(100))
 //! );
 //! ```
-#![allow(missing_docs)]
 use std::any::Any;
 use std::backtrace::Backtrace;
 use std::cell::Cell;
 use std::collections::VecDeque;
-use std::fmt::{Debug, Write};
+use std::fmt::{Debug, Display, Write};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
@@ -112,6 +111,7 @@ thread_local! {
     static PANIC_INFO: Cell<Option<(String, Option<Backtrace>)>> = const { Cell::new(None) };
 }
 
+/// A builder for a [`Reactor`].
 #[must_use]
 pub struct Builder<Work> {
     vm_source: Option<Arc<dyn NewVm<Work>>>,
@@ -128,6 +128,7 @@ impl Default for Builder<NoWork> {
 }
 
 impl Builder<NoWork> {
+    /// Returns a new builder for the default reactor settings.
     pub fn new() -> Self {
         Self {
             vm_source: None,
@@ -138,6 +139,11 @@ impl Builder<NoWork> {
         }
     }
 
+    /// Customizes the process for which virtual machines are initialized.
+    ///
+    /// For convenience, [`NewVm`] is implemented for `Fn(&mut
+    /// CollectionGuard<'_>, &ReactorHandle<Work>)` where `Work` implements
+    /// [`WorkUnit`].
     pub fn new_vm<F, Work>(self, new_vm: F) -> Builder<Work>
     where
         F: NewVm<Work>,
@@ -156,16 +162,21 @@ impl<Work> Builder<Work>
 where
     Work: WorkUnit,
 {
+    /// Sets the number of threads to execute tasks across.
     pub fn threads(mut self, thread_count: usize) -> Self {
         self.threads = thread_count;
         self
     }
 
+    /// Sets the maximum number of work items in queue.
+    ///
+    /// By default, work queues are not limited.
     pub fn work_queue_limit(mut self, limit: usize) -> Self {
         self.work_queue_limit = Some(limit);
         self
     }
 
+    /// Spawns a reactor with the given settings and returns a handle to it.
     #[must_use]
     pub fn finish(self) -> ReactorHandle<Work> {
         PANIC_HOOK_INSTALL.get_or_init(|| {
@@ -470,6 +481,7 @@ impl<Work> Dispatcher<Work> {
     }
 }
 
+/// A multi-threaded executor for Muse workloads.
 pub struct Reactor<Work = NoWork> {
     id: usize,
     receiver: Receiver<ThreadCommand<Work>>,
@@ -479,11 +491,13 @@ pub struct Reactor<Work = NoWork> {
 }
 
 impl Reactor<NoWork> {
+    /// Spawns the default executor and returns a handle to it.
     #[must_use]
     pub fn spawn() -> ReactorHandle<NoWork> {
         Self::build().finish()
     }
 
+    /// Returns a builder for a new reactor.
     pub fn build() -> Builder<NoWork> {
         Builder::new()
     }
@@ -926,33 +940,20 @@ impl ResultDeadline for Instant {
     }
 }
 
-impl Future for &'_ TaskHandle {
-    type Output = Result<RootedValue, TaskError>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut data = self.result.0.locked.lock();
-        if let Some(result) = &data.result {
-            Poll::Ready(result.clone())
-        } else {
-            let will_wake = data.wakers.iter().any(|w| w.will_wake(cx.waker()));
-            if !will_wake {
-                data.wakers.push(cx.waker().clone());
-            }
-            Poll::Pending
-        }
-    }
-}
-
 #[derive(Default)]
 struct ResultHandleData {
     sync: Condvar,
     locked: Mutex<ResultHandleResult>,
 }
 
+/// An error waiting for a task to execute.
 #[derive(Debug, Clone)]
 pub enum TaskError {
+    /// The task's execution was cancelled.
     Cancelled,
+    /// The source failed to compile.
     Compilation(Vec<Ranged<compiler::Error>>),
+    /// An uncaught exception was raised while executing the task.
     Exception(RootedValue),
 }
 
@@ -1092,6 +1093,7 @@ where
     }
 }
 
+/// A handle to a task spawned in a reactor.
 #[derive(Trace)]
 pub struct TaskHandle {
     global_id: usize,
@@ -1099,25 +1101,51 @@ pub struct TaskHandle {
 }
 
 impl TaskHandle {
+    /// Blocks the current thread until the task is finished.
+    ///
+    /// This function is not safe to execute from async code. [`TaskHandle`]
+    /// implements [`Future`] and can be awaited.
     pub fn join(&self) -> Result<RootedValue, TaskError> {
         self.result.recv(())
     }
 
+    /// Checks if the task has executed, returning the result if it has.
+    ///
+    /// This function returns `None` if the task is pending execution or still
+    /// executing.
+    ///
+    /// This function is safe to call from both async and non-async code.
     #[must_use]
     pub fn try_join(&self) -> Option<Result<RootedValue, TaskError>> {
         self.result.try_recv()
     }
 
+    /// Blocks the current thread until the task is finished or `deadline` has
+    /// passed.
+    ///
+    /// This function is not safe to execute from async code. [`TaskHandle`]
+    /// implements [`Future`] and can be awaited, and the future can be
+    /// cancelled using the async runtime's timeout functionality.
     #[must_use]
-    pub fn try_join_until(&self, deadline: Instant) -> Option<Result<RootedValue, TaskError>> {
+    pub fn join_until(&self, deadline: Instant) -> Option<Result<RootedValue, TaskError>> {
         self.result.recv(deadline)
     }
 
+    /// Blocks the current thread until the task is finished or `duration` has
+    /// elapsed.
+    ///
+    /// This function is not safe to execute from async code. [`TaskHandle`]
+    /// implements [`Future`] and can be awaited, and the future can be
+    /// cancelled using the async runtime's timeout functionality.
     #[must_use]
-    pub fn try_join_for(&self, duration: Duration) -> Option<Result<RootedValue, TaskError>> {
-        self.try_join_until(Instant::now() + duration)
+    pub fn join_for(&self, duration: Duration) -> Option<Result<RootedValue, TaskError>> {
+        self.join_until(Instant::now() + duration)
     }
 
+    /// Cancels the task if it is still running.
+    ///
+    /// Joining the task will return [`TaskError::Cancelled`] if the task was
+    /// successfully cancelled.
     pub fn cancel(&self) {
         let mut locked = self.result.0.locked.lock();
         locked.cancelled = true;
@@ -1169,9 +1197,34 @@ impl Debug for TaskHandle {
     }
 }
 
+impl Future for &'_ TaskHandle {
+    type Output = Result<RootedValue, TaskError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut data = self.result.0.locked.lock();
+        if let Some(result) = &data.result {
+            Poll::Ready(result.clone())
+        } else {
+            let will_wake = data.wakers.iter().any(|w| w.will_wake(cx.waker()));
+            if !will_wake {
+                data.wakers.push(cx.waker().clone());
+            }
+            Poll::Pending
+        }
+    }
+}
+
+/// An operation could not be completed because the reactor is not running.
 #[derive(Debug)]
 pub struct ReactorShutdown;
 
+impl Display for ReactorShutdown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("reactor is not running")
+    }
+}
+
+/// A handle to a spawned `Reactor<Work>`].
 #[derive(Debug)]
 pub struct ReactorHandle<Work = NoWork> {
     data: Arc<HandleData<Work>>,
@@ -1181,6 +1234,10 @@ impl<Work> ReactorHandle<Work>
 where
     Work: WorkUnit,
 {
+    /// Returns a new module containing the reactor's functionality.
+    ///
+    /// This module needs to be declared within `parent` before it can be
+    /// accessed.
     #[must_use]
     pub fn runtime_module_in(
         &self,
@@ -1246,14 +1303,27 @@ where
         Ok(handle)
     }
 
+    /// Spawns `vm` in the reactor, returning a handle to the spawned task.
+    ///
+    /// [`Builder::new_vm`] can be used to customize what functionality is
+    /// available in every virtual machine.
     pub fn spawn(&self, vm: Vm) -> Result<TaskHandle, ReactorShutdown> {
         self.spawn_spawnable(Spawnable::Spawn(vm), None)
     }
 
+    /// Spawns a task that compiles and executes `source`.
+    ///
+    /// [`Builder::new_vm`] can be used to customize how `source` is compiled
+    /// and what functionality is available in every virtual machine.
     pub fn spawn_source(&self, source: impl Into<String>) -> Result<TaskHandle, ReactorShutdown> {
         self.spawn_spawnable(Spawnable::SpawnSource(source.into()), None)
     }
 
+    /// Spawns a task that executes `code` after loading `args` to the virtual
+    /// machine registers.
+    ///
+    /// [`Builder::new_vm`] can be used to customize what functionality is
+    /// available in every virtual machine.
     pub fn spawn_call(
         &self,
         code: Code,
@@ -1262,10 +1332,23 @@ where
         self.spawn_spawnable(Spawnable::SpawnCall(code, args), None)
     }
 
+    /// Spawns a task that executes `work`.
+    ///
+    /// This function allows a user-specified type to be spawned and converted
+    /// into a task using the [`WorkUnit`] trait.
+    ///
+    /// [`Builder::new_vm`] can be used to customize the `Work` generic and what
+    /// functionality is available in every virtual machine.
     pub fn spawn_work(&self, work: Work) -> Result<TaskHandle, ReactorShutdown> {
         self.spawn_spawnable(Spawnable::SpawnWork(work), None)
     }
 
+    /// Shuts the reactor down.
+    ///
+    /// Only the first call to this function will do anything. All subsequent
+    /// calls will return `Ok(())` without blocking. The call that shuts the
+    /// reactor down will block the current thread until the reactor has shut
+    /// down or an error has occurred.
     pub fn shutdown(&self) -> Result<(), Box<dyn Any + Send + 'static>> {
         if self
             .data
@@ -1287,6 +1370,7 @@ where
         Ok(())
     }
 
+    /// Returns a new budget pool.
     pub fn create_budget_pool(
         &self,
         config: BudgetPoolConfig,
@@ -1444,9 +1528,12 @@ enum Spawnable<Work> {
     SpawnWork(Work),
 }
 
+/// An error while preparing and executing code.
 #[derive(Debug)]
 pub enum PrepareError {
+    /// One or more compilation errors.
     Compilation(Vec<Ranged<compiler::Error>>),
+    /// An error occurred while executing code.
     Execution(ExecutionError),
 }
 
@@ -1471,13 +1558,16 @@ impl From<Vec<Ranged<compiler::Error>>> for PrepareError {
     }
 }
 
+/// Creates new [`Vm`]s for a [`Reactor`].
 pub trait NewVm<Work>: Send + Sync + 'static {
+    /// Returns a newly initialized virtual machine.
     fn new_vm(
         &self,
         guard: &mut CollectionGuard<'_>,
         reactor: &ReactorHandle<Work>,
     ) -> Result<Vm, PrepareError>;
 
+    /// Returns a virtual machine that is prepared to execute `source`.
     fn compile_and_prepare(
         &self,
         source: &str,
@@ -1490,6 +1580,8 @@ pub trait NewVm<Work>: Send + Sync + 'static {
         Ok(vm)
     }
 
+    /// Returns a virtual machine that is prepared to execute `code` with
+    /// `args`.
     fn prepare_call(
         &self,
         code: Code,
@@ -1541,7 +1633,9 @@ impl<Work: WorkUnit> NewVm<Work> for () {
     }
 }
 
+/// A custom unit of work for a [`Reactor`].
 pub trait WorkUnit: Sized + Send + 'static {
+    /// Initializes a new virtual machine for this unit of work.
     fn initialize(
         self,
         vms: &dyn NewVm<Self>,
@@ -1563,6 +1657,7 @@ impl WorkUnit for Code {
     }
 }
 
+/// A [`WorkUnit`] that can not be instantiated.
 pub enum NoWork {}
 
 impl WorkUnit for NoWork {
@@ -1576,9 +1671,19 @@ impl WorkUnit for NoWork {
     }
 }
 
+/// The unique identifier of a budget pool in a [`Reactor`].
+///
+/// IDs are only unique within the same reactor.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub struct BudgetPoolId(NonZeroUsize);
 
+/// A handle to a budget pool.
+///
+/// Tasks spawned in a budget pool will only be able to execute while the budget
+/// pool has remaining budget.
+///
+/// When all handles to a budget pool have been dropped, all outstanding tasks
+/// belonging to the budget pool will be cancelled.
 pub struct BudgetPoolHandle<Work = NoWork>(Arc<BudgetPoolHandleData<Work>>);
 
 impl<Work> ContainsNoRefs for BudgetPoolHandle<Work> where Work: WorkUnit {}
@@ -1592,17 +1697,32 @@ impl<Work> BudgetPoolHandle<Work>
 where
     Work: WorkUnit,
 {
+    /// Returns the id of this pool.
     #[must_use]
     pub fn id(&self) -> BudgetPoolId {
         self.0.pool.0.id
     }
 
+    /// Spawns `vm` in the reactor, returning a handle to the spawned task.
+    ///
+    /// [`Builder::new_vm`] can be used to customize what functionality is
+    /// available in every virtual machine.
+    ///
+    /// This task will execute with a shared budget and will be paused when no
+    /// budget is available in this pool.
     pub fn spawn(&self, vm: Vm) -> Result<TaskHandle, ReactorShutdown> {
         self.0
             .reactor
             .spawn_spawnable(Spawnable::Spawn(vm), Some(self.0.pool.0.id))
     }
 
+    /// Spawns a task that compiles and executes `source`.
+    ///
+    /// [`Builder::new_vm`] can be used to customize how `source` is compiled
+    /// and what functionality is available in every virtual machine.
+    ///
+    /// This task will execute with a shared budget and will be paused when no
+    /// budget is available in this pool.
     pub fn spawn_source(&self, source: impl Into<String>) -> Result<TaskHandle, ReactorShutdown> {
         self.0.reactor.spawn_spawnable(
             Spawnable::SpawnSource(source.into()),
@@ -1610,6 +1730,14 @@ where
         )
     }
 
+    /// Spawns a task that executes `code` after loading `args` to the virtual
+    /// machine registers.
+    ///
+    /// [`Builder::new_vm`] can be used to customize what functionality is
+    /// available in every virtual machine.
+    ///
+    /// This task will execute with a shared budget and will be paused when no
+    /// budget is available in this pool.
     pub fn spawn_call(
         &self,
         code: Code,
@@ -1620,21 +1748,37 @@ where
             .spawn_spawnable(Spawnable::SpawnCall(code, args), Some(self.0.pool.0.id))
     }
 
+    /// Spawns a task that executes `work`.
+    ///
+    /// This function allows a user-specified type to be spawned and converted
+    /// into a task using the [`WorkUnit`] trait.
+    ///
+    /// [`Builder::new_vm`] can be used to customize the `Work` generic and what
+    /// functionality is available in every virtual machine.
+    ///
+    /// This task will execute with a shared budget and will be paused when no
+    /// budget is available in this pool.
     pub fn spawn_work(&self, work: Work) -> Result<TaskHandle, ReactorShutdown> {
         self.0
             .reactor
             .spawn_spawnable(Spawnable::SpawnWork(work), Some(self.0.pool.0.id))
     }
 
+    /// Adds `amount` to the budget.
+    ///
+    /// This function cannot increase the budget above
+    /// [`BudgetPoolConfig::maximum`].
     pub fn increase_budget(&self, amount: usize) {
         self.0.pool.increase_budget(amount);
     }
 
+    /// Returns the currently remaining budget.
     #[must_use]
     pub fn remaining_budget(&self) -> usize {
         self.0.pool.0.budget.load(Ordering::Relaxed)
     }
 
+    /// Returns a handle to the reactor this pool belongs to.
     #[must_use]
     pub fn reactor(&self) -> &ReactorHandle<Work> {
         &self.0.reactor
@@ -1666,13 +1810,24 @@ impl<Work> Drop for BudgetPoolHandleData<Work> {
     }
 }
 
+/// The settings for a budget pool in a [`Reactor`].
 #[non_exhaustive]
 #[must_use]
 pub struct BudgetPoolConfig {
+    /// The maximum budget this pool can contain.
+    ///
+    /// If this is 0, there is no maximum budget.
     pub maximum: usize,
+    /// Each time a virtual machine runs out of budget, this is the amount of
+    /// budget it should be allocated.
     pub allocation_size: usize,
+    /// When the pool is initialized, this is the initial budget of the pool.
     pub start: usize,
+    /// When `recharge_amount` and `recharge_every` are non-zero, the budget is
+    /// replenished by `recharge_amount` each time `recharge_every` elapses.
     pub recharge_amount: usize,
+    /// When `recharge_amount` and `recharge_every` are non-zero, the budget is
+    /// replenished by `recharge_amount` each time `recharge_every` elapses.
     pub recharge_every: Duration,
 }
 
@@ -1683,6 +1838,7 @@ impl Default for BudgetPoolConfig {
 }
 
 impl BudgetPoolConfig {
+    /// Returns the default budget pool configuration.
     pub const fn new() -> Self {
         Self {
             maximum: 0,
@@ -1693,27 +1849,33 @@ impl BudgetPoolConfig {
         }
     }
 
+    /// Sets the starting budget for this pool.
     pub const fn starting_with(mut self, start: usize) -> Self {
         self.start = start;
         self
     }
 
+    /// Sets the maximum budget for this pool.
     pub const fn with_maximum(mut self, maximum: usize) -> Self {
         self.maximum = maximum;
         self
     }
 
+    /// Sets the amount to allocate for each budget request.
     pub const fn with_per_task_allocation(mut self, allocation_size: usize) -> Self {
         self.allocation_size = allocation_size;
         self
     }
 
+    /// Sets the budget to automatically replenish by `amount` every time
+    /// `recharge_every` elapses.
     pub const fn with_recharge(mut self, amount: usize, recharge_every: Duration) -> Self {
         self.recharge_amount = amount;
         self.recharge_every = recharge_every;
         self
     }
 
+    /// Returns true if this configuration automatically recharges.
     #[must_use]
     pub fn recharges(&self) -> bool {
         self.recharge_every > Duration::ZERO && self.recharge_amount > 0

@@ -22,20 +22,12 @@ use crate::vm::Stack;
 /// A value or a source of a value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ValueOrSource {
-    /// [`Value::Nil`](crate::runtime::value::Value::Nil)
-    Nil,
-    /// [`Value::Nil`](crate::runtime::value::Value::Bool)
-    Bool(bool),
-    /// [`Value::Nil`](crate::runtime::value::Value::Int)
-    Int(i64),
-    /// [`Value::Nil`](crate::runtime::value::Value::UInt)
-    UInt(u64),
-    /// [`Value::Nil`](crate::runtime::value::Value::Float)
-    Float(f64),
-    /// [`Value::Nil`](crate::runtime::value::Value::Symbol)
+    /// [`Value::Primitive`]
+    Primitive(Primitive),
+    /// [`Value::Symbol`]
     Symbol(Symbol),
     /// A regular expression literal. When loaded, it is compiled into a
-    /// [`MuseRegex`](crate::runtime::regex::MuseRegex).
+    /// [`MuseRegex`].
     Regex(RegexLiteral),
     /// A function declaration. When loaded, it becomes a [`Function`].
     Function(BitcodeFunction),
@@ -59,11 +51,7 @@ impl ValueOrSource {
     /// This function does not support loading [`Label`]s.
     pub fn load(&self, vm: &VmContext<'_, '_>) -> Result<Value, Fault> {
         match self {
-            ValueOrSource::Nil => Ok(Value::NIL),
-            ValueOrSource::Bool(v) => Ok(Value::Primitive(Primitive::Bool(*v))),
-            ValueOrSource::Int(v) => Ok(Value::Primitive(Primitive::Int(*v))),
-            ValueOrSource::UInt(v) => Ok(Value::Primitive(Primitive::UInt(*v))),
-            ValueOrSource::Float(v) => Ok(Value::Primitive(Primitive::Float(*v))),
+            ValueOrSource::Primitive(p) => Ok(Value::Primitive(*p)),
             ValueOrSource::Symbol(v) => Ok(Value::Symbol(v.downgrade())),
             ValueOrSource::Regex(v) => MuseRegex::load(v, vm.guard()),
             ValueOrSource::Function(v) => Ok(Value::dynamic(v.to_function(vm.guard()), vm.guard())),
@@ -85,7 +73,7 @@ impl ValueOrSource {
 
 impl From<()> for ValueOrSource {
     fn from(_value: ()) -> Self {
-        Self::Nil
+        Self::Primitive(Primitive::Nil)
     }
 }
 
@@ -100,11 +88,7 @@ impl TryFrom<Literal> for ValueOrSource {
 
     fn try_from(value: Literal) -> Result<Self, Self::Error> {
         match value {
-            Literal::Nil => Ok(ValueOrSource::Nil),
-            Literal::Bool(value) => Ok(ValueOrSource::Bool(value)),
-            Literal::Int(value) => Ok(ValueOrSource::Int(value)),
-            Literal::UInt(value) => Ok(ValueOrSource::UInt(value)),
-            Literal::Float(value) => Ok(ValueOrSource::Float(value)),
+            Literal::Primitive(p) => Ok(ValueOrSource::Primitive(p)),
             Literal::String(value) => Err(value),
             Literal::Symbol(value) => Ok(ValueOrSource::Symbol(value)),
             Literal::Regex(value) => Ok(ValueOrSource::Regex(value)),
@@ -115,7 +99,7 @@ impl TryFrom<Literal> for ValueOrSource {
 impl From<OpDestination> for ValueOrSource {
     fn from(value: OpDestination) -> Self {
         match value {
-            OpDestination::Void => Self::Nil,
+            OpDestination::Void => Self::Primitive(Primitive::Nil),
             OpDestination::Register(dest) => Self::Register(dest),
             OpDestination::Stack(dest) => Self::Stack(dest),
             OpDestination::Label(dest) => Self::Label(dest),
@@ -123,20 +107,20 @@ impl From<OpDestination> for ValueOrSource {
     }
 }
 
-impl_from!(ValueOrSource, i8, Int);
-impl_from!(ValueOrSource, i16, Int);
-impl_from!(ValueOrSource, i32, Int);
-impl_from!(ValueOrSource, i64, Int);
-impl_from!(ValueOrSource, u8, UInt);
-impl_from!(ValueOrSource, u16, UInt);
-impl_from!(ValueOrSource, u32, UInt);
-impl_from!(ValueOrSource, u64, UInt);
-impl_from!(ValueOrSource, f64, Float);
+impl_from_primitive!(ValueOrSource, i8, Int);
+impl_from_primitive!(ValueOrSource, i16, Int);
+impl_from_primitive!(ValueOrSource, i32, Int);
+impl_from_primitive!(ValueOrSource, i64, Int);
+impl_from_primitive!(ValueOrSource, u8, UInt);
+impl_from_primitive!(ValueOrSource, u16, UInt);
+impl_from_primitive!(ValueOrSource, u32, UInt);
+impl_from_primitive!(ValueOrSource, u64, UInt);
+impl_from_primitive!(ValueOrSource, f64, Float);
 impl_from!(ValueOrSource, Symbol, Symbol);
 impl_from!(ValueOrSource, Register, Register);
 impl_from!(ValueOrSource, Stack, Stack);
 impl_from!(ValueOrSource, Label, Label);
-impl_from!(ValueOrSource, bool, Bool);
+impl_from_primitive!(ValueOrSource, bool, Bool);
 impl_from!(ValueOrSource, BitcodeFunction, Function);
 impl_from!(ValueOrSource, RegexLiteral, Regex);
 impl_from!(ValueOrSource, BitcodeStruct, Struct);
@@ -250,12 +234,12 @@ pub enum Op {
     Throw(FaultKind),
 }
 
-/// An IR [`Fault`](crate::vm::Fault).
+/// An IR [`Fault`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Hash)]
 pub enum FaultKind {
     /// Create an exception from the contents of register 0.
     Exception,
-    /// Return a [`Fault::PatternMismatch`](crate::vm::Fault::PatternMismatch).
+    /// Return a [`Fault::PatternMismatch`].
     PatternMismatch,
 }
 
@@ -819,11 +803,7 @@ pub(super) fn trusted_loaded_source_to_value(
     code: &CodeData,
 ) -> ValueOrSource {
     match loaded {
-        LoadedSource::Nil => ValueOrSource::Nil,
-        LoadedSource::Bool(loaded) => ValueOrSource::Bool(*loaded),
-        LoadedSource::Int(loaded) => ValueOrSource::Int(*loaded),
-        LoadedSource::UInt(loaded) => ValueOrSource::UInt(*loaded),
-        LoadedSource::Float(loaded) => ValueOrSource::Float(*loaded),
+        LoadedSource::Primitive(p) => ValueOrSource::Primitive(*p),
         LoadedSource::Symbol(loaded) => ValueOrSource::Symbol(code.symbols[*loaded].clone()),
         LoadedSource::Register(loaded) => ValueOrSource::Register(*loaded),
         LoadedSource::Stack(loaded) => ValueOrSource::Stack(*loaded),

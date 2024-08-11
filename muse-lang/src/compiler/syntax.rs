@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use self::token::{FormatString, FormatStringPart, Paired, RegexLiteral, Token, Tokens};
 use crate::runtime::exception::Exception;
 use crate::runtime::symbol::Symbol;
+use crate::runtime::value::Primitive;
 use crate::vm::{ExecutionError, VmContext};
 
 pub mod token;
@@ -681,7 +682,7 @@ impl Expression {
         let Some(mut expression) = expressions.pop() else {
             return Ranged::new(
                 (SourceId::anonymous(), 0..0),
-                Expression::Literal(Literal::Nil),
+                Expression::Literal(Literal::default()),
             );
         };
 
@@ -713,7 +714,7 @@ impl Expression {
 
 impl Default for Expression {
     fn default() -> Self {
-        Self::Literal(Literal::Nil)
+        Self::Literal(Literal::default())
     }
 }
 
@@ -775,19 +776,9 @@ impl TokenizeRanged for Expression {
 }
 
 /// A literal value.
-#[derive(Default, Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
-    /// The literal `nil`.
-    #[default]
-    Nil,
-    /// A boolean literal.
-    Bool(bool),
-    /// A signed 64-bit integer literal.
-    Int(i64),
-    /// An unsigned 64-bit integer literal.
-    UInt(u64),
-    /// A double-precision floating point number.
-    Float(f64),
+    Primitive(Primitive),
     /// A string literal.
     String(Symbol),
     /// A symbol literal (`:foo`).
@@ -799,17 +790,27 @@ pub enum Literal {
 impl TokenizeRanged for Literal {
     fn tokenize_ranged(&self, range: SourceRange, tokens: &mut VecDeque<Ranged<Token>>) {
         let token = match self {
-            Literal::Nil => Token::Identifier(Symbol::nil_symbol().clone()),
-            Literal::Bool(false) => Token::Identifier(Symbol::false_symbol().clone()),
-            Literal::Bool(true) => Token::Identifier(Symbol::true_symbol().clone()),
-            Literal::Int(value) => Token::Int(*value),
-            Literal::UInt(value) => Token::UInt(*value),
-            Literal::Float(float) => Token::Float(*float),
+            Literal::Primitive(Primitive::Nil) => Token::Identifier(Symbol::nil_symbol().clone()),
+            Literal::Primitive(Primitive::Bool(false)) => {
+                Token::Identifier(Symbol::false_symbol().clone())
+            }
+            Literal::Primitive(Primitive::Bool(true)) => {
+                Token::Identifier(Symbol::true_symbol().clone())
+            }
+            Literal::Primitive(Primitive::Int(value)) => Token::Int(*value),
+            Literal::Primitive(Primitive::UInt(value)) => Token::UInt(*value),
+            Literal::Primitive(Primitive::Float(float)) => Token::Float(*float),
             Literal::String(string) => Token::String(string.clone()),
             Literal::Symbol(symbol) => Token::Symbol(symbol.clone()),
             Literal::Regex(regex) => Token::Regex(regex.clone()),
         };
         tokens.push_back(Ranged::new(range, token));
+    }
+}
+
+impl Default for Literal {
+    fn default() -> Self {
+        Self::Primitive(Primitive::Nil)
     }
 }
 
@@ -1700,7 +1701,7 @@ fn parse_from_reader(
                 Ok(_) | Err(Ranged(ParseError::UnexpectedEof, _)) => {
                     results.push(tokens.ranged(
                         tokens.last_index..tokens.last_index,
-                        Expression::Literal(Literal::Nil),
+                        Expression::Literal(Literal::default()),
                     ));
                     break;
                 }
@@ -2126,7 +2127,7 @@ impl PrefixParselet for Break {
         {
             config.parse_expression(tokens)?
         } else {
-            tokens.ranged(tokens.last_index.., Expression::Literal(Literal::Nil))
+            tokens.ranged(tokens.last_index.., Expression::Literal(Literal::default()))
         };
 
         Ok(tokens.ranged(
@@ -2196,7 +2197,7 @@ impl PrefixParselet for Return {
         {
             config.parse_expression(tokens)?
         } else {
-            tokens.ranged(tokens.last_index.., Expression::Literal(Literal::Nil))
+            tokens.ranged(tokens.last_index.., Expression::Literal(Literal::default()))
         };
 
         Ok(tokens.ranged(
@@ -2359,15 +2360,15 @@ impl PrefixParselet for Term {
         match token.0 {
             Token::Int(value) => Ok(Ranged::new(
                 token.1,
-                Expression::Literal(Literal::Int(value)),
+                Expression::Literal(Literal::Primitive(Primitive::Int(value))),
             )),
             Token::UInt(value) => Ok(Ranged::new(
                 token.1,
-                Expression::Literal(Literal::UInt(value)),
+                Expression::Literal(Literal::Primitive(Primitive::UInt(value))),
             )),
             Token::Float(value) => Ok(Ranged::new(
                 token.1,
-                Expression::Literal(Literal::Float(value)),
+                Expression::Literal(Literal::Primitive(Primitive::Float(value))),
             )),
             Token::String(string) => Ok(Ranged::new(
                 token.1,
@@ -2569,17 +2570,17 @@ macro_rules! impl_prefix_standalone_parselet {
 impl_prefix_standalone_parselet!(
     True,
     Token::Identifier(Symbol::true_symbol().clone()),
-    Expression::Literal(Literal::Bool(true))
+    Expression::Literal(Literal::Primitive(Primitive::Bool(true)))
 );
 impl_prefix_standalone_parselet!(
     False,
     Token::Identifier(Symbol::false_symbol().clone()),
-    Expression::Literal(Literal::Bool(false))
+    Expression::Literal(Literal::Primitive(Primitive::Bool(false)))
 );
 impl_prefix_standalone_parselet!(
     Nil,
     Token::Identifier(Symbol::nil_symbol().clone()),
-    Expression::Literal(Literal::Nil)
+    Expression::Literal(Literal::Primitive(Primitive::Nil))
 );
 
 struct Braces;
@@ -2602,7 +2603,7 @@ fn parse_block(
                                 open_brace.range().source_id,
                                 open_brace.range().end()..close_brace.range().start,
                             ),
-                            Expression::Literal(Literal::Nil),
+                            Expression::Literal(Literal::default()),
                         ),
                         open: open_brace,
                         close: close_brace,
@@ -2686,7 +2687,8 @@ impl Braces {
                 left.range().start..,
                 Expression::Binary(Box::new(BinaryExpression {
                     left,
-                    right: tokens.ranged(tokens.last_index.., Expression::Literal(Literal::Nil)),
+                    right: tokens
+                        .ranged(tokens.last_index.., Expression::Literal(Literal::default())),
                     kind: BinaryKind::Chain,
                     operator: semicolon,
                 })),
@@ -2842,7 +2844,10 @@ impl PrefixParselet for Braces {
         match tokens.peek_token() {
             Some(Token::Close(Paired::Brace)) => {
                 tokens.next_or_eof()?;
-                return Ok(tokens.ranged(open.range().start.., Expression::Literal(Literal::Nil)));
+                return Ok(tokens.ranged(
+                    open.range().start..,
+                    Expression::Literal(Literal::default()),
+                ));
             }
             Some(Token::Char(',')) => {
                 tokens.next_or_eof()?;
@@ -3566,7 +3571,7 @@ impl PrefixParselet for Throw {
         {
             config.parse_expression(tokens)?
         } else {
-            tokens.ranged(tokens.last_index.., Expression::Literal(Literal::Nil))
+            tokens.ranged(tokens.last_index.., Expression::Literal(Literal::default()))
         };
 
         Ok(tokens.ranged(
@@ -4345,18 +4350,21 @@ fn parse_pattern_kind(
         }
         Token::Identifier(name) if name == Symbol::true_symbol() => {
             tokens.next_or_eof()?;
-            Ranged::new(indicator.range(), PatternKind::Literal(Literal::Bool(true)))
+            Ranged::new(
+                indicator.range(),
+                PatternKind::Literal(Literal::Primitive(Primitive::Bool(true))),
+            )
         }
         Token::Identifier(name) if name == Symbol::false_symbol() => {
             tokens.next_or_eof()?;
             Ranged::new(
                 indicator.range(),
-                PatternKind::Literal(Literal::Bool(false)),
+                PatternKind::Literal(Literal::Primitive(Primitive::Bool(false))),
             )
         }
         Token::Identifier(name) if name == Symbol::nil_symbol() => {
             tokens.next_or_eof()?;
-            Ranged::new(indicator.range(), PatternKind::Literal(Literal::Nil))
+            Ranged::new(indicator.range(), PatternKind::Literal(Literal::default()))
         }
         Token::Identifier(name) => {
             tokens.next_or_eof()?;
@@ -4373,21 +4381,21 @@ fn parse_pattern_kind(
             tokens.next_or_eof()?;
             Ranged::new(
                 indicator.range(),
-                PatternKind::Literal(Literal::Int(*value)),
+                PatternKind::Literal(Literal::Primitive(Primitive::Int(*value))),
             )
         }
         Token::UInt(value) => {
             tokens.next_or_eof()?;
             Ranged::new(
                 indicator.range(),
-                PatternKind::Literal(Literal::UInt(*value)),
+                PatternKind::Literal(Literal::Primitive(Primitive::UInt(*value))),
             )
         }
         Token::Float(value) => {
             tokens.next_or_eof()?;
             Ranged::new(
                 indicator.range(),
-                PatternKind::Literal(Literal::Float(*value)),
+                PatternKind::Literal(Literal::Primitive(Primitive::Float(*value))),
             )
         }
         Token::Regex(_) => {
@@ -4601,7 +4609,7 @@ fn parse_variable(
     } else {
         (
             None,
-            tokens.ranged(tokens.last_index.., Expression::Literal(Literal::Nil)),
+            tokens.ranged(tokens.last_index.., Expression::Literal(Literal::default())),
         )
     };
 

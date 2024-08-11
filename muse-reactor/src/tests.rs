@@ -149,7 +149,7 @@ fn task_cancellation() {
     // Spawn a task with an infinite loop
     let task = reactor.spawn_source("loop {}").unwrap();
     // Wait a bit to make sure it's running.
-    assert!(task.try_join_for(Duration::from_secs(1)).is_none());
+    assert!(task.join_for(Duration::from_secs(1)).is_none());
 
     // Cancel the task.
     println!("Cancelling");
@@ -172,7 +172,7 @@ fn pool_cancellation() {
         .unwrap();
     let task = pool.spawn_source("loop {}").unwrap();
     // Wait a bit to make sure it's running.
-    assert!(task.try_join_for(Duration::from_secs(1)).is_none());
+    assert!(task.join_for(Duration::from_secs(1)).is_none());
 
     // Drop the pool, which should cause the task to be cancelled for running
     // out of budget.

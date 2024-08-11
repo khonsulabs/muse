@@ -17,6 +17,7 @@ pub type ValueHasher = ahash::AHasher;
 use kempt::Map;
 use parking_lot::Mutex;
 use refuse::{AnyRef, AnyRoot, CollectionGuard, ContainsNoRefs, MapAs, Ref, Root, Trace};
+use serde::{Deserialize, Serialize};
 
 use crate::runtime::string::MuseString;
 use crate::runtime::symbol::{Symbol, SymbolList, SymbolRef};
@@ -29,7 +30,7 @@ use crate::vm::Function;
 use crate::vm::{Arity, ExecutionError, Fault, VmContext};
 
 /// A primitive virtual machine value.
-#[derive(Default, Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum Primitive {
     /// A value representing nothing.
     #[default]
@@ -840,6 +841,12 @@ impl Primitive {
     }
 }
 
+impl PartialEq for Primitive {
+    fn eq(&self, other: &Self) -> bool {
+        self.equals(other).unwrap_or(false)
+    }
+}
+
 /// A Muse virtual machine value.
 #[derive(Clone, Copy, Debug)]
 pub enum Value {
@@ -1423,14 +1430,11 @@ impl Value {
     #[cfg(feature = "dispatched")]
     pub(crate) fn as_source(&self, guard: &CollectionGuard<'_>) -> ValueOrSource {
         match self {
-            Value::Primitive(Primitive::Nil) => ValueOrSource::Nil,
-            Value::Primitive(Primitive::Bool(value)) => ValueOrSource::Bool(*value),
-            Value::Primitive(Primitive::Int(value)) => ValueOrSource::Int(*value),
-            Value::Primitive(Primitive::UInt(value)) => ValueOrSource::UInt(*value),
-            Value::Primitive(Primitive::Float(value)) => ValueOrSource::Float(*value),
-            Value::Symbol(value) => value
-                .upgrade(guard)
-                .map_or(ValueOrSource::Nil, ValueOrSource::Symbol),
+            Value::Primitive(p) => ValueOrSource::Primitive(*p),
+            Value::Symbol(value) => value.upgrade(guard).map_or(
+                ValueOrSource::Primitive(Primitive::Nil),
+                ValueOrSource::Symbol,
+            ),
             Value::Dynamic(value) => {
                 if let Some(func) = value.downcast_ref::<Function>(guard) {
                     ValueOrSource::Function(BitcodeFunction::from_function(func, guard))
@@ -1502,6 +1506,7 @@ impl_from!(Primitive, u32, UInt);
 impl_from!(Primitive, u64, UInt);
 impl_from!(Primitive, bool, Bool);
 
+#[macro_export]
 macro_rules! impl_from_primitive {
     ($on:ident, $from:ty, $variant:ident) => {
         impl From<$from> for $on {

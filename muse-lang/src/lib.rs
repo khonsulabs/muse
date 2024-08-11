@@ -17,10 +17,11 @@ extern crate tracing;
 #[macro_use]
 mod mock_tracing;
 
+#[macro_use]
+pub mod runtime;
+
 pub mod compiler;
 pub mod vm;
-
-pub mod runtime;
 
 #[cfg(test)]
 mod tests;

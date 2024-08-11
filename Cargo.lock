@@ -2522,9 +2522,9 @@ dependencies = [
 
 [[package]]
 name = "refuse"
-version = "0.0.5"
+version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92d52c239beebd4e207fcaab44b66275da64216b5929f60e2fed60fe91fccba3"
+checksum = "b78bee46da05d3bc659f5f4243942bceaf5e81aebe353c55aff24f3b5f56e865"
 dependencies = [
  "crossbeam-utils",
  "flume",
@@ -2536,9 +2536,9 @@ dependencies = [
 
 [[package]]
 name = "refuse-macros"
-version = "0.0.5"
+version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40ae04ac2ecbcd81a68a7dc68b5c2d189020f8fd0b088a17f31df6438a489e9e"
+checksum = "6ebe8a2c32f31b7b590cf24b6c0ebb49f872038bb721cddfd8c2e0ef1a7fe65e"
 dependencies = [
  "attribute-derive",
  "manyhow 0.11.3",
@@ -2549,12 +2549,13 @@ dependencies = [
 
 [[package]]
 name = "refuse-pool"
-version = "0.0.5"
+version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b14531f83f81dab6956bad25849966415d2e3ac75c0e2ad813a8334b763b1e2b"
+checksum = "8f8df1748d68ba190865a971e2a918d65261cdbc544ee9779699222bdb7950ec"
 dependencies = [
  "ahash",
  "hashbrown",
+ "parking_lot",
  "refuse",
 ]
 

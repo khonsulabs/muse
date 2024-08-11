@@ -44,9 +44,9 @@ use crate::runtime::regex::MuseRegex;
 use crate::runtime::symbol::{IntoOptionSymbol, Symbol, SymbolRef};
 use crate::runtime::types::{BitcodeEnum, BitcodeStruct};
 #[cfg(not(feature = "dispatched"))]
-use crate::runtime::value::{ContextOrGuard, Primitive};
+use crate::runtime::value::ContextOrGuard;
 use crate::runtime::value::{
-    CustomType, Dynamic, Rooted, RustType, StaticRustFunctionTable, Value,
+    CustomType, Dynamic, Primitive, Rooted, RustType, StaticRustFunctionTable, Value,
 };
 
 pub mod bitcode;
@@ -945,6 +945,7 @@ impl<'context, 'guard> VmContext<'context, 'guard> {
             Ordering::Equal => return Ok(StepResult::Complete),
             Ordering::Greater => return Err(Fault::InvalidInstructionAddress),
         };
+        trace!("Executing {instruction:?}");
         let next_instruction = StepResult::from(address.checked_add(1));
         match instruction.execute(self) {
             Ok(ControlFlow::Continue(())) | Err(Fault::FrameChanged) => Ok(next_instruction),
@@ -1911,11 +1912,7 @@ impl VmContext<'_, '_> {
 
     fn op_load(&mut self, code_index: usize, value: LoadedSource) -> Result<Value, Fault> {
         match value {
-            LoadedSource::Nil => Ok(Value::NIL),
-            LoadedSource::Bool(v) => Ok(Value::Primitive(Primitive::Bool(v))),
-            LoadedSource::Int(v) => Ok(Value::Primitive(Primitive::Int(v))),
-            LoadedSource::UInt(v) => Ok(Value::Primitive(Primitive::UInt(v))),
-            LoadedSource::Float(v) => Ok(Value::Primitive(Primitive::Float(v))),
+            LoadedSource::Primitive(p) => Ok(Value::Primitive(p)),
             LoadedSource::Symbol(v) => self.op_load_symbol(code_index, v).map(Value::Symbol),
             LoadedSource::Register(v) => Ok(self[v]),
             LoadedSource::Stack(v) => self
@@ -2160,7 +2157,7 @@ pub enum Fault {
     IncorrectNumberOfArguments,
     /// A pattern could not be matched.
     PatternMismatch,
-    /// An unsupported operation was performed on [`Value::Nil`].
+    /// An unsupported operation was performed on [`Value::NIL`].
     OperationOnNil,
     /// A value was freed.
     ///
@@ -2606,12 +2603,7 @@ impl CodeData {
 
     fn load_source(&mut self, source: &ValueOrSource, guard: &CollectionGuard) -> LoadedSource {
         match source {
-            ValueOrSource::Nil => LoadedSource::Nil,
-            ValueOrSource::Bool(bool) => LoadedSource::Bool(*bool),
-
-            ValueOrSource::Int(int) => LoadedSource::Int(*int),
-            ValueOrSource::UInt(uint) => LoadedSource::UInt(*uint),
-            ValueOrSource::Float(float) => LoadedSource::Float(*float),
+            ValueOrSource::Primitive(p) => LoadedSource::Primitive(*p),
             ValueOrSource::Symbol(sym) => LoadedSource::Symbol(self.push_symbol(sym.clone())),
             ValueOrSource::Regex(regex) => LoadedSource::Regex(self.push_regex(regex, guard)),
             ValueOrSource::Register(reg) => LoadedSource::Register(*reg),
@@ -3039,11 +3031,7 @@ impl LoadedBinary {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum LoadedSource {
-    Nil,
-    Bool(bool),
-    Int(i64),
-    UInt(u64),
-    Float(f64),
+    Primitive(Primitive),
     Symbol(usize),
     Register(Register),
     Function(usize),

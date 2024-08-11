@@ -24,6 +24,7 @@ use syntax::{
 use self::syntax::StructureMember;
 use crate::runtime::symbol::Symbol;
 use crate::runtime::types::{self, BitcodeEnum, BitcodeStruct};
+use crate::runtime::value::Primitive;
 use crate::vm::bitcode::{
     Access, Accessable, BinaryKind, BitcodeBlock, BitcodeFunction, FaultKind, Label, Op,
     OpDestination, ValueOrSource,
@@ -157,7 +158,7 @@ impl Compiler {
             Err(err) => {
                 let range = err.range();
                 self.errors.push(err.map(Error::SigilSyntax));
-                Ranged::new(range, Expression::Literal(Literal::Nil))
+                Ranged::new(range, Expression::Literal(Literal::default()))
             }
         }
     }
@@ -877,7 +878,7 @@ impl<'a> Scope<'a> {
                 for (variant, value) in e.variants.enclosed.iter().zip(0..) {
                     variants.push(types::EnumVariant {
                         name: variant.name.0.clone(),
-                        value: ValueOrSource::UInt(value),
+                        value: ValueOrSource::Primitive(Primitive::UInt(value)),
                     });
                 }
 
@@ -991,11 +992,11 @@ impl<'a> Scope<'a> {
 
     fn compile_literal(&mut self, literal: &Literal, dest: OpDestination) {
         match literal {
-            Literal::Nil => self.compiler.code.copy((), dest),
-            Literal::Bool(bool) => self.compiler.code.copy(*bool, dest),
-            Literal::Int(int) => self.compiler.code.copy(*int, dest),
-            Literal::UInt(int) => self.compiler.code.copy(*int, dest),
-            Literal::Float(float) => self.compiler.code.copy(*float, dest),
+            Literal::Primitive(Primitive::Nil) => self.compiler.code.copy((), dest),
+            Literal::Primitive(Primitive::Bool(bool)) => self.compiler.code.copy(*bool, dest),
+            Literal::Primitive(Primitive::Int(int)) => self.compiler.code.copy(*int, dest),
+            Literal::Primitive(Primitive::UInt(int)) => self.compiler.code.copy(*int, dest),
+            Literal::Primitive(Primitive::Float(float)) => self.compiler.code.copy(*float, dest),
             Literal::String(string) => {
                 self.compiler.code.copy(string.clone(), Register(0));
                 self.compiler.code.call(Symbol::from("$.core.String"), 1);
@@ -1369,11 +1370,19 @@ impl<'a> Scope<'a> {
                 for entry in &entries.enclosed {
                     self.compiler.code.set_current_source_range(pattern.range());
                     let key = match &entry.key.0 {
-                        EntryKeyPattern::Nil => ValueOrSource::Nil,
-                        EntryKeyPattern::Bool(value) => ValueOrSource::Bool(*value),
-                        EntryKeyPattern::Int(value) => ValueOrSource::Int(*value),
-                        EntryKeyPattern::UInt(value) => ValueOrSource::UInt(*value),
-                        EntryKeyPattern::Float(value) => ValueOrSource::Float(*value),
+                        EntryKeyPattern::Nil => ValueOrSource::Primitive(Primitive::Nil),
+                        EntryKeyPattern::Bool(value) => {
+                            ValueOrSource::Primitive(Primitive::Bool(*value))
+                        }
+                        EntryKeyPattern::Int(value) => {
+                            ValueOrSource::Primitive(Primitive::Int(*value))
+                        }
+                        EntryKeyPattern::UInt(value) => {
+                            ValueOrSource::Primitive(Primitive::UInt(*value))
+                        }
+                        EntryKeyPattern::Float(value) => {
+                            ValueOrSource::Primitive(Primitive::Float(*value))
+                        }
                         EntryKeyPattern::String(value) => {
                             self.compiler.code.copy(value.clone(), Register(0));
                             self.compiler.code.call(Symbol::from("$.core.String"), 1);
@@ -2276,11 +2285,7 @@ impl<'a> Scope<'a> {
     fn compile_source(&mut self, source: &Ranged<Expression>) -> ValueOrSource {
         match &source.0 {
             Expression::Literal(literal) => match literal {
-                Literal::Nil => ValueOrSource::Nil,
-                Literal::Bool(bool) => ValueOrSource::Bool(*bool),
-                Literal::Int(int) => ValueOrSource::Int(*int),
-                Literal::UInt(int) => ValueOrSource::UInt(*int),
-                Literal::Float(float) => ValueOrSource::Float(*float),
+                Literal::Primitive(p) => ValueOrSource::Primitive(*p),
                 Literal::Regex(regex) => ValueOrSource::Regex(regex.clone()),
                 Literal::String(_) => {
                     ValueOrSource::Stack(self.compile_expression_into_temporary(source))
@@ -2324,7 +2329,7 @@ impl<'a> Scope<'a> {
             }
             Expression::Macro(_) | Expression::InfixMacro(_) => {
                 // unreachable!("macros should be expanded already")
-                ValueOrSource::Nil
+                ValueOrSource::Primitive(Primitive::Nil)
             }
         }
     }
@@ -2357,7 +2362,7 @@ impl<'a> Scope<'a> {
                     .as_ref()
                     .map_or(false, |f| f == &lookup.name.0) =>
             {
-                ValueOrSource::Nil
+                ValueOrSource::Primitive(Primitive::Nil)
             }
             Expression::Lookup(lookup) if lookup.base.is_some() => {
                 let base = lookup.base.as_ref().expect("just matched");

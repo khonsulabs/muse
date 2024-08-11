@@ -960,7 +960,7 @@ impl Source for () {
     }
 
     fn as_source(&self, _guard: &CollectionGuard<'_>) -> ValueOrSource {
-        ValueOrSource::Nil
+        ValueOrSource::Primitive(Primitive::Nil)
     }
 }
 
@@ -970,7 +970,7 @@ impl Source for bool {
     }
 
     fn as_source(&self, _guard: &CollectionGuard<'_>) -> ValueOrSource {
-        ValueOrSource::Bool(*self)
+        ValueOrSource::Primitive(Primitive::Bool(*self))
     }
 }
 
@@ -980,7 +980,7 @@ impl Source for i64 {
     }
 
     fn as_source(&self, _guard: &CollectionGuard<'_>) -> ValueOrSource {
-        ValueOrSource::Int(*self)
+        ValueOrSource::Primitive(Primitive::Int(*self))
     }
 }
 
@@ -990,7 +990,7 @@ impl Source for u64 {
     }
 
     fn as_source(&self, _guard: &CollectionGuard<'_>) -> ValueOrSource {
-        ValueOrSource::UInt(*self)
+        ValueOrSource::Primitive(Primitive::UInt(*self))
     }
 }
 
@@ -1000,7 +1000,7 @@ impl Source for f64 {
     }
 
     fn as_source(&self, _guard: &CollectionGuard<'_>) -> ValueOrSource {
-        ValueOrSource::Float(*self)
+        ValueOrSource::Primitive(Primitive::Float(*self))
     }
 }
 
@@ -1163,11 +1163,11 @@ impl Destination for Label {
 macro_rules! decode_source {
     ($decode:expr, $source:expr, $code:ident, $guard:ident, $next_fn:ident $(, $($arg:tt)*)?) => {{
         match $decode {
-            ValueOrSource::Nil => $next_fn($source, $code, $guard $(, $($arg)*)?, ()),
-            ValueOrSource::Bool(source) => $next_fn($source, $code, $guard $(, $($arg)*)?, *source),
-            ValueOrSource::Int(source) => $next_fn($source, $code, $guard $(, $($arg)*)?, *source),
-            ValueOrSource::UInt(source) => $next_fn($source, $code, $guard $(, $($arg)*)?, *source),
-            ValueOrSource::Float(source) => $next_fn($source, $code, $guard $(, $($arg)*)?, *source),
+            ValueOrSource::Primitive(Primitive::Nil) => $next_fn($source, $code, $guard $(, $($arg)*)?, ()),
+            ValueOrSource::Primitive(Primitive::Bool(source)) => $next_fn($source, $code, $guard $(, $($arg)*)?, *source),
+            ValueOrSource::Primitive(Primitive::Int(source)) => $next_fn($source, $code, $guard $(, $($arg)*)?, *source),
+            ValueOrSource::Primitive(Primitive::UInt(source)) => $next_fn($source, $code, $guard $(, $($arg)*)?, *source),
+            ValueOrSource::Primitive(Primitive::Float(source)) => $next_fn($source, $code, $guard $(, $($arg)*)?, *source),
             ValueOrSource::Regex(source) => $next_fn($source, $code, $guard $(, $($arg)*)?, precompiled_regex(source, $guard)),
             ValueOrSource::Symbol(source) => $next_fn($source, $code, $guard $(, $($arg)*)?, source.clone()),
             ValueOrSource::Function(source) => $next_fn($source, $code, $guard $(, $($arg)*)?, source.to_function($guard)),
@@ -1233,6 +1233,7 @@ decode_sd_simple!(match_negate, compile_negate, Negate);
 
 decode_sd!(match_declare_function, compile_declare_function, name: &Symbol, mutable: bool, access: Access);
 
+#[allow(clippy::too_many_arguments)]
 fn compile_declare_function<Value, Dest>(
     _dest: &OpDestination,
     code: &mut CodeData,
@@ -1541,7 +1542,7 @@ where
                     parent: Some(parent),
                     ..Module::default()
                 },
-                &mut *context.guard,
+                context.guard,
             ));
             vm.frames[vm.current_frame].module = ModuleId(module_index.get());
             vm.frames[executing_frame].loading_module = Some(module_index);
